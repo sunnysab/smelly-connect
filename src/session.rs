@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::io::duplex;
 
 use crate::config::EasyConnectConfig;
-use crate::error::{Error, ProxyError, RouteError, TransportError};
+use crate::error::{Error, IntegrationError, ProxyError, RouteError, TransportError};
 use crate::proxy::http::HttpProxyHandle;
 use crate::resolver::SessionResolver;
 use crate::resource::{DomainRule, IpRule, ResourceSet};
@@ -64,6 +64,24 @@ impl EasyConnectSession {
             .map_err(|err| Error::Proxy(ProxyError::BindFailed(err.to_string())))
     }
 
+    pub async fn reqwest_client(&self) -> Result<reqwest::Client, Error> {
+        let handle = self
+            .start_http_proxy("127.0.0.1:0".parse().unwrap())
+            .await?;
+        let client = reqwest::Client::builder()
+            .proxy(
+                reqwest::Proxy::all(format!("http://{}", handle.local_addr())).map_err(|err| {
+                    Error::Integration(IntegrationError::ClientBuildFailed(err.to_string()))
+                })?,
+            )
+            .build()
+            .map_err(|err| {
+                Error::Integration(IntegrationError::ClientBuildFailed(err.to_string()))
+            })?;
+        std::mem::forget(handle);
+        Ok(client)
+    }
+
     pub async fn plan_tcp_connect<T>(&self, target: T) -> Result<RoutePlan, Error>
     where
         T: Into<TargetAddr>,
@@ -98,7 +116,10 @@ impl EasyConnectSession {
             return Err(Error::Route(RouteError::TargetNotAllowed));
         }
 
-        Ok(RoutePlan::VpnResolved(SocketAddr::new(IpAddr::V4(ip), port)))
+        Ok(RoutePlan::VpnResolved(SocketAddr::new(
+            IpAddr::V4(ip),
+            port,
+        )))
     }
 }
 

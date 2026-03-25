@@ -11,4 +11,5 @@ path = "src/lib.rs"
 rsa = "0.9"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "io-util", "net"] }
 hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 roxmltree = "0.20"

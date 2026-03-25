@@ -34,9 +34,8 @@ pub mod tests {
 
         pub async fn connect_tunnel(&self, target: &str) -> Result<(), Box<dyn std::error::Error>> {
             let mut client = TcpStream::connect(self.proxy_addr).await?;
-            let request = format!(
-                "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n"
-            );
+            let request =
+                format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n");
             client.write_all(request.as_bytes()).await?;
 
             let mut header = vec![0_u8; 128];
@@ -98,7 +97,10 @@ pub mod tests {
         addr
     }
 
-    fn proxy_ready_session(http_upstream: SocketAddr, tunnel_upstream: SocketAddr) -> EasyConnectSession {
+    fn proxy_ready_session(
+        http_upstream: SocketAddr,
+        tunnel_upstream: SocketAddr,
+    ) -> EasyConnectSession {
         let http_host = "intranet.zju.edu.cn";
         let tunnel_host = "libdb.zju.edu.cn";
         let resolved_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);

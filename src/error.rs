@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Bootstrap(BootstrapError),
+    Integration(IntegrationError),
     Proxy(ProxyError),
     Resolve(ResolveError),
     Route(RouteError),
@@ -47,6 +48,11 @@ pub enum TransportError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxyError {
     BindFailed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrationError {
+    ClientBuildFailed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

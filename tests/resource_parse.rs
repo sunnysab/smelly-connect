@@ -5,7 +5,11 @@ fn parses_domain_and_ip_resources() {
     assert!(parsed.domain_rules.contains_key("zju.edu.cn"));
     assert!(!parsed.ip_rules.is_empty());
     assert_eq!(
-        parsed.static_dns.get("libdb.zju.edu.cn").unwrap().to_string(),
+        parsed
+            .static_dns
+            .get("libdb.zju.edu.cn")
+            .unwrap()
+            .to_string(),
         "10.0.0.8"
     );
 }

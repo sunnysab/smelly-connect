@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod integration;
 pub mod protocol;
 pub mod proxy;
 pub mod resolver;

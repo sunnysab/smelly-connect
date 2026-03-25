@@ -73,7 +73,16 @@ async fn handle_client(session: EasyConnectSession, mut client: TcpStream) -> io
         return handle_connect(session, client, target, leftover).await;
     }
 
-    handle_forward(session, client, method, target, version, lines.collect(), leftover).await
+    handle_forward(
+        session,
+        client,
+        method,
+        target,
+        version,
+        lines.collect(),
+        leftover,
+    )
+    .await
 }
 
 async fn handle_connect(
@@ -83,10 +92,7 @@ async fn handle_connect(
     leftover: Vec<u8>,
 ) -> io::Result<()> {
     let (host, port) = split_host_port(target, 443)?;
-    let mut upstream = session
-        .connect_tcp((host, port))
-        .await
-        .map_err(other_io)?;
+    let mut upstream = session.connect_tcp((host, port)).await.map_err(other_io)?;
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
@@ -135,7 +141,10 @@ async fn read_headers(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> io::Resul
     loop {
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed",
+            ));
         }
         buffer.extend_from_slice(&chunk[..n]);
         if let Some(index) = find_header_end(buffer) {

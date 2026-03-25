@@ -10,5 +10,8 @@ async fn proxy_forwards_http_requests_through_session() {
 #[tokio::test]
 async fn proxy_supports_https_connect() {
     let harness = smelly_connect::proxy::tests::http_proxy_harness().await;
-    harness.connect_tunnel("libdb.zju.edu.cn:443").await.unwrap();
+    harness
+        .connect_tunnel("libdb.zju.edu.cn:443")
+        .await
+        .unwrap();
 }
