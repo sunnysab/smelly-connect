@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod protocol;
+pub mod proxy;
 pub mod resolver;
 pub mod resource;
 pub mod session;

@@ -49,9 +49,9 @@ pub mod tests {
     }
 
     pub fn stack_harness() -> StackHarness {
-        let stack = TransportStack::new(|_| {
+        let stack = TransportStack::new(|_| async {
             let (client, _server) = duplex(1024);
-            Ok(client)
+            Ok(crate::transport::VpnStream::new(client))
         });
         StackHarness { stack }
     }

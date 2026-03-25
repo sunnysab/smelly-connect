@@ -5,7 +5,8 @@ use std::sync::Arc;
 use tokio::io::duplex;
 
 use crate::config::EasyConnectConfig;
-use crate::error::{Error, RouteError, TransportError};
+use crate::error::{Error, ProxyError, RouteError, TransportError};
+use crate::proxy::http::HttpProxyHandle;
 use crate::resolver::SessionResolver;
 use crate::resource::{DomainRule, IpRule, ResourceSet};
 use crate::target::TargetAddr;
@@ -16,6 +17,7 @@ pub enum RoutePlan {
     VpnResolved(SocketAddr),
 }
 
+#[derive(Clone)]
 pub struct EasyConnectSession {
     client_ip: Ipv4Addr,
     resources: ResourceSet,
@@ -54,6 +56,12 @@ impl EasyConnectSession {
                 .await
                 .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string()))),
         }
+    }
+
+    pub async fn start_http_proxy(&self, bind: SocketAddr) -> Result<HttpProxyHandle, Error> {
+        crate::proxy::http::start_http_proxy(self.clone(), bind)
+            .await
+            .map_err(|err| Error::Proxy(ProxyError::BindFailed(err.to_string())))
     }
 
     pub async fn plan_tcp_connect<T>(&self, target: T) -> Result<RoutePlan, Error>
@@ -170,9 +178,9 @@ pub mod tests {
     }
 
     fn ready_transport() -> TransportStack {
-        TransportStack::new(|_| {
+        TransportStack::new(|_| async {
             let (client, _server) = duplex(1024);
-            Ok(client)
+            Ok(VpnStream::new(client))
         })
     }
 }
