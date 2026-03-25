@@ -166,6 +166,12 @@ pub async fn serve_http(listen: String, pool: SessionPool) -> Result<(), String>
     let listener = TcpListener::bind(listen)
         .await
         .map_err(|err| err.to_string())?;
+    let local_addr = listener.local_addr().map_err(|err| err.to_string())?;
+    tracing::info!(
+        protocol = tracing::field::display("http"),
+        listen = %local_addr,
+        "http proxy listening"
+    );
     loop {
         let (stream, _) = listener.accept().await.map_err(|err| err.to_string())?;
         let pool = pool.clone();
@@ -228,6 +234,10 @@ where
     let account_name = match pool.next_account_name().await {
         Ok(name) => name,
         Err(_) => {
+            tracing::warn!(
+                protocol = tracing::field::display("http"),
+                "no ready session"
+            );
             client
                 .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .await
@@ -237,8 +247,21 @@ where
     };
 
     if method.eq_ignore_ascii_case("CONNECT") {
+        tracing::info!(
+            protocol = tracing::field::display("connect"),
+            target = %target,
+            account = %account_name,
+            "request accepted"
+        );
         return handle_connect(account_name, connector, client, target, leftover).await;
     }
+
+    tracing::info!(
+        protocol = tracing::field::display("http"),
+        target = %target,
+        account = %account_name,
+        "request accepted"
+    );
 
     handle_forward(
         account_name,
@@ -275,6 +298,10 @@ async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<
     let (account_name, session) = match pool.next_live_session().await {
         Ok(ready) => ready,
         Err(_) => {
+            tracing::warn!(
+                protocol = tracing::field::display("http"),
+                "no ready session"
+            );
             client
                 .write_all(
                     b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -286,6 +313,12 @@ async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<
     };
 
     if method.eq_ignore_ascii_case("CONNECT") {
+        tracing::info!(
+            protocol = tracing::field::display("connect"),
+            target = %target,
+            account = %account_name,
+            "request accepted"
+        );
         let (host, port) = split_host_port(target, 443)?;
         let mut upstream = session
             .connect_tcp((host, port))
@@ -306,6 +339,13 @@ async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<
             .map_err(|err| err.to_string())?;
         return Ok(());
     }
+
+    tracing::info!(
+        protocol = tracing::field::display("http"),
+        target = %target,
+        account = %account_name,
+        "request accepted"
+    );
 
     let (host, port, path) = parse_absolute_target(target)?;
     let mut upstream = session

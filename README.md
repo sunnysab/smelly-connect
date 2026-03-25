@@ -118,6 +118,11 @@ listen = "127.0.0.1:8080"
 [proxy.socks5]
 enabled = true
 listen = "127.0.0.1:1080"
+
+[logging]
+mode = "stdout"
+level = "info"
+file = "smelly-connect.log"
 ```
 
 当前 CLI 命令面：
@@ -141,6 +146,19 @@ smelly-connect-cli --config ./config.toml test http http://intranet.zju.edu.cn/h
 - `smelly-connect` 库本身不依赖 `.env` / `dotenv`
 - `smelly-connect-cli` 走 `config.toml`
 - `smelly-connect` 下的 examples 仍然使用显式环境变量，便于快速手工调试
+
+日志配置：
+
+- `mode = "stdout"`
+  只向终端输出文本日志
+- `mode = "file"`
+  只追加写入日志文件
+- `mode = "stdout+file"`
+  同时写终端和日志文件
+- `mode = "off"`
+  关闭 tracing 运营日志；致命错误仍可能直接输出到 `stderr`
+
+第一版只支持文本日志，不做轮转；文件写入采用追加模式。
 
 ## 环境变量
 

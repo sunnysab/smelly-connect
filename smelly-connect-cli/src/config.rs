@@ -65,10 +65,11 @@ impl Default for LoggingConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LoggingMode {
     #[serde(rename = "stdout")]
+    #[default]
     Stdout,
     #[serde(rename = "file")]
     File,
@@ -89,17 +90,12 @@ impl LoggingMode {
     }
 }
 
-impl Default for LoggingMode {
-    fn default() -> Self {
-        Self::Stdout
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LoggingLevel {
     Error,
     Warn,
+    #[default]
     Info,
     Debug,
 }
@@ -112,12 +108,6 @@ impl LoggingLevel {
             Self::Info => "info",
             Self::Debug => "debug",
         }
-    }
-}
-
-impl Default for LoggingLevel {
-    fn default() -> Self {
-        Self::Info
     }
 }
 

@@ -17,6 +17,10 @@ pub struct LoggingGuard {
     _file_guard: Option<WorkerGuard>,
 }
 
+pub fn emit_fatal_stderr(message: &str) {
+    eprintln!("ERROR smelly_connect_cli {message}");
+}
+
 pub fn init_logging(cfg: &LoggingConfig) -> Result<LoggingGuard, String> {
     let (writer, guard) = build_writer(cfg)?;
     let subscriber = tracing_subscriber::registry().with(
@@ -43,10 +47,14 @@ pub fn init_for_test(mode: &str, level: &str, file: Option<&str>) -> Result<(), 
 }
 
 pub fn capture_level_filter_for_test(level: &str) -> Vec<String> {
-    capture_lines(parse_mode("stdout").unwrap(), parse_level(level).unwrap(), || {
-        tracing::info!(target: "smelly_connect_cli::logging_test", "suppressed maybe");
-        tracing::error!(target: "smelly_connect_cli::logging_test", "always visible");
-    })
+    capture_lines(
+        parse_mode("stdout").unwrap(),
+        parse_level(level).unwrap(),
+        || {
+            tracing::info!(target: "smelly_connect_cli::logging_test", "suppressed maybe");
+            tracing::error!(target: "smelly_connect_cli::logging_test", "always visible");
+        },
+    )
 }
 
 pub fn capture_one_info_line_for_test() -> String {
@@ -56,6 +64,52 @@ pub fn capture_one_info_line_for_test() -> String {
     .into_iter()
     .find(|line| line.contains(" INFO "))
     .unwrap_or_default()
+}
+
+pub fn capture_pool_events_for_test() -> Vec<String> {
+    capture_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, || {
+        tracing::info!(configured = 2, prewarm = 1, "pool prewarm start");
+        tracing::info!(account = "acct-01", "account ready");
+        tracing::info!(configured = 2, ready = 1, "pool startup summary");
+    })
+}
+
+pub fn capture_http_request_log_for_test() -> Vec<String> {
+    capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
+        let _ = crate::proxy::http::proxy_http_for_test().await;
+    })
+}
+
+pub fn capture_http_connect_log_for_test() -> Vec<String> {
+    capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
+        let _ = crate::proxy::http::proxy_connect_for_test().await;
+    })
+}
+
+pub fn capture_socks5_request_log_for_test() -> Vec<String> {
+    capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
+        let _ = crate::proxy::socks5::proxy_socks5_for_test().await;
+    })
+}
+
+pub fn capture_no_ready_session_warn_for_test() -> Vec<String> {
+    capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Warn, async {
+        let _ = crate::proxy::http::proxy_http_no_ready_session_for_test().await;
+    })
+}
+
+pub fn capture_config_load_error_for_test(path: &str) -> Vec<String> {
+    capture_lines(parse_mode("stdout").unwrap(), LoggingLevel::Error, || {
+        if let Err(err) = crate::config::load(path) {
+            tracing::error!(error = %err, path, "configuration load failed");
+        }
+    })
+}
+
+pub fn capture_invalid_logging_config_error_for_test() -> Vec<String> {
+    capture_lines(parse_mode("stdout").unwrap(), LoggingLevel::Error, || {
+        tracing::error!("invalid logging config");
+    })
 }
 
 fn capture_lines<F>(mode: LoggingMode, level: LoggingLevel, emit: F) -> Vec<String>
@@ -83,6 +137,19 @@ where
     capture.lines()
 }
 
+fn capture_async_lines<Fut>(mode: LoggingMode, level: LoggingLevel, emit: Fut) -> Vec<String>
+where
+    Fut: std::future::Future<Output = ()>,
+{
+    capture_lines(mode, level, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        rt.block_on(emit);
+    })
+}
+
 fn build_writer(cfg: &LoggingConfig) -> Result<(BoxMakeWriter, Option<WorkerGuard>), String> {
     match cfg.mode {
         LoggingMode::Off => Ok((BoxMakeWriter::new(io::sink), None)),
@@ -107,7 +174,9 @@ fn build_writer(cfg: &LoggingConfig) -> Result<(BoxMakeWriter, Option<WorkerGuar
     }
 }
 
-fn open_file_writer(path: impl AsRef<Path>) -> Result<(tracing_appender::non_blocking::NonBlocking, WorkerGuard), String> {
+fn open_file_writer(
+    path: impl AsRef<Path>,
+) -> Result<(tracing_appender::non_blocking::NonBlocking, WorkerGuard), String> {
     let file = OpenOptions::new()
         .create(true)
         .append(true)

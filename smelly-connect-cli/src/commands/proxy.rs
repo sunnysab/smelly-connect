@@ -9,6 +9,13 @@ pub async fn run_proxy(
     let pool = crate::pool::SessionPool::from_config(&config)
         .await
         .map_err(|err| err.to_string())?;
+    let ready = pool.ready_count().await;
+    tracing::info!(
+        ready,
+        http_enabled = config.proxy.http.enabled,
+        socks5_enabled = config.proxy.socks5.enabled,
+        "starting proxy service"
+    );
 
     let mut tasks = Vec::new();
     if config.proxy.http.enabled {

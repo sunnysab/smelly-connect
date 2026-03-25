@@ -92,11 +92,13 @@ impl SessionPool {
         for idx in 0..total {
             let name = format!("acct-{:02}", idx + 1);
             let state = if idx < prewarm {
-                AccountState::Ready(PooledSession {
-                    account_name: name.clone(),
-                    session: None,
-                }
-                .into())
+                AccountState::Ready(
+                    PooledSession {
+                        account_name: name.clone(),
+                        session: None,
+                    }
+                    .into(),
+                )
             } else {
                 AccountState::Configured(AccountConfig {
                     name: name.clone(),
@@ -122,11 +124,13 @@ impl SessionPool {
             .into_iter()
             .map(|name| AccountNode {
                 name: name.to_string(),
-                state: AccountState::Ready(PooledSession {
-                    account_name: name.to_string(),
-                    session: None,
-                }
-                .into()),
+                state: AccountState::Ready(
+                    PooledSession {
+                        account_name: name.to_string(),
+                        session: None,
+                    }
+                    .into(),
+                ),
                 flaky_retry: false,
             })
             .collect();
@@ -146,11 +150,13 @@ impl SessionPool {
             let (name, state) = match outcome {
                 Ok(name) if idx < prewarm => (
                     name.to_string(),
-                    AccountState::Ready(PooledSession {
-                        account_name: name.to_string(),
-                        session: None,
-                    }
-                    .into()),
+                    AccountState::Ready(
+                        PooledSession {
+                            account_name: name.to_string(),
+                            session: None,
+                        }
+                        .into(),
+                    ),
                 ),
                 Ok(name) => (
                     name.to_string(),
@@ -203,11 +209,13 @@ impl SessionPool {
             inner: Arc::new(Mutex::new(PoolState {
                 nodes: vec![AccountNode {
                     name: "acct-01".to_string(),
-                    state: AccountState::Ready(PooledSession {
-                        account_name: "acct-01".to_string(),
-                        session: None,
-                    }
-                    .into()),
+                    state: AccountState::Ready(
+                        PooledSession {
+                            account_name: "acct-01".to_string(),
+                            session: None,
+                        }
+                        .into(),
+                    ),
                     flaky_retry: true,
                 }],
                 cursor: 0,
@@ -218,6 +226,11 @@ impl SessionPool {
     }
 
     pub async fn from_config(cfg: &AppConfig) -> Result<Self, PoolError> {
+        tracing::info!(
+            accounts = cfg.accounts.len(),
+            prewarm = cfg.pool.prewarm,
+            "pool prewarm start"
+        );
         let mut nodes = Vec::new();
         for account in &cfg.accounts {
             nodes.push(AccountNode {
@@ -234,7 +247,14 @@ impl SessionPool {
         };
 
         pool.prewarm(cfg.pool.prewarm).await;
-        if pool.ready_count().await == 0 {
+        let ready = pool.ready_count().await;
+        tracing::info!(
+            configured = cfg.accounts.len(),
+            ready,
+            "pool startup summary"
+        );
+        if ready == 0 {
+            tracing::error!("no ready session after prewarm");
             return Err(PoolError::new("no ready session after prewarm"));
         }
         Ok(pool)
@@ -281,11 +301,13 @@ impl SessionPool {
             .iter_mut()
             .find(|node| matches!(node.state, AccountState::Configured(_)))
         {
-            node.state = AccountState::Ready(PooledSession {
-                account_name: node.name.clone(),
-                session: None,
-            }
-            .into());
+            node.state = AccountState::Ready(
+                PooledSession {
+                    account_name: node.name.clone(),
+                    session: None,
+                }
+                .into(),
+            );
             return Ok(());
         }
         Err(PoolError::new("no configurable account remaining"))
@@ -305,6 +327,7 @@ impl SessionPool {
                 node.state = AccountState::Failed(AccountFailure {
                     message: "forced failure".to_string(),
                 });
+                tracing::warn!(account = %name, "account forced into failed state");
                 should_retry = flaky_retry.then_some(name);
             }
         }
@@ -313,14 +336,18 @@ impl SessionPool {
             let inner = Arc::clone(&self.inner);
             let retry_delay = self.retry_delay;
             tokio::spawn(async move {
+                tracing::warn!(account = %name, delay_ms = retry_delay.as_millis(), "retrying account after fixed-delay backoff");
                 tokio::time::sleep(retry_delay).await;
                 let mut state = inner.lock().await;
                 if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
-                    node.state = AccountState::Ready(PooledSession {
-                        account_name: node.name.clone(),
-                        session: None,
-                    }
-                    .into());
+                    node.state = AccountState::Ready(
+                        PooledSession {
+                            account_name: node.name.clone(),
+                            session: None,
+                        }
+                        .into(),
+                    );
+                    tracing::info!(account = %node.name, "account ready");
                 }
             });
         }
@@ -399,11 +426,14 @@ impl SessionPool {
             Ok(session) => {
                 let mut state = self.inner.lock().await;
                 if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
-                    node.state = AccountState::Ready(PooledSession {
-                        account_name: account.name.clone(),
-                        session: Some(session),
-                    }
-                    .into());
+                    node.state = AccountState::Ready(
+                        PooledSession {
+                            account_name: account.name.clone(),
+                            session: Some(session),
+                        }
+                        .into(),
+                    );
+                    tracing::info!(account = %account.name, "account ready");
                 }
                 Ok(())
             }
@@ -414,6 +444,7 @@ impl SessionPool {
                         message: err.to_string(),
                     });
                 }
+                tracing::warn!(account = %account.name, error = %err, "account prewarm failed");
                 Err(err)
             }
         }

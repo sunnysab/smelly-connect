@@ -133,6 +133,12 @@ pub async fn serve_socks5(listen: String, pool: SessionPool) -> Result<(), Strin
     let listener = TcpListener::bind(listen)
         .await
         .map_err(|err| err.to_string())?;
+    let local_addr = listener.local_addr().map_err(|err| err.to_string())?;
+    tracing::info!(
+        protocol = tracing::field::display("socks5"),
+        listen = %local_addr,
+        "socks5 proxy listening"
+    );
     loop {
         let (stream, _) = listener.accept().await.map_err(|err| err.to_string())?;
         let pool = pool.clone();
@@ -224,6 +230,10 @@ where
     let account_name = match pool.next_account_name().await {
         Ok(name) => name,
         Err(_) => {
+            tracing::warn!(
+                protocol = tracing::field::display("socks5"),
+                "no ready session"
+            );
             client
                 .write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
                 .await
@@ -231,6 +241,13 @@ where
             return Ok(());
         }
     };
+
+    tracing::info!(
+        protocol = tracing::field::display("socks5"),
+        target = %format!("{host}:{port}"),
+        account = %account_name,
+        "request accepted"
+    );
 
     let mut upstream = connector(account_name, host, port)
         .await
@@ -302,6 +319,10 @@ async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<
     let (account_name, session) = match pool.next_live_session().await {
         Ok(ready) => ready,
         Err(_) => {
+            tracing::warn!(
+                protocol = tracing::field::display("socks5"),
+                "no ready session"
+            );
             client
                 .write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
                 .await
@@ -309,6 +330,13 @@ async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<
             return Ok(());
         }
     };
+
+    tracing::info!(
+        protocol = tracing::field::display("socks5"),
+        target = %format!("{host}:{port}"),
+        account = %account_name,
+        "request accepted"
+    );
 
     let mut upstream = session
         .connect_tcp((host.as_str(), port))
