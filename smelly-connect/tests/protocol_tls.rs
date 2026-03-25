@@ -23,7 +23,10 @@ fn request_ip_message_has_expected_shape() {
 
     assert_eq!(&message[..4], &[0x00, 0x00, 0x00, 0x00]);
     assert_eq!(message.len(), 64);
-    assert_eq!(&message[52..64], &[0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+    assert_eq!(
+        &message[52..64],
+        &[0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]
+    );
 }
 
 #[test]
@@ -33,14 +36,8 @@ fn send_and_recv_handshakes_encode_reversed_ip() {
         "abcdefghijklmnop",
     )
     .unwrap();
-    let send = smelly_connect::protocol::build_send_handshake(
-        &token,
-        "10.0.0.8".parse().unwrap(),
-    );
-    let recv = smelly_connect::protocol::build_recv_handshake(
-        &token,
-        "10.0.0.8".parse().unwrap(),
-    );
+    let send = smelly_connect::protocol::build_send_handshake(&token, "10.0.0.8".parse().unwrap());
+    let recv = smelly_connect::protocol::build_recv_handshake(&token, "10.0.0.8".parse().unwrap());
 
     assert_eq!(send[0], 0x05);
     assert_eq!(recv[0], 0x06);

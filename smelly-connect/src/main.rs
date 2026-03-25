@@ -1,3 +1,5 @@
 fn main() {
-    eprintln!("smelly-connect CLI is not wired to the real EasyConnect login flow yet.");
+    eprintln!(
+        "smelly-connect v0.2.0 CLI is still a stub; use the library facade or examples for the current runtime flow."
+    );
 }

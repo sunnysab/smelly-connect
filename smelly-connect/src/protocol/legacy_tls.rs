@@ -5,12 +5,15 @@ use std::sync::OnceLock;
 use foreign_types::{ForeignType, ForeignTypeRef};
 use openssl::error::ErrorStack;
 use openssl::provider::Provider;
-use openssl::ssl::{Ssl, SslConnector, SslContextBuilder, SslMethod, SslRef, SslSession, SslVerifyMode, SslVersion};
+use openssl::ssl::{
+    Ssl, SslConnector, SslContextBuilder, SslMethod, SslRef, SslSession, SslVerifyMode, SslVersion,
+};
 use openssl_sys as ffi;
 
 pub const HEARTBEAT_EXT_TYPE: u16 = 0x000f;
 pub const PROBE_EXT_TYPE: u16 = 0xffa5;
-pub const EASYCONNECT_SESSION_ID: &[u8; 32] = b"L3IP\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+pub const EASYCONNECT_SESSION_ID: &[u8; 32] =
+    b"L3IP\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 static LEGACY_PROVIDER: OnceLock<Option<Provider>> = OnceLock::new();
 static LEGACY_COMPRESSION: OnceLock<()> = OnceLock::new();
 static PROBE_EXT_BYTES: [u8; 1] = [0x42];
@@ -138,7 +141,12 @@ fn attach_easyconnect_session_id(ssl: &mut SslRef) -> Result<(), ErrorStack> {
         let Some(raw) = (!raw.is_null()).then_some(raw) else {
             return Err(ErrorStack::get());
         };
-        if SSL_SESSION_set1_id(raw, EASYCONNECT_SESSION_ID.as_ptr(), EASYCONNECT_SESSION_ID.len() as c_int) != 1 {
+        if SSL_SESSION_set1_id(
+            raw,
+            EASYCONNECT_SESSION_ID.as_ptr(),
+            EASYCONNECT_SESSION_ID.len() as c_int,
+        ) != 1
+        {
             ffi::SSL_SESSION_free(raw);
             return Err(ErrorStack::get());
         }

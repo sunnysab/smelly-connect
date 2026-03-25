@@ -8,7 +8,9 @@ use std::task::{Context, Poll};
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::icmp::{self, PacketBuffer as IcmpPacketBuffer, PacketMetadata as IcmpPacketMetadata};
+use smoltcp::socket::icmp::{
+    self, PacketBuffer as IcmpPacketBuffer, PacketMetadata as IcmpPacketMetadata,
+};
 use smoltcp::socket::tcp::{self, SocketBuffer};
 use smoltcp::time::{Duration as SmolDuration, Instant};
 use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, Ipv4Cidr};
@@ -101,13 +103,10 @@ impl SmolStack {
         let mut iface = Interface::new(config, &mut device, Instant::now());
         iface.update_ip_addrs(|ip_addrs| {
             ip_addrs
-                .push(IpCidr::Ipv4(Ipv4Cidr::new(local_ip.into(), 32)))
+                .push(IpCidr::Ipv4(Ipv4Cidr::new(local_ip, 32)))
                 .unwrap();
         });
-        iface
-            .routes_mut()
-            .add_default_ipv4_route(local_ip.into())
-            .unwrap();
+        iface.routes_mut().add_default_ipv4_route(local_ip).unwrap();
 
         let inner = Arc::new(SmolStackInner {
             state: Mutex::new(NetstackState {
@@ -192,7 +191,7 @@ impl SmolStack {
             state
                 .sockets
                 .get_mut::<icmp::Socket<'static>>(handle)
-                .send_slice(&packet, IpAddress::Ipv4(target.into()))
+                .send_slice(&packet, IpAddress::Ipv4(target))
                 .map_err(|err| io::Error::other(err.to_string()))?;
             (handle, seq_no)
         };
@@ -223,10 +222,11 @@ impl SmolStack {
                 }
             };
 
-            if let Some((ident, reply_seq)) = maybe_reply {
-                if ident == ICMP_KEEPALIVE_IDENT && reply_seq == seq_no {
-                    break Ok(());
-                }
+            if let Some((ident, reply_seq)) = maybe_reply
+                && ident == ICMP_KEEPALIVE_IDENT
+                && reply_seq == seq_no
+            {
+                break Ok(());
             }
 
             if tokio::time::Instant::now() >= deadline {

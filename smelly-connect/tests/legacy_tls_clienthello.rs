@@ -147,20 +147,27 @@ fn self_signed_cert() -> (X509, PKey<openssl::pkey::Private>) {
     let key = PKey::from_rsa(rsa).unwrap();
 
     let mut name = X509NameBuilder::new().unwrap();
-    name.append_entry_by_nid(Nid::COMMONNAME, "localhost").unwrap();
+    name.append_entry_by_nid(Nid::COMMONNAME, "localhost")
+        .unwrap();
     let name = name.build();
 
     let mut builder = X509::builder().unwrap();
     builder.set_version(2).unwrap();
     let mut serial = BigNum::new().unwrap();
-    serial.pseudo_rand(64, openssl::bn::MsbOption::MAYBE_ZERO, false).unwrap();
+    serial
+        .pseudo_rand(64, openssl::bn::MsbOption::MAYBE_ZERO, false)
+        .unwrap();
     let serial = serial.to_asn1_integer().unwrap();
     builder.set_serial_number(&serial).unwrap();
     builder.set_subject_name(&name).unwrap();
     builder.set_issuer_name(&name).unwrap();
     builder.set_pubkey(&key).unwrap();
-    builder.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref()).unwrap();
-    builder.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref()).unwrap();
+    builder
+        .set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
+        .unwrap();
+    builder
+        .set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
+        .unwrap();
     builder.sign(&key, MessageDigest::sha256()).unwrap();
     (builder.build(), key)
 }

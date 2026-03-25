@@ -1,7 +1,5 @@
 use smelly_connect::kernel::control::{
-    parse_login_auth_challenge,
-    parse_login_success,
-    parse_resource_document,
+    parse_login_auth_challenge, parse_login_success, parse_resource_document,
 };
 
 #[test]

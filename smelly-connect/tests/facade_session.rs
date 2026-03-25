@@ -23,7 +23,8 @@ fn session_info_exposes_client_ip() {
 
 #[test]
 fn keepalive_policy_can_hold_target_and_interval() {
-    let policy = KeepalivePolicy::icmp(("jwxt.sit.edu.cn", 443), std::time::Duration::from_secs(60));
+    let policy =
+        KeepalivePolicy::icmp(("jwxt.sit.edu.cn", 443), std::time::Duration::from_secs(60));
     match policy {
         KeepalivePolicy::Disabled => panic!("expected icmp policy"),
         KeepalivePolicy::Icmp { target, interval } => {
@@ -39,4 +40,9 @@ fn easyconnect_client_builder_collects_credentials() {
         .credentials("user", "pass")
         .build()
         .unwrap();
+}
+
+#[test]
+fn crate_version_is_0_2_0() {
+    assert_eq!(env!("CARGO_PKG_VERSION"), "0.2.0");
 }

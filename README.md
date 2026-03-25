@@ -9,6 +9,8 @@
 - `smelly-tls`
   面向 EasyConnect 旧协议的最小 TLS 1.1 客户端实现，用于旧式隧道握手与数据传输。
 
+当前主库版本：`smelly-connect v0.2.0`
+
 ## 当前状态
 
 已经完成的能力：
@@ -171,14 +173,14 @@ cargo run -p smelly-connect --example fetch_jwxt
 
 比较关键的模块：
 
-- `smelly-connect/src/config.rs`
-  会话配置与默认 bootstrap。
-- `smelly-connect/src/auth/control.rs`
-  EasyConnect 控制面、token、IP 获取、legacy tunnel 建立。
-- `smelly-connect/src/session.rs`
-  会话对象、路由决策、HTTP 代理入口、ICMP keepalive。
-- `smelly-connect/src/transport/netstack.rs`
-  基于 `smoltcp` 的 Rust 数据面。
+- `smelly-connect/src/facade/`
+  对外 façade，暴露 `EasyConnectClient` 和稳定公开类型。
+- `smelly-connect/src/domain/`
+  稳定领域对象，包括 `Session`、`ConnectTarget`、`SessionInfo`、`KeepalivePolicy`。
+- `smelly-connect/src/kernel/`
+  纯 EasyConnect 协议内核，包含控制面解析与 legacy tunnel 报文构造。
+- `smelly-connect/src/runtime/`
+  控制面流程、数据面运行时、后台任务与 handle 生命周期。
 - `smelly-tls/src/lib.rs`
   EasyConnect 旧 TLS 路径所需的最小实现。
 
@@ -186,13 +188,14 @@ cargo run -p smelly-connect --example fetch_jwxt
 
 当前可直接使用的能力包括：
 
-- 创建 `EasyConnectConfig`
+- 创建 `EasyConnectClientBuilder`
+- 构建 `EasyConnectClient`
 - 提供验证码回调
-- 建立 `EasyConnectSession`
+- 建立 `Session`
 - 调用 `connect_tcp()`
 - 启动本地 HTTP 代理
 - 获取 `reqwest_client()`
-- 启动后台 ICMP keepalive
+- 启动并显式关闭 ICMP keepalive
 
 ## 说明
 

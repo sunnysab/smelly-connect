@@ -220,20 +220,17 @@ pub async fn connect_tunnel(
     stream.write_all(&client_hello_record).await?;
 
     let (server_flight_record, server_flight) = read_server_flight(&mut stream).await?;
-    let cert = server_flight
-        .certificate_chain
-        .first()
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "missing server certificate; types={:?} cipher=0x{:04x} done={}",
-                    server_flight.handshake_types,
-                    server_flight.server_hello.cipher_suite,
-                    server_flight.server_hello_done
-                ),
-            )
-        })?;
+    let cert = server_flight.certificate_chain.first().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "missing server certificate; types={:?} cipher=0x{:04x} done={}",
+                server_flight.handshake_types,
+                server_flight.server_hello.cipher_suite,
+                server_flight.server_hello_done
+            ),
+        )
+    })?;
     let public_key_der = server_public_key_der(cert)?;
 
     let premaster = build_premaster_secret([0x33; 46]);
@@ -242,10 +239,17 @@ pub async fn connect_tunnel(
     stream.write_all(&client_key_exchange_record).await?;
     stream.write_all(&build_change_cipher_spec_record()).await?;
 
-    let master_secret =
-        derive_tls10_master_secret(&premaster, &config.random, &server_flight.server_hello.random);
-    let key_block =
-        derive_tls10_key_block(&master_secret, &config.random, &server_flight.server_hello.random, 72);
+    let master_secret = derive_tls10_master_secret(
+        &premaster,
+        &config.random,
+        &server_flight.server_hello.random,
+    );
+    let key_block = derive_tls10_key_block(
+        &master_secret,
+        &config.random,
+        &server_flight.server_hello.random,
+        72,
+    );
     let client_mac: [u8; 20] = key_block[0..20].try_into().unwrap();
     let server_mac: [u8; 20] = key_block[20..40].try_into().unwrap();
     let client_key: [u8; 16] = key_block[40..56].try_into().unwrap();
@@ -272,11 +276,13 @@ pub async fn connect_tunnel(
     transcript.extend_from_slice(&client_finished);
     let server_finished_record = read_record(&mut stream).await?;
     let mut decryptor = Rc4Sha1Decryptor::new(server_mac, server_key);
-    let server_finished_plain =
-        decryptor.decrypt(22, record_payload(&server_finished_record))?;
+    let server_finished_plain = decryptor.decrypt(22, record_payload(&server_finished_record))?;
     let server_verify = derive_finished_verify_data(&master_secret, false, &transcript);
     if server_finished_plain != build_finished_handshake(server_verify) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid server finished"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid server finished",
+        ));
     }
 
     Ok(TunnelConnection {
@@ -303,7 +309,10 @@ impl TunnelConnection {
         if record.first().copied() != Some(23) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("unexpected record type {}", record.first().copied().unwrap_or_default()),
+                format!(
+                    "unexpected record type {}",
+                    record.first().copied().unwrap_or_default()
+                ),
             ));
         }
         self.decryptor.decrypt(23, record_payload(&record))
@@ -311,10 +320,7 @@ impl TunnelConnection {
 }
 
 #[cfg(feature = "tokio")]
-pub async fn probe_handshake_steps(
-    addr: SocketAddr,
-    config: &ClientHelloConfig,
-) -> io::Result<()> {
+pub async fn probe_handshake_steps(addr: SocketAddr, config: &ClientHelloConfig) -> io::Result<()> {
     use tokio::io::AsyncWriteExt;
     use tokio::time::{Duration, timeout};
 
@@ -355,10 +361,17 @@ pub async fn probe_handshake_steps(
         }
     }
 
-    let master_secret =
-        derive_tls10_master_secret(&premaster, &config.random, &server_flight.server_hello.random);
-    let key_block =
-        derive_tls10_key_block(&master_secret, &config.random, &server_flight.server_hello.random, 72);
+    let master_secret = derive_tls10_master_secret(
+        &premaster,
+        &config.random,
+        &server_flight.server_hello.random,
+    );
+    let key_block = derive_tls10_key_block(
+        &master_secret,
+        &config.random,
+        &server_flight.server_hello.random,
+        72,
+    );
     let client_mac: [u8; 20] = key_block[0..20].try_into().unwrap();
     let client_key: [u8; 16] = key_block[40..56].try_into().unwrap();
     let mut transcript = Vec::new();
@@ -464,8 +477,8 @@ fn parse_server_flight_records(records: &[u8]) -> Option<ServerFlight> {
         let mut hs = 0;
         while hs + 4 <= payload.len() {
             let handshake_type = payload[hs];
-            let length = u32::from_be_bytes([0, payload[hs + 1], payload[hs + 2], payload[hs + 3]])
-                as usize;
+            let length =
+                u32::from_be_bytes([0, payload[hs + 1], payload[hs + 2], payload[hs + 3]]) as usize;
             hs += 4;
             let body = payload.get(hs..hs + length)?;
             hs += length;
@@ -706,8 +719,7 @@ fn parse_certificate_body(body: &[u8]) -> Option<Vec<Vec<u8>>> {
     let end = idx + total_len;
     let mut certs = Vec::new();
     while idx + 3 <= end && idx + 3 <= body.len() {
-        let cert_len =
-            u32::from_be_bytes([0, body[idx], body[idx + 1], body[idx + 2]]) as usize;
+        let cert_len = u32::from_be_bytes([0, body[idx], body[idx + 1], body[idx + 2]]) as usize;
         idx += 3;
         certs.push(body.get(idx..idx + cert_len)?.to_vec());
         idx += cert_len;
@@ -719,7 +731,8 @@ fn parse_certificate_body(body: &[u8]) -> Option<Vec<Vec<u8>>> {
 fn server_public_key_der(cert_der: &[u8]) -> io::Result<Vec<u8>> {
     let cert = Certificate::from_der(cert_der)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-    cert.tbs_certificate.subject_public_key_info
+    cert.tbs_certificate
+        .subject_public_key_info
         .to_der()
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
 }
@@ -818,7 +831,10 @@ pub fn decrypt_rc4_sha1_record(
     ciphertext: &[u8],
 ) -> io::Result<Vec<u8>> {
     if ciphertext.len() < 20 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "record too short"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "record too short",
+        ));
     }
 
     let mut payload = ciphertext.to_vec();
@@ -878,15 +894,22 @@ impl Rc4Sha1Decryptor {
 
     pub fn decrypt(&mut self, content_type: u8, ciphertext: &[u8]) -> io::Result<Vec<u8>> {
         if ciphertext.len() < 20 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "record too short"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "record too short",
+            ));
         }
         let mut payload = ciphertext.to_vec();
         self.cipher.apply_keystream(&mut payload);
         let split = payload.len() - 20;
         let plaintext = payload[..split].to_vec();
         let received_mac = &payload[split..];
-        let expected_mac =
-            tls10_record_mac(&self.mac_key, self.sequence_number, content_type, &plaintext)?;
+        let expected_mac = tls10_record_mac(
+            &self.mac_key,
+            self.sequence_number,
+            content_type,
+            &plaintext,
+        )?;
         if received_mac != expected_mac.as_slice() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad record mac"));
         }
@@ -990,8 +1013,8 @@ fn tls10_record_mac(
 }
 
 fn apply_rc4(key: &[u8; 16], payload: &mut [u8]) -> io::Result<()> {
-    let mut cipher =
-        Rc4::<rc4::consts::U16>::new_from_slice(key).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+    let mut cipher = Rc4::<rc4::consts::U16>::new_from_slice(key)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
     cipher.apply_keystream(payload);
     Ok(())
 }

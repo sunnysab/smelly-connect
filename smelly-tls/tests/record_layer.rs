@@ -1,10 +1,10 @@
+use md5::Md5;
+use sha1::Sha1;
 use smelly_tls::{
     build_change_cipher_spec_record, build_finished_handshake, build_premaster_secret,
     decrypt_rc4_sha1_record, derive_finished_verify_data, derive_tls10_key_block,
     derive_tls10_master_secret, encrypt_rc4_sha1_record,
 };
-use md5::Md5;
-use sha1::Sha1;
 
 #[test]
 fn tls10_master_secret_matches_reference_prf() {
@@ -88,10 +88,8 @@ fn finished_verify_data_matches_reference_prf_over_handshake_hashes() {
     let server = derive_finished_verify_data(&master, false, transcript);
 
     let handshake_hash = reference_md5_sha1(transcript);
-    let expected_client =
-        reference_tls10_prf(&master, b"client finished", &handshake_hash, 12);
-    let expected_server =
-        reference_tls10_prf(&master, b"server finished", &handshake_hash, 12);
+    let expected_client = reference_tls10_prf(&master, b"client finished", &handshake_hash, 12);
+    let expected_server = reference_tls10_prf(&master, b"server finished", &handshake_hash, 12);
 
     assert_eq!(client.as_slice(), expected_client.as_slice());
     assert_eq!(server.as_slice(), expected_server.as_slice());

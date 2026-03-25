@@ -1,4 +1,5 @@
-use smelly_connect::auth::control::{request_ip_for_server, request_token, run_control_plane};
+use smelly_connect::auth::control::{request_ip_for_server, request_token};
+use smelly_connect::runtime::control_plane::run_control_plane;
 use smelly_connect::{CaptchaHandler, EasyConnectConfig};
 
 #[tokio::main(flavor = "current_thread")]

@@ -1,10 +1,7 @@
 use std::net::Ipv4Addr;
 
 use smelly_connect::kernel::tunnel::{
-    build_recv_handshake,
-    build_request_ip_message,
-    build_send_handshake,
-    derive_token,
+    build_recv_handshake, build_request_ip_message, build_send_handshake, derive_token,
 };
 
 #[test]

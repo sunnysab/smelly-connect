@@ -23,7 +23,9 @@ async fn keepalive_handle_supports_explicit_shutdown() {
 
 #[tokio::test]
 async fn proxy_handle_supports_explicit_shutdown() {
-    let session = smelly_connect::session::tests::login_harness().ready_session().await;
+    let session = smelly_connect::session::tests::login_harness()
+        .ready_session()
+        .await;
     let handle = session
         .start_http_proxy("127.0.0.1:0".parse().unwrap())
         .await
@@ -34,5 +36,8 @@ async fn proxy_handle_supports_explicit_shutdown() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let result = tokio::net::TcpStream::connect(addr).await;
-    assert!(result.is_err(), "proxy listener should be closed after shutdown");
+    assert!(
+        result.is_err(),
+        "proxy listener should be closed after shutdown"
+    );
 }

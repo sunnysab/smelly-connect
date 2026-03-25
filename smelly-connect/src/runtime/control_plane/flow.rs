@@ -23,8 +23,9 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
         .await
         .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
 
-    let parsed = parse_login_auth(&login_auth_body)
-        .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(format!("{err:?}"))))?;
+    let parsed = parse_login_auth(&login_auth_body).map_err(|err| {
+        Error::ControlPlane(ControlPlaneError::AuthFlowFailed(format!("{err:?}")))
+    })?;
 
     let mut rand_code = String::new();
     if parsed.requires_captcha {
@@ -38,20 +39,23 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
             .header(USER_AGENT, "EasyConnect_windows")
             .send()
             .await
-            .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
+            .map_err(|err| {
+                Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string()))
+            })?;
         let mime_type = response
             .headers()
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(ToOwned::to_owned);
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
+        let bytes = response.bytes().await.map_err(|err| {
+            Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string()))
+        })?;
         rand_code = captcha_handler
             .solve(bytes.to_vec(), mime_type)
             .await
-            .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
+            .map_err(|err| {
+                Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string()))
+            })?;
     }
 
     let encrypted_password = encrypt_password(
@@ -73,7 +77,9 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
     form.insert("svpn_password", encrypted_password);
 
     let login_psw_body = client
-        .post(format!("{base_url}/por/login_psw.csp?anti_replay=1&encrypt=1&type=cs"))
+        .post(format!(
+            "{base_url}/por/login_psw.csp?anti_replay=1&encrypt=1&type=cs"
+        ))
         .header(COOKIE, format!("TWFID={}", parsed.twfid))
         .header(USER_AGENT, "EasyConnect_windows")
         .form(&form)
@@ -85,7 +91,9 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
         .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
 
     let authorized_twfid = crate::protocol::parse_login_psw_success(&login_psw_body, &parsed.twfid)
-        .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(format!("{err:?}"))))?;
+        .map_err(|err| {
+            Error::ControlPlane(ControlPlaneError::AuthFlowFailed(format!("{err:?}")))
+        })?;
 
     let resource_body = client
         .get(format!("{base_url}/por/rclist.csp"))
@@ -97,8 +105,9 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
         .await
         .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
 
-    let resources = parse_resources(&resource_body)
-        .map_err(|err| Error::ControlPlane(ControlPlaneError::ResourceParseFailed(err.to_string())))?;
+    let resources = parse_resources(&resource_body).map_err(|err| {
+        Error::ControlPlane(ControlPlaneError::ResourceParseFailed(err.to_string()))
+    })?;
 
     Ok(ControlPlaneState {
         authorized_twfid,

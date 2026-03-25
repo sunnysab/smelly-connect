@@ -10,9 +10,9 @@ impl KeepaliveHandle {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        self.task.await.map_err(|err| {
-            Error::Transport(TransportError::ConnectFailed(err.to_string()))
-        })?;
+        self.task
+            .await
+            .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string())))?;
         Ok(())
     }
 }

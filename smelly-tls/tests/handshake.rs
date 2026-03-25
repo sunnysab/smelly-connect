@@ -14,24 +14,19 @@ use smelly_tls::{
 
 const CLIENT_RANDOM: [u8; 32] = [0x11; 32];
 const CLIENT_SESSION_ID: [u8; 32] = [
-    b'L', b'3', b'I', b'P', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0,
+    b'L', b'3', b'I', b'P', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0,
 ];
 const SERVER_RANDOM: [u8; 32] = [0x22; 32];
 const SERVER_SESSION_ID: [u8; 32] = *b"fedcba9876543210fedcba9876543210";
 
 #[test]
 fn client_and_server_finished_roundtrip() {
-    let client_hello = build_client_hello_record(&ClientHelloConfig::new(
-        CLIENT_RANDOM,
-        CLIENT_SESSION_ID,
-    ));
+    let client_hello =
+        build_client_hello_record(&ClientHelloConfig::new(CLIENT_RANDOM, CLIENT_SESSION_ID));
     let (cert_der, public_key_der, private_key) = server_materials();
-    let server_flight_record = build_server_flight_record(
-        SERVER_RANDOM,
-        SERVER_SESSION_ID,
-        &cert_der,
-    );
+    let server_flight_record =
+        build_server_flight_record(SERVER_RANDOM, SERVER_SESSION_ID, &cert_der);
     let server_flight = parse_server_flight(&server_flight_record).unwrap();
 
     let premaster = build_premaster_secret([0x33; 46]);
@@ -48,28 +43,45 @@ fn client_and_server_finished_roundtrip() {
 
     let mut client_transcript = Vec::new();
     client_transcript.extend_from_slice(smelly_tls::handshake_messages(&client_hello).as_slice());
-    client_transcript.extend_from_slice(smelly_tls::handshake_messages(&server_flight_record).as_slice());
+    client_transcript
+        .extend_from_slice(smelly_tls::handshake_messages(&server_flight_record).as_slice());
     client_transcript.extend_from_slice(&client_key_exchange);
 
     let client_verify = derive_finished_verify_data(&master, true, &client_transcript);
     let client_finished = build_finished_handshake(client_verify);
     let client_ccs = build_change_cipher_spec_record();
-    let client_finished_record =
-        handshake_record(smelly_tls::encrypt_rc4_sha1_record(22, 0, &client_mac, &client_key, &client_finished).unwrap());
+    let client_finished_record = handshake_record(
+        smelly_tls::encrypt_rc4_sha1_record(22, 0, &client_mac, &client_key, &client_finished)
+            .unwrap(),
+    );
 
-    let server_seen_finished =
-        decrypt_rc4_sha1_record(22, 0, &client_mac, &client_key, record_payload(&client_finished_record)).unwrap();
+    let server_seen_finished = decrypt_rc4_sha1_record(
+        22,
+        0,
+        &client_mac,
+        &client_key,
+        record_payload(&client_finished_record),
+    )
+    .unwrap();
     assert_eq!(server_seen_finished, client_finished);
 
     client_transcript.extend_from_slice(&client_finished);
     let server_verify = derive_finished_verify_data(&master, false, &client_transcript);
     let server_finished = build_finished_handshake(server_verify);
     let server_ccs = build_change_cipher_spec_record();
-    let server_finished_record =
-        handshake_record(smelly_tls::encrypt_rc4_sha1_record(22, 0, &server_mac, &server_key, &server_finished).unwrap());
+    let server_finished_record = handshake_record(
+        smelly_tls::encrypt_rc4_sha1_record(22, 0, &server_mac, &server_key, &server_finished)
+            .unwrap(),
+    );
 
-    let client_seen_finished =
-        decrypt_rc4_sha1_record(22, 0, &server_mac, &server_key, record_payload(&server_finished_record)).unwrap();
+    let client_seen_finished = decrypt_rc4_sha1_record(
+        22,
+        0,
+        &server_mac,
+        &server_key,
+        record_payload(&server_finished_record),
+    )
+    .unwrap();
     assert_eq!(client_seen_finished, server_finished);
 
     assert_eq!(client_ccs, vec![20, 0x03, 0x02, 0x00, 0x01, 0x01]);
@@ -131,24 +143,32 @@ async fn async_minimal_handshake_completes_against_mock_server() {
             .unwrap();
         let client_finished_record = [fin_hdr.to_vec(), fin_body].concat();
 
-        let client_handshake =
-            smelly_tls::parse_client_hello(&client_hello_record).unwrap();
+        let client_handshake = smelly_tls::parse_client_hello(&client_hello_record).unwrap();
         let decrypted_premaster = decrypt_client_key_exchange(
             &smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap(),
             &private_key,
         );
-        let master =
-            smelly_tls::derive_tls10_master_secret(&decrypted_premaster, &client_handshake.random, &SERVER_RANDOM);
-        let key_block =
-            smelly_tls::derive_tls10_key_block(&master, &client_handshake.random, &SERVER_RANDOM, 72);
+        let master = smelly_tls::derive_tls10_master_secret(
+            &decrypted_premaster,
+            &client_handshake.random,
+            &SERVER_RANDOM,
+        );
+        let key_block = smelly_tls::derive_tls10_key_block(
+            &master,
+            &client_handshake.random,
+            &SERVER_RANDOM,
+            72,
+        );
         let client_mac: [u8; 20] = key_block[0..20].try_into().unwrap();
         let server_mac: [u8; 20] = key_block[20..40].try_into().unwrap();
         let client_key: [u8; 16] = key_block[40..56].try_into().unwrap();
         let server_key: [u8; 16] = key_block[56..72].try_into().unwrap();
 
         let mut transcript = Vec::new();
-        transcript.extend_from_slice(smelly_tls::handshake_messages(&client_hello_record).as_slice());
-        transcript.extend_from_slice(smelly_tls::handshake_messages(&server_flight_record).as_slice());
+        transcript
+            .extend_from_slice(smelly_tls::handshake_messages(&client_hello_record).as_slice());
+        transcript
+            .extend_from_slice(smelly_tls::handshake_messages(&server_flight_record).as_slice());
         let client_key_exchange_handshake =
             smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap();
         transcript.extend_from_slice(&client_key_exchange_handshake);
@@ -168,8 +188,10 @@ async fn async_minimal_handshake_completes_against_mock_server() {
         transcript.extend_from_slice(&client_finished_plain);
         let server_verify = smelly_tls::derive_finished_verify_data(&master, false, &transcript);
         let server_finished = smelly_tls::build_finished_handshake(server_verify);
-        let server_finished_record =
-            smelly_tls::record_with_payload(22, &server_outbound.encrypt(22, &server_finished).unwrap());
+        let server_finished_record = smelly_tls::record_with_payload(
+            22,
+            &server_outbound.encrypt(22, &server_finished).unwrap(),
+        );
 
         tokio::io::AsyncWriteExt::write_all(
             &mut stream,
@@ -183,7 +205,9 @@ async fn async_minimal_handshake_completes_against_mock_server() {
     });
 
     let config = ClientHelloConfig::new(CLIENT_RANDOM, CLIENT_SESSION_ID);
-    let result = smelly_tls::complete_minimal_handshake(addr, &config).await.unwrap();
+    let result = smelly_tls::complete_minimal_handshake(addr, &config)
+        .await
+        .unwrap();
     server.await.unwrap();
 
     assert_eq!(result.server_hello.session_id, SERVER_SESSION_ID);
@@ -216,8 +240,11 @@ async fn async_established_connection_exchanges_application_data() {
             &smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap(),
             &private_key,
         );
-        let master =
-            smelly_tls::derive_tls10_master_secret(&decrypted_premaster, &client_hello.random, &SERVER_RANDOM);
+        let master = smelly_tls::derive_tls10_master_secret(
+            &decrypted_premaster,
+            &client_hello.random,
+            &SERVER_RANDOM,
+        );
         let key_block =
             smelly_tls::derive_tls10_key_block(&master, &client_hello.random, &SERVER_RANDOM, 72);
         let client_mac: [u8; 20] = key_block[0..20].try_into().unwrap();
@@ -226,8 +253,10 @@ async fn async_established_connection_exchanges_application_data() {
         let server_key: [u8; 16] = key_block[56..72].try_into().unwrap();
 
         let mut transcript = Vec::new();
-        transcript.extend_from_slice(smelly_tls::handshake_messages(&client_hello_record).as_slice());
-        transcript.extend_from_slice(smelly_tls::handshake_messages(&server_flight_record).as_slice());
+        transcript
+            .extend_from_slice(smelly_tls::handshake_messages(&client_hello_record).as_slice());
+        transcript
+            .extend_from_slice(smelly_tls::handshake_messages(&server_flight_record).as_slice());
         let client_key_exchange_handshake =
             smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap();
         transcript.extend_from_slice(&client_key_exchange_handshake);
@@ -247,8 +276,10 @@ async fn async_established_connection_exchanges_application_data() {
         transcript.extend_from_slice(&client_finished_plain);
         let server_verify = smelly_tls::derive_finished_verify_data(&master, false, &transcript);
         let server_finished = smelly_tls::build_finished_handshake(server_verify);
-        let server_finished_record =
-            smelly_tls::record_with_payload(22, &server_outbound.encrypt(22, &server_finished).unwrap());
+        let server_finished_record = smelly_tls::record_with_payload(
+            22,
+            &server_outbound.encrypt(22, &server_finished).unwrap(),
+        );
         tokio::io::AsyncWriteExt::write_all(
             &mut stream,
             &smelly_tls::build_change_cipher_spec_record(),
@@ -285,7 +316,8 @@ fn server_materials() -> (Vec<u8>, Vec<u8>, Rsa<openssl::pkey::Private>) {
     let key = PKey::from_rsa(rsa.clone()).unwrap();
 
     let mut name = X509NameBuilder::new().unwrap();
-    name.append_entry_by_nid(Nid::COMMONNAME, "localhost").unwrap();
+    name.append_entry_by_nid(Nid::COMMONNAME, "localhost")
+        .unwrap();
     let name = name.build();
 
     let mut builder = X509::builder().unwrap();
@@ -308,7 +340,11 @@ fn server_materials() -> (Vec<u8>, Vec<u8>, Rsa<openssl::pkey::Private>) {
     builder.sign(&key, MessageDigest::sha256()).unwrap();
 
     let cert = builder.build();
-    (cert.to_der().unwrap(), key.public_key_to_der().unwrap(), rsa)
+    (
+        cert.to_der().unwrap(),
+        key.public_key_to_der().unwrap(),
+        rsa,
+    )
 }
 
 fn build_server_flight_record(

@@ -32,11 +32,7 @@ impl EasyConnectClient {
 }
 
 impl EasyConnectClientBuilder {
-    pub fn credentials(
-        mut self,
-        username: impl Into<String>,
-        password: impl Into<String>,
-    ) -> Self {
+    pub fn credentials(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
         self.username = Some(username.into());
         self.password = Some(password.into());
         self

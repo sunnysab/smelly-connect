@@ -17,7 +17,8 @@ async fn main() {
         .ok()
         .or_else(|| std::env::var("PASS").ok())
         .expect("VPN_PASS or PASS");
-    let target = std::env::var("TARGET_URL").unwrap_or_else(|_| "https://jwxt.sit.edu.cn/".to_string());
+    let target =
+        std::env::var("TARGET_URL").unwrap_or_else(|_| "https://jwxt.sit.edu.cn/".to_string());
     let hold_seconds = std::env::var("HOLD_SECONDS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -66,10 +67,7 @@ async fn main() {
     if smoke_icmp {
         let url = reqwest::Url::parse(&target).expect("parse target url");
         let host = url.host_str().expect("target host");
-        session
-            .icmp_ping(host.into())
-            .await
-            .expect("icmp ping");
+        session.icmp_ping(host.into()).await.expect("icmp ping");
         println!("icmp ping ok: {host}");
         return;
     }

@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use crate::auth::CaptchaHandler;
 use crate::error::Error;
+use crate::resolver::SessionResolver;
 use crate::runtime::control_plane::{ControlPlaneState, run_control_plane};
 use crate::session::{EasyConnectSession, IcmpKeepAliveTarget};
-use crate::resolver::SessionResolver;
 
 type SessionFactory = dyn Fn() -> Result<EasyConnectSession, Error> + Send + Sync + 'static;
 type SessionBootstrap =
@@ -104,7 +104,10 @@ impl EasyConnectConfig {
             .unwrap_or_else(|| format!("https://{}", self.server))
     }
 
-    async fn default_bootstrap(self, state: ControlPlaneState) -> Result<EasyConnectSession, Error> {
+    async fn default_bootstrap(
+        self,
+        state: ControlPlaneState,
+    ) -> Result<EasyConnectSession, Error> {
         let token = crate::auth::control::request_token(&self.server, &state.authorized_twfid)?;
         let server_addr = crate::auth::control::resolve_server_addr(&self.server)?;
         let (client_ip, request_ip_tunnel) = crate::auth::control::request_ip_via_tunnel_with_conn(

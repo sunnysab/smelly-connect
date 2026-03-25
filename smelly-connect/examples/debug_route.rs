@@ -1,4 +1,4 @@
-use smelly_connect::auth::run_control_plane;
+use smelly_connect::runtime::control_plane::run_control_plane;
 use smelly_connect::{CaptchaError, CaptchaHandler, EasyConnectConfig};
 
 #[tokio::main(flavor = "current_thread")]
@@ -34,10 +34,7 @@ async fn main() {
     println!("domain rules: {}", state.resources.domain_rules.len());
     println!("ip rules: {}", state.resources.ip_rules.len());
     println!("static dns: {}", state.resources.static_dns.len());
-    println!(
-        "remote dns server: {:?}",
-        state.resources.remote_dns_server
-    );
+    println!("remote dns server: {:?}", state.resources.remote_dns_server);
 
     let mut matched = Vec::new();
     for domain in state.resources.domain_rules.keys() {

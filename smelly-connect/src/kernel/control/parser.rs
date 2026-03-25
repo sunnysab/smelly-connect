@@ -22,7 +22,8 @@ pub fn parse_login_auth_challenge(body: &str) -> Result<LoginAuthChallenge, Cont
         .parse()
         .map_err(|_| ControlParseError::InvalidRsaExponent)?;
     let csrf_rand_code = extract_tag(body, "CSRF_RAND_CODE").map(ToOwned::to_owned);
-    let legacy_cipher_hint = extract_nested_tag(body, "SSLCipherSuite", "EC").map(ToOwned::to_owned);
+    let legacy_cipher_hint =
+        extract_nested_tag(body, "SSLCipherSuite", "EC").map(ToOwned::to_owned);
     let requires_captcha = extract_tag(body, "RndImg") == Some("1");
 
     Ok(LoginAuthChallenge {

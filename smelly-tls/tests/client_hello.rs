@@ -5,8 +5,8 @@ use std::thread;
 use smelly_tls::{ClientHelloConfig, build_client_hello_record, connect_probe};
 
 const EXPECTED_SESSION_ID: [u8; 32] = [
-    b'L', b'3', b'I', b'P', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0,
+    b'L', b'3', b'I', b'P', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0,
 ];
 
 #[test]
@@ -87,7 +87,9 @@ async fn async_connect_probe_writes_hello_bytes_to_tcp_stream() {
     });
 
     let config = ClientHelloConfig::new([0x33; 32], EXPECTED_SESSION_ID);
-    smelly_tls::connect_hello_probe(addr, &config).await.unwrap();
+    smelly_tls::connect_hello_probe(addr, &config)
+        .await
+        .unwrap();
 
     let raw = server.await.unwrap();
     let parsed = parse_client_hello(&raw).unwrap();

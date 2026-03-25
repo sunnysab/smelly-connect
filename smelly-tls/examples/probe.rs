@@ -3,7 +3,7 @@ use std::net::ToSocketAddrs;
 
 use smelly_tls::{
     ClientHelloConfig, TLS_RSA_WITH_AES_128_CBC_SHA, TLS_RSA_WITH_RC4_128_SHA,
-    connect_and_read_server_flight, complete_minimal_handshake,
+    complete_minimal_handshake, connect_and_read_server_flight,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -41,7 +41,10 @@ async fn main() {
         Ok(result) => {
             println!("handshake ok");
             println!("server cipher: 0x{:04x}", result.server_hello.cipher_suite);
-            println!("server session id: {}", hex::encode(result.server_hello.session_id));
+            println!(
+                "server session id: {}",
+                hex::encode(result.server_hello.session_id)
+            );
         }
         Err(err) => {
             eprintln!("handshake failed: {err}");
@@ -49,7 +52,10 @@ async fn main() {
                 Ok(flight) => {
                     eprintln!("server flight parsed");
                     eprintln!("server cipher: 0x{:04x}", flight.server_hello.cipher_suite);
-                    eprintln!("server session id: {}", hex::encode(flight.server_hello.session_id));
+                    eprintln!(
+                        "server session id: {}",
+                        hex::encode(flight.server_hello.session_id)
+                    );
                     eprintln!("cert count: {}", flight.certificate_chain.len());
                     eprintln!("server hello done: {}", flight.server_hello_done);
                     if let Err(err) = smelly_tls::probe_handshake_steps(addr, &config).await {

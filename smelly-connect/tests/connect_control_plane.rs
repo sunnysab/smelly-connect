@@ -8,7 +8,10 @@ async fn connect_runs_real_control_plane_flow_against_fake_server() {
         .plan_tcp_connect(("libdb.zju.edu.cn", 443))
         .await
         .unwrap();
-    assert!(matches!(route, smelly_connect::session::RoutePlan::VpnResolved(_)));
+    assert!(matches!(
+        route,
+        smelly_connect::session::RoutePlan::VpnResolved(_)
+    ));
 }
 
 #[test]
@@ -31,7 +34,8 @@ fn token_request_derives_token_from_tls_session_id() {
         let rsa = Rsa::generate(2048).unwrap();
         let key = PKey::from_rsa(rsa).unwrap();
         let mut name = X509NameBuilder::new().unwrap();
-        name.append_entry_by_nid(Nid::COMMONNAME, "localhost").unwrap();
+        name.append_entry_by_nid(Nid::COMMONNAME, "localhost")
+            .unwrap();
         let name = name.build();
         let mut cert = X509::builder().unwrap();
         cert.set_version(2).unwrap();
@@ -44,15 +48,21 @@ fn token_request_derives_token_from_tls_session_id() {
         cert.set_subject_name(&name).unwrap();
         cert.set_issuer_name(&name).unwrap();
         cert.set_pubkey(&key).unwrap();
-        cert.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref()).unwrap();
-        cert.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref()).unwrap();
+        cert.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
+            .unwrap();
+        cert.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
+            .unwrap();
         cert.sign(&key, MessageDigest::sha256()).unwrap();
 
         let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
         acceptor.set_private_key(&key).unwrap();
         acceptor.set_certificate(&cert.build()).unwrap();
-        acceptor.set_min_proto_version(Some(SslVersion::TLS1_2)).unwrap();
-        acceptor.set_max_proto_version(Some(SslVersion::TLS1_2)).unwrap();
+        acceptor
+            .set_min_proto_version(Some(SslVersion::TLS1_2))
+            .unwrap();
+        acceptor
+            .set_max_proto_version(Some(SslVersion::TLS1_2))
+            .unwrap();
         let acceptor = acceptor.build();
 
         let (stream, _) = listener.accept().unwrap();
@@ -78,7 +88,12 @@ async fn request_ip_uses_smelly_tls_data_plane() {
     use openssl::pkey::PKey;
     use openssl::rsa::{Padding, Rsa};
     use openssl::x509::{X509, X509NameBuilder};
-    use smelly_tls::{build_change_cipher_spec_record, build_finished_handshake, derive_finished_verify_data, derive_tls10_key_block, derive_tls10_master_secret, handshake_messages, record_payload, record_with_payload, Rc4Sha1Decryptor, Rc4Sha1Encryptor, TLS_RSA_WITH_RC4_128_SHA};
+    use smelly_tls::{
+        Rc4Sha1Decryptor, Rc4Sha1Encryptor, TLS_RSA_WITH_RC4_128_SHA,
+        build_change_cipher_spec_record, build_finished_handshake, derive_finished_verify_data,
+        derive_tls10_key_block, derive_tls10_master_secret, handshake_messages, record_payload,
+        record_with_payload,
+    };
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -93,19 +108,24 @@ async fn request_ip_uses_smelly_tls_data_plane() {
         let rsa = Rsa::generate(2048).unwrap();
         let key = PKey::from_rsa(rsa.clone()).unwrap();
         let mut name = X509NameBuilder::new().unwrap();
-        name.append_entry_by_nid(Nid::COMMONNAME, "localhost").unwrap();
+        name.append_entry_by_nid(Nid::COMMONNAME, "localhost")
+            .unwrap();
         let name = name.build();
         let mut cert = X509::builder().unwrap();
         cert.set_version(2).unwrap();
         let mut serial = BigNum::new().unwrap();
-        serial.pseudo_rand(64, openssl::bn::MsbOption::MAYBE_ZERO, false).unwrap();
+        serial
+            .pseudo_rand(64, openssl::bn::MsbOption::MAYBE_ZERO, false)
+            .unwrap();
         let serial = serial.to_asn1_integer().unwrap();
         cert.set_serial_number(&serial).unwrap();
         cert.set_subject_name(&name).unwrap();
         cert.set_issuer_name(&name).unwrap();
         cert.set_pubkey(&key).unwrap();
-        cert.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref()).unwrap();
-        cert.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref()).unwrap();
+        cert.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
+            .unwrap();
+        cert.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
+            .unwrap();
         cert.sign(&key, MessageDigest::sha256()).unwrap();
         let cert_der = cert.build().to_der().unwrap();
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -113,8 +133,11 @@ async fn request_ip_uses_smelly_tls_data_plane() {
         let client_hello = smelly_tls::parse_client_hello(&client_hello_record).unwrap();
         let server_random = [0x22; 32];
         let server_session_id = *b"fedcba9876543210fedcba9876543210";
-        let server_flight_record = build_server_flight_record(server_random, server_session_id, &cert_der);
-        tokio::io::AsyncWriteExt::write_all(&mut stream, &server_flight_record).await.unwrap();
+        let server_flight_record =
+            build_server_flight_record(server_random, server_session_id, &cert_der);
+        tokio::io::AsyncWriteExt::write_all(&mut stream, &server_flight_record)
+            .await
+            .unwrap();
 
         let client_key_exchange_record = read_record(&mut stream).await;
         let _ccs = read_record(&mut stream).await;
@@ -123,7 +146,8 @@ async fn request_ip_uses_smelly_tls_data_plane() {
             &smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap(),
             &rsa,
         );
-        let master = derive_tls10_master_secret(&decrypted_premaster, &client_hello.random, &server_random);
+        let master =
+            derive_tls10_master_secret(&decrypted_premaster, &client_hello.random, &server_random);
         let key_block = derive_tls10_key_block(&master, &client_hello.random, &server_random, 72);
         let client_mac: [u8; 20] = key_block[0..20].try_into().unwrap();
         let server_mac: [u8; 20] = key_block[20..40].try_into().unwrap();
@@ -132,36 +156,58 @@ async fn request_ip_uses_smelly_tls_data_plane() {
         let mut transcript = Vec::new();
         transcript.extend_from_slice(handshake_messages(&client_hello_record).as_slice());
         transcript.extend_from_slice(handshake_messages(&server_flight_record).as_slice());
-        let client_key_exchange_handshake = smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap();
+        let client_key_exchange_handshake =
+            smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap();
         transcript.extend_from_slice(&client_key_exchange_handshake);
 
         let mut server_in = Rc4Sha1Decryptor::new(client_mac, client_key);
         let mut server_out = Rc4Sha1Encryptor::new(server_mac, server_key);
-        let client_finished_plain = server_in.decrypt(22, record_payload(&client_finished_record)).unwrap();
+        let client_finished_plain = server_in
+            .decrypt(22, record_payload(&client_finished_record))
+            .unwrap();
         let expected_client_verify = derive_finished_verify_data(&master, true, &transcript);
-        assert_eq!(client_finished_plain, build_finished_handshake(expected_client_verify));
+        assert_eq!(
+            client_finished_plain,
+            build_finished_handshake(expected_client_verify)
+        );
         transcript.extend_from_slice(&client_finished_plain);
         let server_verify = derive_finished_verify_data(&master, false, &transcript);
         let server_finished = build_finished_handshake(server_verify);
-        let server_finished_record = record_with_payload(22, &server_out.encrypt(22, &server_finished).unwrap());
-        tokio::io::AsyncWriteExt::write_all(&mut stream, &build_change_cipher_spec_record()).await.unwrap();
-        tokio::io::AsyncWriteExt::write_all(&mut stream, &server_finished_record).await.unwrap();
+        let server_finished_record =
+            record_with_payload(22, &server_out.encrypt(22, &server_finished).unwrap());
+        tokio::io::AsyncWriteExt::write_all(&mut stream, &build_change_cipher_spec_record())
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut stream, &server_finished_record)
+            .await
+            .unwrap();
 
         let app_record = read_record(&mut stream).await;
         let app_plain = server_in.decrypt(23, record_payload(&app_record)).unwrap();
         assert_eq!(app_plain, request_ip);
 
-        let reply = record_with_payload(23, &server_out.encrypt(23, &[0x00, 0x00, 0x00, 0x00, 10, 0, 0, 8]).unwrap());
-        tokio::io::AsyncWriteExt::write_all(&mut stream, &reply).await.unwrap();
+        let reply = record_with_payload(
+            23,
+            &server_out
+                .encrypt(23, &[0x00, 0x00, 0x00, 0x00, 10, 0, 0, 8])
+                .unwrap(),
+        );
+        tokio::io::AsyncWriteExt::write_all(&mut stream, &reply)
+            .await
+            .unwrap();
     });
 
     let ip = smelly_connect::auth::control::request_ip_via_tunnel(addr, &token, Some("RC4-SHA"))
-    .await
-    .unwrap();
+        .await
+        .unwrap();
     assert_eq!(ip.to_string(), "10.0.0.8");
     server.await.unwrap();
 
-    fn build_server_flight_record(server_random: [u8; 32], session_id: [u8; 32], cert_der: &[u8]) -> Vec<u8> {
+    fn build_server_flight_record(
+        server_random: [u8; 32],
+        session_id: [u8; 32],
+        cert_der: &[u8],
+    ) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&0x0302_u16.to_be_bytes());
         body.extend_from_slice(&server_random);
@@ -192,11 +238,16 @@ async fn request_ip_uses_smelly_tls_data_plane() {
         record
     }
 
-    fn decrypt_client_key_exchange(handshake: &[u8], private_key: &Rsa<openssl::pkey::Private>) -> [u8; 48] {
+    fn decrypt_client_key_exchange(
+        handshake: &[u8],
+        private_key: &Rsa<openssl::pkey::Private>,
+    ) -> [u8; 48] {
         let encrypted_len = u16::from_be_bytes([handshake[4], handshake[5]]) as usize;
         let encrypted = &handshake[6..6 + encrypted_len];
         let mut decrypted = vec![0_u8; private_key.size() as usize];
-        let len = private_key.private_decrypt(encrypted, &mut decrypted, Padding::PKCS1).unwrap();
+        let len = private_key
+            .private_decrypt(encrypted, &mut decrypted, Padding::PKCS1)
+            .unwrap();
         let mut out = [0_u8; 48];
         out.copy_from_slice(&decrypted[..len]);
         out
@@ -204,10 +255,14 @@ async fn request_ip_uses_smelly_tls_data_plane() {
 
     async fn read_record(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
         let mut header = [0_u8; 5];
-        tokio::io::AsyncReadExt::read_exact(stream, &mut header).await.unwrap();
+        tokio::io::AsyncReadExt::read_exact(stream, &mut header)
+            .await
+            .unwrap();
         let len = u16::from_be_bytes([header[3], header[4]]) as usize;
         let mut body = vec![0_u8; len];
-        tokio::io::AsyncReadExt::read_exact(stream, &mut body).await.unwrap();
+        tokio::io::AsyncReadExt::read_exact(stream, &mut body)
+            .await
+            .unwrap();
         [header.to_vec(), body].concat()
     }
 }
@@ -221,7 +276,12 @@ async fn request_ip_falls_back_to_rc4_when_hint_path_fails() {
     use openssl::pkey::PKey;
     use openssl::rsa::{Padding, Rsa};
     use openssl::x509::{X509, X509NameBuilder};
-    use smelly_tls::{build_change_cipher_spec_record, build_finished_handshake, derive_finished_verify_data, derive_tls10_key_block, derive_tls10_master_secret, handshake_messages, record_payload, record_with_payload, Rc4Sha1Decryptor, Rc4Sha1Encryptor, TLS_RSA_WITH_RC4_128_SHA};
+    use smelly_tls::{
+        Rc4Sha1Decryptor, Rc4Sha1Encryptor, TLS_RSA_WITH_RC4_128_SHA,
+        build_change_cipher_spec_record, build_finished_handshake, derive_finished_verify_data,
+        derive_tls10_key_block, derive_tls10_master_secret, handshake_messages, record_payload,
+        record_with_payload,
+    };
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -237,19 +297,24 @@ async fn request_ip_falls_back_to_rc4_when_hint_path_fails() {
             let rsa = Rsa::generate(2048).unwrap();
             let key = PKey::from_rsa(rsa.clone()).unwrap();
             let mut name = X509NameBuilder::new().unwrap();
-            name.append_entry_by_nid(Nid::COMMONNAME, "localhost").unwrap();
+            name.append_entry_by_nid(Nid::COMMONNAME, "localhost")
+                .unwrap();
             let name = name.build();
             let mut cert = X509::builder().unwrap();
             cert.set_version(2).unwrap();
             let mut serial = BigNum::new().unwrap();
-            serial.pseudo_rand(64, openssl::bn::MsbOption::MAYBE_ZERO, false).unwrap();
+            serial
+                .pseudo_rand(64, openssl::bn::MsbOption::MAYBE_ZERO, false)
+                .unwrap();
             let serial = serial.to_asn1_integer().unwrap();
             cert.set_serial_number(&serial).unwrap();
             cert.set_subject_name(&name).unwrap();
             cert.set_issuer_name(&name).unwrap();
             cert.set_pubkey(&key).unwrap();
-            cert.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref()).unwrap();
-            cert.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref()).unwrap();
+            cert.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
+                .unwrap();
+            cert.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
+                .unwrap();
             cert.sign(&key, MessageDigest::sha256()).unwrap();
             let cert_der = cert.build().to_der().unwrap();
 
@@ -259,14 +324,22 @@ async fn request_ip_falls_back_to_rc4_when_hint_path_fails() {
             let offered = client_hello.cipher_suites[0];
             let server_random = [0x22; 32];
             let server_session_id = *b"fedcba9876543210fedcba9876543210";
-            let server_flight_record = build_server_flight_record(server_random, server_session_id, &cert_der, offered);
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &server_flight_record).await.unwrap();
+            let server_flight_record =
+                build_server_flight_record(server_random, server_session_id, &cert_der, offered);
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &server_flight_record)
+                .await
+                .unwrap();
 
             if attempt == 0 {
                 let _ = read_record(&mut stream).await; // cke
                 let _ = read_record(&mut stream).await; // ccs
                 let _ = read_record(&mut stream).await; // finished
-                tokio::io::AsyncWriteExt::write_all(&mut stream, &[0x15, 0x03, 0x02, 0x00, 0x02, 0x02, 0x15]).await.unwrap();
+                tokio::io::AsyncWriteExt::write_all(
+                    &mut stream,
+                    &[0x15, 0x03, 0x02, 0x00, 0x02, 0x02, 0x15],
+                )
+                .await
+                .unwrap();
                 continue;
             }
 
@@ -277,8 +350,13 @@ async fn request_ip_falls_back_to_rc4_when_hint_path_fails() {
                 &smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap(),
                 &rsa,
             );
-            let master = derive_tls10_master_secret(&decrypted_premaster, &client_hello.random, &server_random);
-            let key_block = derive_tls10_key_block(&master, &client_hello.random, &server_random, 72);
+            let master = derive_tls10_master_secret(
+                &decrypted_premaster,
+                &client_hello.random,
+                &server_random,
+            );
+            let key_block =
+                derive_tls10_key_block(&master, &client_hello.random, &server_random, 72);
             let client_mac: [u8; 20] = key_block[0..20].try_into().unwrap();
             let server_mac: [u8; 20] = key_block[20..40].try_into().unwrap();
             let client_key: [u8; 16] = key_block[40..56].try_into().unwrap();
@@ -286,24 +364,42 @@ async fn request_ip_falls_back_to_rc4_when_hint_path_fails() {
             let mut transcript = Vec::new();
             transcript.extend_from_slice(handshake_messages(&client_hello_record).as_slice());
             transcript.extend_from_slice(handshake_messages(&server_flight_record).as_slice());
-            let client_key_exchange_handshake = smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap();
+            let client_key_exchange_handshake =
+                smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap();
             transcript.extend_from_slice(&client_key_exchange_handshake);
             let mut server_in = Rc4Sha1Decryptor::new(client_mac, client_key);
             let mut server_out = Rc4Sha1Encryptor::new(server_mac, server_key);
-            let client_finished_plain = server_in.decrypt(22, record_payload(&client_finished_record)).unwrap();
+            let client_finished_plain = server_in
+                .decrypt(22, record_payload(&client_finished_record))
+                .unwrap();
             let expected_client_verify = derive_finished_verify_data(&master, true, &transcript);
-            assert_eq!(client_finished_plain, build_finished_handshake(expected_client_verify));
+            assert_eq!(
+                client_finished_plain,
+                build_finished_handshake(expected_client_verify)
+            );
             transcript.extend_from_slice(&client_finished_plain);
             let server_verify = derive_finished_verify_data(&master, false, &transcript);
             let server_finished = build_finished_handshake(server_verify);
-            let server_finished_record = record_with_payload(22, &server_out.encrypt(22, &server_finished).unwrap());
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &build_change_cipher_spec_record()).await.unwrap();
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &server_finished_record).await.unwrap();
+            let server_finished_record =
+                record_with_payload(22, &server_out.encrypt(22, &server_finished).unwrap());
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &build_change_cipher_spec_record())
+                .await
+                .unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &server_finished_record)
+                .await
+                .unwrap();
             let app_record = read_record(&mut stream).await;
             let app_plain = server_in.decrypt(23, record_payload(&app_record)).unwrap();
             assert_eq!(app_plain, request_ip);
-            let reply = record_with_payload(23, &server_out.encrypt(23, &[0x00, 0x00, 0x00, 0x00, 10, 0, 0, 8]).unwrap());
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &reply).await.unwrap();
+            let reply = record_with_payload(
+                23,
+                &server_out
+                    .encrypt(23, &[0x00, 0x00, 0x00, 0x00, 10, 0, 0, 8])
+                    .unwrap(),
+            );
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &reply)
+                .await
+                .unwrap();
             assert_eq!(offered, TLS_RSA_WITH_RC4_128_SHA);
         }
     });
@@ -314,7 +410,12 @@ async fn request_ip_falls_back_to_rc4_when_hint_path_fails() {
     assert_eq!(ip.to_string(), "10.0.0.8");
     server.await.unwrap();
 
-    fn build_server_flight_record(server_random: [u8; 32], session_id: [u8; 32], cert_der: &[u8], cipher: u16) -> Vec<u8> {
+    fn build_server_flight_record(
+        server_random: [u8; 32],
+        session_id: [u8; 32],
+        cert_der: &[u8],
+        cipher: u16,
+    ) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&0x0302_u16.to_be_bytes());
         body.extend_from_slice(&server_random);
@@ -345,11 +446,16 @@ async fn request_ip_falls_back_to_rc4_when_hint_path_fails() {
         record
     }
 
-    fn decrypt_client_key_exchange(handshake: &[u8], private_key: &Rsa<openssl::pkey::Private>) -> [u8; 48] {
+    fn decrypt_client_key_exchange(
+        handshake: &[u8],
+        private_key: &Rsa<openssl::pkey::Private>,
+    ) -> [u8; 48] {
         let encrypted_len = u16::from_be_bytes([handshake[4], handshake[5]]) as usize;
         let encrypted = &handshake[6..6 + encrypted_len];
         let mut decrypted = vec![0_u8; private_key.size() as usize];
-        let len = private_key.private_decrypt(encrypted, &mut decrypted, Padding::PKCS1).unwrap();
+        let len = private_key
+            .private_decrypt(encrypted, &mut decrypted, Padding::PKCS1)
+            .unwrap();
         let mut out = [0_u8; 48];
         out.copy_from_slice(&decrypted[..len]);
         out
@@ -357,10 +463,14 @@ async fn request_ip_falls_back_to_rc4_when_hint_path_fails() {
 
     async fn read_record(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
         let mut header = [0_u8; 5];
-        tokio::io::AsyncReadExt::read_exact(stream, &mut header).await.unwrap();
+        tokio::io::AsyncReadExt::read_exact(stream, &mut header)
+            .await
+            .unwrap();
         let len = u16::from_be_bytes([header[3], header[4]]) as usize;
         let mut body = vec![0_u8; len];
-        tokio::io::AsyncReadExt::read_exact(stream, &mut body).await.unwrap();
+        tokio::io::AsyncReadExt::read_exact(stream, &mut body)
+            .await
+            .unwrap();
         [header.to_vec(), body].concat()
     }
 }
@@ -375,9 +485,10 @@ async fn open_send_and_recv_tunnels_complete_handshakes() {
     use openssl::rsa::{Padding, Rsa};
     use openssl::x509::{X509, X509NameBuilder};
     use smelly_tls::{
+        Rc4Sha1Decryptor, Rc4Sha1Encryptor, TLS_RSA_WITH_RC4_128_SHA,
         build_change_cipher_spec_record, build_finished_handshake, derive_finished_verify_data,
         derive_tls10_key_block, derive_tls10_master_secret, handshake_messages, record_payload,
-        record_with_payload, Rc4Sha1Decryptor, Rc4Sha1Encryptor, TLS_RSA_WITH_RC4_128_SHA,
+        record_with_payload,
     };
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -392,23 +503,30 @@ async fn open_send_and_recv_tunnels_complete_handshakes() {
     let recv_handshake = smelly_connect::protocol::build_recv_handshake(&token, client_ip);
 
     let server = tokio::spawn(async move {
-        for (expected_handshake, reply_byte) in [(recv_handshake, 0x01_u8), (send_handshake, 0x02_u8)] {
+        for (expected_handshake, reply_byte) in
+            [(recv_handshake, 0x01_u8), (send_handshake, 0x02_u8)]
+        {
             let rsa = Rsa::generate(2048).unwrap();
             let key = PKey::from_rsa(rsa.clone()).unwrap();
             let mut name = X509NameBuilder::new().unwrap();
-            name.append_entry_by_nid(Nid::COMMONNAME, "localhost").unwrap();
+            name.append_entry_by_nid(Nid::COMMONNAME, "localhost")
+                .unwrap();
             let name = name.build();
             let mut cert = X509::builder().unwrap();
             cert.set_version(2).unwrap();
             let mut serial = BigNum::new().unwrap();
-            serial.pseudo_rand(64, openssl::bn::MsbOption::MAYBE_ZERO, false).unwrap();
+            serial
+                .pseudo_rand(64, openssl::bn::MsbOption::MAYBE_ZERO, false)
+                .unwrap();
             let serial = serial.to_asn1_integer().unwrap();
             cert.set_serial_number(&serial).unwrap();
             cert.set_subject_name(&name).unwrap();
             cert.set_issuer_name(&name).unwrap();
             cert.set_pubkey(&key).unwrap();
-            cert.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref()).unwrap();
-            cert.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref()).unwrap();
+            cert.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
+                .unwrap();
+            cert.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
+                .unwrap();
             cert.sign(&key, MessageDigest::sha256()).unwrap();
             let cert_der = cert.build().to_der().unwrap();
 
@@ -417,8 +535,15 @@ async fn open_send_and_recv_tunnels_complete_handshakes() {
             let client_hello = smelly_tls::parse_client_hello(&client_hello_record).unwrap();
             let server_random = [0x22; 32];
             let server_session_id = *b"fedcba9876543210fedcba9876543210";
-            let server_flight_record = build_server_flight_record(server_random, server_session_id, &cert_der, TLS_RSA_WITH_RC4_128_SHA);
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &server_flight_record).await.unwrap();
+            let server_flight_record = build_server_flight_record(
+                server_random,
+                server_session_id,
+                &cert_der,
+                TLS_RSA_WITH_RC4_128_SHA,
+            );
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &server_flight_record)
+                .await
+                .unwrap();
 
             let client_key_exchange_record = read_record(&mut stream).await;
             let _ccs = read_record(&mut stream).await;
@@ -427,8 +552,13 @@ async fn open_send_and_recv_tunnels_complete_handshakes() {
                 &smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap(),
                 &rsa,
             );
-            let master = derive_tls10_master_secret(&decrypted_premaster, &client_hello.random, &server_random);
-            let key_block = derive_tls10_key_block(&master, &client_hello.random, &server_random, 72);
+            let master = derive_tls10_master_secret(
+                &decrypted_premaster,
+                &client_hello.random,
+                &server_random,
+            );
+            let key_block =
+                derive_tls10_key_block(&master, &client_hello.random, &server_random, 72);
             let client_mac: [u8; 20] = key_block[0..20].try_into().unwrap();
             let server_mac: [u8; 20] = key_block[20..40].try_into().unwrap();
             let client_key: [u8; 16] = key_block[40..56].try_into().unwrap();
@@ -436,52 +566,76 @@ async fn open_send_and_recv_tunnels_complete_handshakes() {
             let mut transcript = Vec::new();
             transcript.extend_from_slice(handshake_messages(&client_hello_record).as_slice());
             transcript.extend_from_slice(handshake_messages(&server_flight_record).as_slice());
-            let client_key_exchange_handshake = smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap();
+            let client_key_exchange_handshake =
+                smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap();
             transcript.extend_from_slice(&client_key_exchange_handshake);
             let mut server_in = Rc4Sha1Decryptor::new(client_mac, client_key);
             let mut server_out = Rc4Sha1Encryptor::new(server_mac, server_key);
-            let client_finished_plain = server_in.decrypt(22, record_payload(&client_finished_record)).unwrap();
+            let client_finished_plain = server_in
+                .decrypt(22, record_payload(&client_finished_record))
+                .unwrap();
             let expected_client_verify = derive_finished_verify_data(&master, true, &transcript);
-            assert_eq!(client_finished_plain, build_finished_handshake(expected_client_verify));
+            assert_eq!(
+                client_finished_plain,
+                build_finished_handshake(expected_client_verify)
+            );
             transcript.extend_from_slice(&client_finished_plain);
             let server_verify = derive_finished_verify_data(&master, false, &transcript);
             let server_finished = build_finished_handshake(server_verify);
-            let server_finished_record = record_with_payload(22, &server_out.encrypt(22, &server_finished).unwrap());
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &build_change_cipher_spec_record()).await.unwrap();
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &server_finished_record).await.unwrap();
+            let server_finished_record =
+                record_with_payload(22, &server_out.encrypt(22, &server_finished).unwrap());
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &build_change_cipher_spec_record())
+                .await
+                .unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &server_finished_record)
+                .await
+                .unwrap();
 
             let app_record = read_record(&mut stream).await;
             let app_plain = server_in.decrypt(23, record_payload(&app_record)).unwrap();
             assert_eq!(app_plain, expected_handshake);
 
             let reply = record_with_payload(23, &server_out.encrypt(23, &[reply_byte]).unwrap());
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &reply).await.unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &reply)
+                .await
+                .unwrap();
 
             let extra_record = read_record(&mut stream).await;
-            let extra_plain = server_in.decrypt(23, record_payload(&extra_record)).unwrap();
+            let extra_plain = server_in
+                .decrypt(23, record_payload(&extra_record))
+                .unwrap();
             let echo = record_with_payload(23, &server_out.encrypt(23, &extra_plain).unwrap());
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &echo).await.unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &echo)
+                .await
+                .unwrap();
         }
     });
 
-    let mut recv_tunnel = smelly_connect::auth::control::open_recv_tunnel(addr, &token, client_ip, Some("RC4-SHA"))
-        .await
-        .unwrap();
+    let mut recv_tunnel =
+        smelly_connect::auth::control::open_recv_tunnel(addr, &token, client_ip, Some("RC4-SHA"))
+            .await
+            .unwrap();
 
     recv_tunnel.send_application_data(b"x").await.unwrap();
     let recv_echo = recv_tunnel.read_application_data().await.unwrap();
     assert_eq!(recv_echo, b"x");
 
-    let mut send_tunnel = smelly_connect::auth::control::open_send_tunnel(addr, &token, client_ip, Some("RC4-SHA"))
-        .await
-        .unwrap();
+    let mut send_tunnel =
+        smelly_connect::auth::control::open_send_tunnel(addr, &token, client_ip, Some("RC4-SHA"))
+            .await
+            .unwrap();
     send_tunnel.send_application_data(b"y").await.unwrap();
     let send_echo = send_tunnel.read_application_data().await.unwrap();
     assert_eq!(send_echo, b"y");
 
     server.await.unwrap();
 
-    fn build_server_flight_record(server_random: [u8; 32], session_id: [u8; 32], cert_der: &[u8], cipher: u16) -> Vec<u8> {
+    fn build_server_flight_record(
+        server_random: [u8; 32],
+        session_id: [u8; 32],
+        cert_der: &[u8],
+        cipher: u16,
+    ) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&0x0302_u16.to_be_bytes());
         body.extend_from_slice(&server_random);
@@ -512,11 +666,16 @@ async fn open_send_and_recv_tunnels_complete_handshakes() {
         record
     }
 
-    fn decrypt_client_key_exchange(handshake: &[u8], private_key: &Rsa<openssl::pkey::Private>) -> [u8; 48] {
+    fn decrypt_client_key_exchange(
+        handshake: &[u8],
+        private_key: &Rsa<openssl::pkey::Private>,
+    ) -> [u8; 48] {
         let encrypted_len = u16::from_be_bytes([handshake[4], handshake[5]]) as usize;
         let encrypted = &handshake[6..6 + encrypted_len];
         let mut decrypted = vec![0_u8; private_key.size() as usize];
-        let len = private_key.private_decrypt(encrypted, &mut decrypted, Padding::PKCS1).unwrap();
+        let len = private_key
+            .private_decrypt(encrypted, &mut decrypted, Padding::PKCS1)
+            .unwrap();
         let mut out = [0_u8; 48];
         out.copy_from_slice(&decrypted[..len]);
         out
@@ -524,10 +683,14 @@ async fn open_send_and_recv_tunnels_complete_handshakes() {
 
     async fn read_record(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
         let mut header = [0_u8; 5];
-        tokio::io::AsyncReadExt::read_exact(stream, &mut header).await.unwrap();
+        tokio::io::AsyncReadExt::read_exact(stream, &mut header)
+            .await
+            .unwrap();
         let len = u16::from_be_bytes([header[3], header[4]]) as usize;
         let mut body = vec![0_u8; len];
-        tokio::io::AsyncReadExt::read_exact(stream, &mut body).await.unwrap();
+        tokio::io::AsyncReadExt::read_exact(stream, &mut body)
+            .await
+            .unwrap();
         [header.to_vec(), body].concat()
     }
 }
@@ -541,7 +704,12 @@ async fn spawn_legacy_packet_device_bridges_packets_between_stack_and_tunnels() 
     use openssl::pkey::PKey;
     use openssl::rsa::{Padding, Rsa};
     use openssl::x509::{X509, X509NameBuilder};
-    use smelly_tls::{build_change_cipher_spec_record, build_finished_handshake, derive_finished_verify_data, derive_tls10_key_block, derive_tls10_master_secret, handshake_messages, record_payload, record_with_payload, Rc4Sha1Decryptor, Rc4Sha1Encryptor, TLS_RSA_WITH_RC4_128_SHA};
+    use smelly_tls::{
+        Rc4Sha1Decryptor, Rc4Sha1Encryptor, TLS_RSA_WITH_RC4_128_SHA,
+        build_change_cipher_spec_record, build_finished_handshake, derive_finished_verify_data,
+        derive_tls10_key_block, derive_tls10_master_secret, handshake_messages, record_payload,
+        record_with_payload,
+    };
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -556,25 +724,35 @@ async fn spawn_legacy_packet_device_bridges_packets_between_stack_and_tunnels() 
 
     let server = tokio::spawn(async move {
         for (expected_handshake, reply_byte, push_after_handshake, expect_packet) in [
-            (recv_handshake, 0x01_u8, Some(vec![0xde, 0xad, 0xbe, 0xef]), None),
+            (
+                recv_handshake,
+                0x01_u8,
+                Some(vec![0xde, 0xad, 0xbe, 0xef]),
+                None,
+            ),
             (send_handshake, 0x02_u8, None, Some(vec![0xca, 0xfe])),
         ] {
             let rsa = Rsa::generate(2048).unwrap();
             let key = PKey::from_rsa(rsa.clone()).unwrap();
             let mut name = X509NameBuilder::new().unwrap();
-            name.append_entry_by_nid(Nid::COMMONNAME, "localhost").unwrap();
+            name.append_entry_by_nid(Nid::COMMONNAME, "localhost")
+                .unwrap();
             let name = name.build();
             let mut cert = X509::builder().unwrap();
             cert.set_version(2).unwrap();
             let mut serial = BigNum::new().unwrap();
-            serial.pseudo_rand(64, openssl::bn::MsbOption::MAYBE_ZERO, false).unwrap();
+            serial
+                .pseudo_rand(64, openssl::bn::MsbOption::MAYBE_ZERO, false)
+                .unwrap();
             let serial = serial.to_asn1_integer().unwrap();
             cert.set_serial_number(&serial).unwrap();
             cert.set_subject_name(&name).unwrap();
             cert.set_issuer_name(&name).unwrap();
             cert.set_pubkey(&key).unwrap();
-            cert.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref()).unwrap();
-            cert.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref()).unwrap();
+            cert.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
+                .unwrap();
+            cert.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
+                .unwrap();
             cert.sign(&key, MessageDigest::sha256()).unwrap();
             let cert_der = cert.build().to_der().unwrap();
 
@@ -583,8 +761,15 @@ async fn spawn_legacy_packet_device_bridges_packets_between_stack_and_tunnels() 
             let client_hello = smelly_tls::parse_client_hello(&client_hello_record).unwrap();
             let server_random = [0x22; 32];
             let server_session_id = *b"fedcba9876543210fedcba9876543210";
-            let server_flight_record = build_server_flight_record(server_random, server_session_id, &cert_der, TLS_RSA_WITH_RC4_128_SHA);
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &server_flight_record).await.unwrap();
+            let server_flight_record = build_server_flight_record(
+                server_random,
+                server_session_id,
+                &cert_der,
+                TLS_RSA_WITH_RC4_128_SHA,
+            );
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &server_flight_record)
+                .await
+                .unwrap();
 
             let client_key_exchange_record = read_record(&mut stream).await;
             let _ccs = read_record(&mut stream).await;
@@ -593,8 +778,13 @@ async fn spawn_legacy_packet_device_bridges_packets_between_stack_and_tunnels() 
                 &smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap(),
                 &rsa,
             );
-            let master = derive_tls10_master_secret(&decrypted_premaster, &client_hello.random, &server_random);
-            let key_block = derive_tls10_key_block(&master, &client_hello.random, &server_random, 72);
+            let master = derive_tls10_master_secret(
+                &decrypted_premaster,
+                &client_hello.random,
+                &server_random,
+            );
+            let key_block =
+                derive_tls10_key_block(&master, &client_hello.random, &server_random, 72);
             let client_mac: [u8; 20] = key_block[0..20].try_into().unwrap();
             let server_mac: [u8; 20] = key_block[20..40].try_into().unwrap();
             let client_key: [u8; 16] = key_block[40..56].try_into().unwrap();
@@ -602,29 +792,46 @@ async fn spawn_legacy_packet_device_bridges_packets_between_stack_and_tunnels() 
             let mut transcript = Vec::new();
             transcript.extend_from_slice(handshake_messages(&client_hello_record).as_slice());
             transcript.extend_from_slice(handshake_messages(&server_flight_record).as_slice());
-            let client_key_exchange_handshake = smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap();
+            let client_key_exchange_handshake =
+                smelly_tls::parse_single_handshake(&client_key_exchange_record).unwrap();
             transcript.extend_from_slice(&client_key_exchange_handshake);
             let mut server_in = Rc4Sha1Decryptor::new(client_mac, client_key);
             let mut server_out = Rc4Sha1Encryptor::new(server_mac, server_key);
-            let client_finished_plain = server_in.decrypt(22, record_payload(&client_finished_record)).unwrap();
+            let client_finished_plain = server_in
+                .decrypt(22, record_payload(&client_finished_record))
+                .unwrap();
             let expected_client_verify = derive_finished_verify_data(&master, true, &transcript);
-            assert_eq!(client_finished_plain, build_finished_handshake(expected_client_verify));
+            assert_eq!(
+                client_finished_plain,
+                build_finished_handshake(expected_client_verify)
+            );
             transcript.extend_from_slice(&client_finished_plain);
             let server_verify = derive_finished_verify_data(&master, false, &transcript);
             let server_finished = build_finished_handshake(server_verify);
-            let server_finished_record = record_with_payload(22, &server_out.encrypt(22, &server_finished).unwrap());
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &build_change_cipher_spec_record()).await.unwrap();
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &server_finished_record).await.unwrap();
+            let server_finished_record =
+                record_with_payload(22, &server_out.encrypt(22, &server_finished).unwrap());
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &build_change_cipher_spec_record())
+                .await
+                .unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &server_finished_record)
+                .await
+                .unwrap();
 
             let handshake_record = read_record(&mut stream).await;
-            let handshake_plain = server_in.decrypt(23, record_payload(&handshake_record)).unwrap();
+            let handshake_plain = server_in
+                .decrypt(23, record_payload(&handshake_record))
+                .unwrap();
             assert_eq!(handshake_plain, expected_handshake);
             let reply = record_with_payload(23, &server_out.encrypt(23, &[reply_byte]).unwrap());
-            tokio::io::AsyncWriteExt::write_all(&mut stream, &reply).await.unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &reply)
+                .await
+                .unwrap();
 
             if let Some(packet) = push_after_handshake {
                 let push = record_with_payload(23, &server_out.encrypt(23, &packet).unwrap());
-                tokio::io::AsyncWriteExt::write_all(&mut stream, &push).await.unwrap();
+                tokio::io::AsyncWriteExt::write_all(&mut stream, &push)
+                    .await
+                    .unwrap();
             }
 
             if let Some(packet) = expect_packet {
@@ -649,7 +856,12 @@ async fn spawn_legacy_packet_device_bridges_packets_between_stack_and_tunnels() 
     device.write_from_stack(vec![0xca, 0xfe]).await;
     server.await.unwrap();
 
-    fn build_server_flight_record(server_random: [u8; 32], session_id: [u8; 32], cert_der: &[u8], cipher: u16) -> Vec<u8> {
+    fn build_server_flight_record(
+        server_random: [u8; 32],
+        session_id: [u8; 32],
+        cert_der: &[u8],
+        cipher: u16,
+    ) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&0x0302_u16.to_be_bytes());
         body.extend_from_slice(&server_random);
@@ -680,11 +892,16 @@ async fn spawn_legacy_packet_device_bridges_packets_between_stack_and_tunnels() 
         record
     }
 
-    fn decrypt_client_key_exchange(handshake: &[u8], private_key: &Rsa<openssl::pkey::Private>) -> [u8; 48] {
+    fn decrypt_client_key_exchange(
+        handshake: &[u8],
+        private_key: &Rsa<openssl::pkey::Private>,
+    ) -> [u8; 48] {
         let encrypted_len = u16::from_be_bytes([handshake[4], handshake[5]]) as usize;
         let encrypted = &handshake[6..6 + encrypted_len];
         let mut decrypted = vec![0_u8; private_key.size() as usize];
-        let len = private_key.private_decrypt(encrypted, &mut decrypted, Padding::PKCS1).unwrap();
+        let len = private_key
+            .private_decrypt(encrypted, &mut decrypted, Padding::PKCS1)
+            .unwrap();
         let mut out = [0_u8; 48];
         out.copy_from_slice(&decrypted[..len]);
         out
@@ -692,10 +909,14 @@ async fn spawn_legacy_packet_device_bridges_packets_between_stack_and_tunnels() 
 
     async fn read_record(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
         let mut header = [0_u8; 5];
-        tokio::io::AsyncReadExt::read_exact(stream, &mut header).await.unwrap();
+        tokio::io::AsyncReadExt::read_exact(stream, &mut header)
+            .await
+            .unwrap();
         let len = u16::from_be_bytes([header[3], header[4]]) as usize;
         let mut body = vec![0_u8; len];
-        tokio::io::AsyncReadExt::read_exact(stream, &mut body).await.unwrap();
+        tokio::io::AsyncReadExt::read_exact(stream, &mut body)
+            .await
+            .unwrap();
         [header.to_vec(), body].concat()
     }
 }

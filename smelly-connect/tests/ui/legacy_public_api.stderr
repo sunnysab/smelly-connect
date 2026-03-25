@@ -23,8 +23,10 @@ error[E0603]: function `run_control_plane` is private
 note: the function `run_control_plane` is defined here
  --> src/auth/control.rs
   |
-  | pub(crate) async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlaneState, Error> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | / pub(crate) async fn run_control_plane(
+  | |     config: &EasyConnectConfig,
+  | | ) -> Result<ControlPlaneState, Error> {
+  | |_____________________________________^
 
 error[E0624]: method `with_legacy_data_plane` is private
  --> tests/ui/legacy_public_api.rs:7:33

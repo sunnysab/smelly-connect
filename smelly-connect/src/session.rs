@@ -10,8 +10,8 @@ use crate::config::EasyConnectConfig;
 use crate::error::{Error, ProxyError, RouteDecisionError, TransportError};
 use crate::proxy::http::ProxyHandle;
 use crate::resolver::SessionResolver;
-use crate::runtime::tasks::keepalive::KeepaliveHandle;
 use crate::resource::{DomainRule, IpRule, ResourceSet};
+use crate::runtime::tasks::keepalive::KeepaliveHandle;
 use crate::target::TargetAddr;
 use crate::transport::device::PacketDevice;
 use crate::transport::{TransportStack, VpnStream};
@@ -158,10 +158,11 @@ impl EasyConnectSession {
 
     #[allow(dead_code)]
     pub(crate) async fn spawn_packet_device(&self) -> Result<PacketDevice, Error> {
-        let cfg = self
-            .legacy_data_plane
-            .as_ref()
-            .ok_or_else(|| Error::Transport(TransportError::ConnectFailed("legacy data plane unavailable".to_string())))?;
+        let cfg = self.legacy_data_plane.as_ref().ok_or_else(|| {
+            Error::Transport(TransportError::ConnectFailed(
+                "legacy data plane unavailable".to_string(),
+            ))
+        })?;
         crate::auth::control::spawn_legacy_packet_device(
             cfg.server_addr,
             &cfg.token,
@@ -321,7 +322,6 @@ pub mod tests {
             Ok(VpnStream::new(client))
         })
     }
-
 }
 
 impl From<Ipv4Addr> for IcmpKeepAliveTarget {

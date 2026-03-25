@@ -9,7 +9,10 @@ impl DerivedToken {
     }
 }
 
-pub fn derive_token(server_session_id_hex: &str, twfid: &str) -> Result<DerivedToken, ProtocolError> {
+pub fn derive_token(
+    server_session_id_hex: &str,
+    twfid: &str,
+) -> Result<DerivedToken, ProtocolError> {
     if server_session_id_hex.len() < 31 {
         return Err(ProtocolError::InvalidSessionIdLength);
     }
