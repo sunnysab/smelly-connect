@@ -21,6 +21,7 @@ pub enum AuthError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolError {
+    InvalidSessionIdLength,
     UnexpectedReplyType(u8),
     ReplyTooShort,
 }
