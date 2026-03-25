@@ -1,3 +1,7 @@
+pub mod facade;
+pub mod domain;
+pub mod kernel;
+pub mod runtime;
 pub mod auth;
 pub mod config;
 pub mod error;
@@ -10,6 +14,8 @@ pub mod session;
 pub mod target;
 pub mod transport;
 
+pub use domain::session::Session;
+pub use facade::client::EasyConnectClient;
 pub use auth::captcha::CaptchaHandler;
 pub use config::EasyConnectConfig;
 pub use error::{CaptchaError, Error};
