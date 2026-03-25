@@ -1,0 +1,27 @@
+[vpn]
+server = "vpn1.sit.edu.cn"
+default_keepalive_host = "jwxt.sit.edu.cn"
+
+[pool]
+prewarm = 2
+connect_timeout_secs = 20
+healthcheck_interval_secs = 60
+selection = "round_robin"
+
+[[accounts]]
+name = "acct-01"
+username = "user1"
+password = "pass1"
+
+[[accounts]]
+name = "acct-02"
+username = "user2"
+password = "pass2"
+
+[proxy.http]
+enabled = true
+listen = "127.0.0.1:8080"
+
+[proxy.socks5]
+enabled = true
+listen = "127.0.0.1:1080"
