@@ -1,0 +1,7 @@
+<Response>
+  <TwfID>dummy-twfid</TwfID>
+  <RSA_ENCRYPT_KEY>ABCD</RSA_ENCRYPT_KEY>
+  <RSA_ENCRYPT_EXP>65537</RSA_ENCRYPT_EXP>
+  <CSRF_RAND_CODE>csrf-1234</CSRF_RAND_CODE>
+  <RndImg>1</RndImg>
+</Response>

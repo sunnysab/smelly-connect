@@ -8,3 +8,4 @@ name = "smelly_connect"
 path = "src/lib.rs"
 
 [dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
