@@ -44,3 +44,10 @@ async fn pool_removes_failed_session_from_rotation_and_retries_after_fixed_delay
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     assert!(pool.ready_count().await >= 1);
 }
+
+#[tokio::test]
+async fn pool_exposes_state_summary_and_selectable_count_for_tests() {
+    let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
+    assert!(pool.state_summary_for_test().await.contains("Ready"));
+    assert!(pool.has_selectable_nodes_for_test().await);
+}

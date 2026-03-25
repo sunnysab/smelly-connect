@@ -158,8 +158,15 @@ where
         .map_err(|err| err.to_string())?;
     let addr = listener.local_addr().map_err(|err| err.to_string())?;
     tokio::spawn(async move {
-        if let Ok((stream, _)) = listener.accept().await {
-            let _ = handle_client(stream, pool, connector).await;
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let pool = pool.clone();
+            let connector = connector.clone();
+            tokio::spawn(async move {
+                let _ = handle_client(stream, pool, connector).await;
+            });
         }
     });
     Ok(addr)

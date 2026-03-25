@@ -269,6 +269,32 @@ impl SessionPool {
             .count()
     }
 
+    pub async fn state_summary_for_test(&self) -> String {
+        let state = self.inner.lock().await;
+        state
+            .nodes
+            .iter()
+            .map(|node| {
+                let label = match node.state {
+                    AccountState::Configured(_) => "Configured",
+                    AccountState::Connecting => "Connecting",
+                    AccountState::Ready(_) => "Ready",
+                    AccountState::Failed(_) => "Failed",
+                };
+                format!("{}:{label}", node.name)
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    pub async fn has_selectable_nodes_for_test(&self) -> bool {
+        let state = self.inner.lock().await;
+        state
+            .nodes
+            .iter()
+            .any(|node| matches!(node.state, AccountState::Ready(_)))
+    }
+
     pub async fn next_account_name(&self) -> Result<String, PoolError> {
         Ok(self.next_session().await?.account_name().to_string())
     }
