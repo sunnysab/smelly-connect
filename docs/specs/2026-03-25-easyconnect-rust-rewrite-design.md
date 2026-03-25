@@ -1,7 +1,7 @@
 # EasyConnect Rust Rewrite Design
 
 - Date: 2026-03-25
-- Status: Draft approved in conversation, pending written-spec review
+- Status: Reviewed draft
 - Scope: First version of a Rust rewrite based on `/home/sunnysab/RE/easyconnect/zju-connect`
 
 ## Goal
@@ -199,6 +199,8 @@ For domain targets, the resolver pipeline should be:
 4. If remote DNS is unavailable or fails, fall back to system DNS.
 5. Re-check the resolved IP against IP resource rules before dialing.
 
+Because EasyConnect remote DNS servers are commonly UDP-based, the implementation may need internal UDP capability for DNS queries over the VPN packet path even though public UDP proxying is out of scope. That internal DNS path is allowed in v1 and remains an implementation detail rather than a public general-purpose UDP API.
+
 ### Routing Policy
 
 Default behavior for the first version:
@@ -217,6 +219,18 @@ The same routing path must be reused by:
 ## Transport Design
 
 The transport layer is session-backed and async-first.
+
+### Packet Foundation
+
+EasyConnect does not directly expose a normal outbound TCP socket API. The protocol exposes session-authenticated packet channels that behave as an L3 transport. Because of that, the Rust implementation needs an internal user-space network stack for TCP stream creation.
+
+The implementation plan should therefore include:
+
+- one packet device abstraction backed by the EasyConnect send/receive channels
+- one user-space IP/TCP stack running on top of that device
+- one async adapter that turns stack-managed outbound TCP connections into `VpnStream`
+
+This spec does not lock the project to a specific crate yet, but the implementation plan must explicitly choose a Rust user-space stack suitable for async integration on Linux.
 
 ### Requirements
 
@@ -328,6 +342,15 @@ Add sample-driven tests using captured or redacted fixtures for:
 - resource response
 - assigned-IP response
 
+### Transport Tests
+
+Add focused tests for:
+
+- packet-channel framing and parsing
+- packet injection and extraction at the user-space stack boundary
+- TCP stream establishment over the internal stack
+- internal DNS query flow when remote DNS is enabled
+
 ### Manual Verification
 
 Before claiming the implementation complete, verify against a real EasyConnect environment:
@@ -350,6 +373,8 @@ The first implementation plan should cover only:
 - client IP retrieval
 - resource and DNS parsing
 - async session object
+- internal packet-device abstraction
+- user-space TCP stack integration
 - TCP connect API
 - local HTTP proxy
 - Reqwest/Hyper integration
@@ -367,3 +392,12 @@ Anything beyond that should be treated as a later milestone.
 - Captcha handling is done by an external callback that returns text.
 - The stable transport abstraction is an async stream, not a raw file descriptor.
 - Non-resource targets are rejected by default in v1.
+
+## Written Spec Review
+
+Local review against the spec-review checklist found and resolved these planning blockers:
+
+- The transport section now explicitly states that EasyConnect exposes packet channels rather than a direct target TCP socket API, so planning must include a user-space TCP stack.
+- The DNS section now explicitly allows internal UDP capability for remote DNS resolution while keeping public UDP support out of scope for v1.
+
+Review result after those fixes: approved for implementation planning.
