@@ -2,7 +2,7 @@ use tokio::sync::{Mutex, mpsc};
 
 pub struct PacketDevice {
     inbound_tx: mpsc::Sender<Vec<u8>>,
-    inbound_rx: Mutex<mpsc::Receiver<Vec<u8>>>,
+    inbound_rx: Option<Mutex<mpsc::Receiver<Vec<u8>>>>,
     outbound_tx: mpsc::Sender<Vec<u8>>,
     outbound_rx: Option<Mutex<mpsc::Receiver<Vec<u8>>>>,
 }
@@ -16,7 +16,7 @@ impl PacketDevice {
     ) -> Self {
         Self {
             inbound_tx,
-            inbound_rx: Mutex::new(inbound_rx),
+            inbound_rx: Some(Mutex::new(inbound_rx)),
             outbound_tx,
             outbound_rx: Some(Mutex::new(outbound_rx)),
         }
@@ -27,7 +27,8 @@ impl PacketDevice {
     }
 
     pub async fn read_for_stack(&self) -> Option<Vec<u8>> {
-        self.inbound_rx.lock().await.recv().await
+        let inbound_rx = self.inbound_rx.as_ref()?;
+        inbound_rx.lock().await.recv().await
     }
 
     pub async fn write_from_stack(&self, packet: Vec<u8>) {
@@ -41,5 +42,13 @@ impl PacketDevice {
 
     pub fn take_outbound_rx(&mut self) -> Option<mpsc::Receiver<Vec<u8>>> {
         self.outbound_rx.take().map(|mutex| mutex.into_inner())
+    }
+
+    pub fn take_inbound_rx(&mut self) -> Option<mpsc::Receiver<Vec<u8>>> {
+        self.inbound_rx.take().map(|mutex| mutex.into_inner())
+    }
+
+    pub fn outbound_sender(&self) -> mpsc::Sender<Vec<u8>> {
+        self.outbound_tx.clone()
     }
 }

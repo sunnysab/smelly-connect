@@ -1,4 +1,5 @@
 pub mod device;
+pub mod netstack;
 pub mod stack;
 pub mod stream;
 
@@ -33,6 +34,10 @@ pub mod tests {
 
         pub async fn read_for_vpn(&self) -> Vec<u8> {
             self.device.read_for_vpn().await.unwrap()
+        }
+
+        pub fn into_device(self) -> PacketDevice {
+            self.device
         }
     }
 
