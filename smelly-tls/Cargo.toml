@@ -8,8 +8,12 @@ name = "smelly_tls"
 path = "src/lib.rs"
 
 [dependencies]
+hmac = "0.12"
 hex = "0.4"
+md-5 = "0.10"
+rc4 = "0.1"
 rsa = "0.9"
+sha1 = "0.10"
 tokio = { version = "1", features = ["net", "io-util", "macros", "rt"], optional = true }
 
 [features]

@@ -1,8 +1,12 @@
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
 
+use hmac::{Hmac, Mac};
+use md5::Md5;
+use rc4::{KeyInit as Rc4KeyInit, Rc4, StreamCipher};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
+use sha1::Sha1;
 
 pub const TLS11: u16 = 0x0302;
 pub const TLS_RSA_WITH_RC4_128_SHA: u16 = 0x0005;
@@ -291,4 +295,130 @@ pub fn build_client_key_exchange(
     handshake.extend_from_slice(&body_len.to_be_bytes()[1..4]);
     handshake.extend_from_slice(&body);
     Ok(handshake)
+}
+
+pub fn derive_tls10_master_secret(
+    premaster: &[u8; 48],
+    client_random: &[u8; 32],
+    server_random: &[u8; 32],
+) -> [u8; 48] {
+    let seed = [client_random.as_slice(), server_random.as_slice()].concat();
+    let bytes = tls10_prf(premaster, b"master secret", &seed, 48);
+    let mut out = [0_u8; 48];
+    out.copy_from_slice(&bytes);
+    out
+}
+
+pub fn derive_tls10_key_block(
+    master_secret: &[u8; 48],
+    client_random: &[u8; 32],
+    server_random: &[u8; 32],
+    len: usize,
+) -> Vec<u8> {
+    let seed = [server_random.as_slice(), client_random.as_slice()].concat();
+    tls10_prf(master_secret, b"key expansion", &seed, len)
+}
+
+pub fn encrypt_rc4_sha1_record(
+    content_type: u8,
+    sequence_number: u64,
+    mac_key: &[u8; 20],
+    enc_key: &[u8; 16],
+    plaintext: &[u8],
+) -> io::Result<Vec<u8>> {
+    let mac = tls10_record_mac(mac_key, sequence_number, content_type, plaintext)?;
+    let mut payload = Vec::with_capacity(plaintext.len() + mac.len());
+    payload.extend_from_slice(plaintext);
+    payload.extend_from_slice(&mac);
+    apply_rc4(enc_key, &mut payload)?;
+    Ok(payload)
+}
+
+pub fn decrypt_rc4_sha1_record(
+    content_type: u8,
+    sequence_number: u64,
+    mac_key: &[u8; 20],
+    enc_key: &[u8; 16],
+    ciphertext: &[u8],
+) -> io::Result<Vec<u8>> {
+    if ciphertext.len() < 20 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "record too short"));
+    }
+
+    let mut payload = ciphertext.to_vec();
+    apply_rc4(enc_key, &mut payload)?;
+    let split = payload.len() - 20;
+    let plaintext = payload[..split].to_vec();
+    let received_mac = &payload[split..];
+    let expected_mac = tls10_record_mac(mac_key, sequence_number, content_type, &plaintext)?;
+    if received_mac != expected_mac.as_slice() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad record mac"));
+    }
+    Ok(plaintext)
+}
+
+fn tls10_prf(secret: &[u8], label: &[u8], seed: &[u8], len: usize) -> Vec<u8> {
+    let full_seed = [label, seed].concat();
+    let left = &secret[..secret.len().div_ceil(2)];
+    let right = &secret[secret.len() / 2..];
+
+    let md5_bytes = p_hash::<Hmac<Md5>>(left, &full_seed, len);
+    let sha1_bytes = p_hash::<Hmac<Sha1>>(right, &full_seed, len);
+
+    md5_bytes
+        .iter()
+        .zip(sha1_bytes.iter())
+        .map(|(a, b)| a ^ b)
+        .collect()
+}
+
+fn p_hash<M>(secret: &[u8], seed: &[u8], len: usize) -> Vec<u8>
+where
+    M: hmac::digest::KeyInit + hmac::Mac + Clone,
+{
+    let mut out = Vec::with_capacity(len);
+    let mut a = hmac_once::<M>(secret, seed);
+    while out.len() < len {
+        let mut block_seed = Vec::with_capacity(a.len() + seed.len());
+        block_seed.extend_from_slice(&a);
+        block_seed.extend_from_slice(seed);
+        out.extend_from_slice(&hmac_once::<M>(secret, &block_seed));
+        a = hmac_once::<M>(secret, &a);
+    }
+    out.truncate(len);
+    out
+}
+
+fn hmac_once<M>(secret: &[u8], data: &[u8]) -> Vec<u8>
+where
+    M: hmac::digest::KeyInit + hmac::Mac,
+{
+    let mut mac = <M as hmac::digest::KeyInit>::new_from_slice(secret)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid hmac key"))
+        .unwrap();
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
+}
+
+fn tls10_record_mac(
+    mac_key: &[u8; 20],
+    sequence_number: u64,
+    content_type: u8,
+    plaintext: &[u8],
+) -> io::Result<Vec<u8>> {
+    let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(mac_key)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+    mac.update(&sequence_number.to_be_bytes());
+    mac.update(&[content_type]);
+    mac.update(&TLS11.to_be_bytes());
+    mac.update(&(plaintext.len() as u16).to_be_bytes());
+    mac.update(plaintext);
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn apply_rc4(key: &[u8; 16], payload: &mut [u8]) -> io::Result<()> {
+    let mut cipher =
+        Rc4::<rc4::consts::U16>::new_from_slice(key).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+    cipher.apply_keystream(payload);
+    Ok(())
 }
