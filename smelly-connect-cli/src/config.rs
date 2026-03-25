@@ -21,11 +21,31 @@ pub struct VpnConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct PoolConfig {
     pub prewarm: usize,
     pub connect_timeout_secs: u64,
     pub healthcheck_interval_secs: u64,
     pub selection: String,
+    pub failure_threshold: u32,
+    pub backoff_base_secs: u64,
+    pub backoff_max_secs: u64,
+    pub allow_request_triggered_probe: bool,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            prewarm: 1,
+            connect_timeout_secs: 20,
+            healthcheck_interval_secs: 60,
+            selection: "round_robin".to_string(),
+            failure_threshold: 3,
+            backoff_base_secs: 30,
+            backoff_max_secs: 600,
+            allow_request_triggered_probe: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

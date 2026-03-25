@@ -14,6 +14,14 @@ connect_timeout_secs = 20
 healthcheck_interval_secs = 60
 # Current implementation supports round_robin only.
 selection = "round_robin"
+# Consecutive failures before a node is removed from normal rotation.
+failure_threshold = 3
+# Exponential backoff start for failed nodes.
+backoff_base_secs = 30
+# Exponential backoff cap.
+backoff_max_secs = 600
+# Allow one request-triggered early recovery attempt when no selectable upstream exists.
+allow_request_triggered_probe = true
 
 [[accounts]]
 name = "acct-01"

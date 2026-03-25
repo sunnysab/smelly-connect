@@ -51,3 +51,33 @@ async fn pool_exposes_state_summary_and_selectable_count_for_tests() {
     assert!(pool.state_summary_for_test().await.contains("Ready"));
     assert!(pool.has_selectable_nodes_for_test().await);
 }
+
+#[test]
+fn resilience_defaults_are_present() {
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+        [pool]
+        prewarm = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+        selection = "round_robin"
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+    )
+    .unwrap();
+    assert_eq!(cfg.pool.failure_threshold, 3);
+    assert_eq!(cfg.pool.backoff_base_secs, 30);
+    assert_eq!(cfg.pool.backoff_max_secs, 600);
+    assert!(cfg.pool.allow_request_triggered_probe);
+}
