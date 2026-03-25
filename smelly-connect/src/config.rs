@@ -18,6 +18,7 @@ struct IcmpKeepAliveConfig {
     interval: Duration,
 }
 
+#[derive(Clone)]
 pub struct EasyConnectConfig {
     pub server: String,
     pub username: String,

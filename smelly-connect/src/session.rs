@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::io::duplex;
 
 use crate::config::EasyConnectConfig;
-use crate::error::{Error, IntegrationError, ProxyError, RouteError, TransportError};
+use crate::error::{Error, ProxyError, RouteError, TransportError};
 use crate::proxy::http::ProxyHandle;
 use crate::resolver::SessionResolver;
 use crate::runtime::tasks::keepalive::KeepaliveHandle;
@@ -119,7 +119,7 @@ impl EasyConnectSession {
     }
 
     pub async fn start_http_proxy(&self, bind: SocketAddr) -> Result<ProxyHandle, Error> {
-        crate::proxy::http::start_http_proxy(self.clone(), bind)
+        crate::integration::http_proxy::start_http_proxy(self.clone(), bind)
             .await
             .map_err(|err| Error::Proxy(ProxyError::BindFailed(err.to_string())))
     }
@@ -152,21 +152,7 @@ impl EasyConnectSession {
     }
 
     pub async fn reqwest_client(&self) -> Result<reqwest::Client, Error> {
-        let handle = self
-            .start_http_proxy("127.0.0.1:0".parse().unwrap())
-            .await?;
-        let client = reqwest::Client::builder()
-            .proxy(
-                reqwest::Proxy::all(format!("http://{}", handle.local_addr())).map_err(|err| {
-                    Error::Integration(IntegrationError::ClientBuildFailed(err.to_string()))
-                })?,
-            )
-            .build()
-            .map_err(|err| {
-                Error::Integration(IntegrationError::ClientBuildFailed(err.to_string()))
-            })?;
-        std::mem::forget(handle);
-        Ok(client)
+        crate::integration::reqwest::build_client(self).await
     }
 
     pub async fn spawn_packet_device(&self) -> Result<PacketDevice, Error> {

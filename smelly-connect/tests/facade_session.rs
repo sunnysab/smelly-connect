@@ -32,3 +32,11 @@ fn keepalive_policy_can_hold_target_and_interval() {
         }
     }
 }
+
+#[test]
+fn easyconnect_client_builder_collects_credentials() {
+    let _client = EasyConnectClient::builder("rvpn.example.com")
+        .credentials("user", "pass")
+        .build()
+        .unwrap();
+}
