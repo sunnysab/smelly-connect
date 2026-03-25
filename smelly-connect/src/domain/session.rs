@@ -1,1 +1,1 @@
-pub struct Session;
+pub type Session = crate::session::EasyConnectSession;

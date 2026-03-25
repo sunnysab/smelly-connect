@@ -15,6 +15,9 @@ pub mod target;
 pub mod transport;
 
 pub use domain::session::Session;
+pub use domain::connect_target::ConnectTarget;
+pub use domain::keepalive::KeepalivePolicy;
+pub use domain::session_info::SessionInfo;
 pub use facade::client::EasyConnectClient;
 pub use auth::captcha::CaptchaHandler;
 pub use config::EasyConnectConfig;
