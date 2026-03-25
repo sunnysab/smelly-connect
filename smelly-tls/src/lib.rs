@@ -1,12 +1,16 @@
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
 
+#[cfg(feature = "tokio")]
+use der::{Decode, Encode};
 use hmac::{Hmac, Mac};
 use md5::Md5;
 use rc4::{KeyInit as Rc4KeyInit, Rc4, StreamCipher};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
 use sha1::Sha1;
+#[cfg(feature = "tokio")]
+use x509_cert::Certificate;
 
 pub const TLS11: u16 = 0x0302;
 pub const TLS_RSA_WITH_RC4_128_SHA: u16 = 0x0005;
@@ -82,7 +86,17 @@ pub struct ServerHelloResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedClientHello {
+    pub random: [u8; 32],
+    pub session_id: [u8; 32],
+    pub cipher_suites: Vec<u16>,
+    pub compression_methods: Vec<u8>,
+    pub extension_ids: Vec<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedServerHello {
+    pub random: [u8; 32],
     pub session_id: [u8; 32],
     pub cipher_suite: u16,
     pub compression_method: u8,
@@ -93,6 +107,12 @@ pub struct ServerFlight {
     pub server_hello: ParsedServerHello,
     pub certificate_chain: Vec<Vec<u8>>,
     pub server_hello_done: bool,
+}
+
+#[cfg(feature = "tokio")]
+pub struct MinimalHandshakeResult {
+    pub server_hello: ParsedServerHello,
+    pub master_secret: [u8; 48],
 }
 
 #[cfg(feature = "tokio")]
@@ -147,6 +167,132 @@ pub async fn connect_and_read_server_flight(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid server flight"))
 }
 
+#[cfg(feature = "tokio")]
+pub async fn complete_minimal_handshake(
+    addr: SocketAddr,
+    config: &ClientHelloConfig,
+) -> io::Result<MinimalHandshakeResult> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await?;
+    let client_hello_record = build_client_hello_record(config);
+    stream.write_all(&client_hello_record).await?;
+
+    let server_flight_record = read_record(&mut stream).await?;
+    let server_flight = parse_server_flight(&server_flight_record)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid server flight"))?;
+    let public_key_der = server_public_key_der(&server_flight.certificate_chain[0])?;
+
+    let premaster = build_premaster_secret([0x33; 46]);
+    let client_key_exchange = build_client_key_exchange(&public_key_der, &premaster)?;
+    let client_key_exchange_record = record_with_payload(22, &client_key_exchange);
+    stream.write_all(&client_key_exchange_record).await?;
+    stream.write_all(&build_change_cipher_spec_record()).await?;
+
+    let master_secret =
+        derive_tls10_master_secret(&premaster, &config.random, &server_flight.server_hello.random);
+    let key_block =
+        derive_tls10_key_block(&master_secret, &config.random, &server_flight.server_hello.random, 72);
+    let client_mac: [u8; 20] = key_block[0..20].try_into().unwrap();
+    let server_mac: [u8; 20] = key_block[20..40].try_into().unwrap();
+    let client_key: [u8; 16] = key_block[40..56].try_into().unwrap();
+    let server_key: [u8; 16] = key_block[56..72].try_into().unwrap();
+
+    let mut transcript = Vec::new();
+    transcript.extend_from_slice(handshake_payload(&client_hello_record));
+    transcript.extend_from_slice(handshake_payload(&server_flight_record));
+    transcript.extend_from_slice(&client_key_exchange);
+    let client_verify = derive_finished_verify_data(&master_secret, true, &transcript);
+    let client_finished = build_finished_handshake(client_verify);
+    let mut encryptor = Rc4Sha1Encryptor::new(client_mac, client_key);
+    let client_finished_record = record_with_payload(22, &encryptor.encrypt(22, &client_finished)?);
+    stream.write_all(&client_finished_record).await?;
+
+    let server_ccs = read_record(&mut stream).await?;
+    if server_ccs != build_change_cipher_spec_record() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid server ccs"));
+    }
+
+    transcript.extend_from_slice(&client_finished);
+    let server_finished_record = read_record(&mut stream).await?;
+    let mut decryptor = Rc4Sha1Decryptor::new(server_mac, server_key);
+    let server_finished_plain =
+        decryptor.decrypt(22, record_payload(&server_finished_record))?;
+    let server_verify = derive_finished_verify_data(&master_secret, false, &transcript);
+    if server_finished_plain != build_finished_handshake(server_verify) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid server finished"));
+    }
+
+    Ok(MinimalHandshakeResult {
+        server_hello: server_flight.server_hello,
+        master_secret,
+    })
+}
+
+#[cfg(feature = "tokio")]
+async fn read_record(stream: &mut tokio::net::TcpStream) -> io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
+    let mut header = [0_u8; 5];
+    stream.read_exact(&mut header).await?;
+    let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+    let mut body = vec![0_u8; len];
+    stream.read_exact(&mut body).await?;
+    Ok([header.to_vec(), body].concat())
+}
+
+pub fn parse_client_hello(record: &[u8]) -> Option<ParsedClientHello> {
+    if record.len() < 9 || record[0] != 22 || record[5] != 1 {
+        return None;
+    }
+
+    let mut idx = 9;
+    let _legacy_version = u16::from_be_bytes([record[idx], record[idx + 1]]);
+    idx += 2;
+    let mut random = [0_u8; 32];
+    random.copy_from_slice(record.get(idx..idx + 32)?);
+    idx += 32;
+
+    let session_id_len = *record.get(idx)? as usize;
+    idx += 1;
+    let mut session_id = [0_u8; 32];
+    session_id.copy_from_slice(record.get(idx..idx + session_id_len)?);
+    idx += session_id_len;
+
+    let cipher_len = u16::from_be_bytes([record[idx], record[idx + 1]]) as usize;
+    idx += 2;
+    let cipher_suites = record
+        .get(idx..idx + cipher_len)?
+        .chunks_exact(2)
+        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    idx += cipher_len;
+
+    let comp_len = *record.get(idx)? as usize;
+    idx += 1;
+    let compression_methods = record.get(idx..idx + comp_len)?.to_vec();
+    idx += comp_len;
+
+    let ext_len = u16::from_be_bytes([record[idx], record[idx + 1]]) as usize;
+    idx += 2;
+    let end = idx + ext_len;
+    let mut extension_ids = Vec::new();
+    while idx + 4 <= end {
+        let ext_type = u16::from_be_bytes([record[idx], record[idx + 1]]);
+        let ext_size = u16::from_be_bytes([record[idx + 2], record[idx + 3]]) as usize;
+        extension_ids.push(ext_type);
+        idx += 4 + ext_size;
+    }
+
+    Some(ParsedClientHello {
+        random,
+        session_id,
+        cipher_suites,
+        compression_methods,
+        extension_ids,
+    })
+}
+
 pub fn parse_server_hello_session_id(record: &[u8]) -> Option<[u8; 32]> {
     if record.len() < 9 || record[0] != 22 || record[5] != 2 {
         return None;
@@ -163,6 +309,30 @@ pub fn parse_server_hello_session_id(record: &[u8]) -> Option<[u8; 32]> {
     let mut session_id = [0_u8; 32];
     session_id.copy_from_slice(record.get(idx..idx + sid_len)?);
     Some(session_id)
+}
+
+pub fn parse_single_handshake(record: &[u8]) -> Option<Vec<u8>> {
+    if record.len() < 9 || record[0] != 22 {
+        return None;
+    }
+    Some(record[5..].to_vec())
+}
+
+pub fn handshake_payload(record: &[u8]) -> &[u8] {
+    &record[5..]
+}
+
+pub fn record_payload(record: &[u8]) -> &[u8] {
+    &record[5..]
+}
+
+pub fn record_with_payload(content_type: u8, payload: &[u8]) -> Vec<u8> {
+    let mut record = Vec::with_capacity(payload.len() + 5);
+    record.push(content_type);
+    record.extend_from_slice(&TLS11.to_be_bytes());
+    record.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    record.extend_from_slice(payload);
+    record
 }
 
 pub fn parse_server_flight(record: &[u8]) -> Option<ServerFlight> {
@@ -210,6 +380,8 @@ pub fn parse_server_flight(record: &[u8]) -> Option<ServerFlight> {
 fn parse_server_hello_body(body: &[u8]) -> Option<ParsedServerHello> {
     let mut idx = 0;
     idx += 2;
+    let mut random = [0_u8; 32];
+    random.copy_from_slice(body.get(idx..idx + 32)?);
     idx += 32;
     let sid_len = *body.get(idx)? as usize;
     idx += 1;
@@ -224,6 +396,7 @@ fn parse_server_hello_body(body: &[u8]) -> Option<ParsedServerHello> {
     let compression_method = *body.get(idx)?;
 
     Some(ParsedServerHello {
+        random,
         session_id,
         cipher_suite,
         compression_method,
@@ -246,6 +419,15 @@ fn parse_certificate_body(body: &[u8]) -> Option<Vec<Vec<u8>>> {
         idx += cert_len;
     }
     Some(certs)
+}
+
+#[cfg(feature = "tokio")]
+fn server_public_key_der(cert_der: &[u8]) -> io::Result<Vec<u8>> {
+    let cert = Certificate::from_der(cert_der)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    cert.tbs_certificate.subject_public_key_info
+        .to_der()
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
 }
 
 pub fn derive_easyconnect_token(session_id: &[u8; 32], twfid: &str) -> Option<[u8; 48]> {
