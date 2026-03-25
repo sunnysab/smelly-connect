@@ -9,6 +9,8 @@ use tokio::sync::Mutex;
 
 use crate::pool::SessionPool;
 
+const SOCKS5_NETWORK_UNREACHABLE: u8 = 0x03;
+
 #[derive(Debug, Clone)]
 pub struct Socks5ProxyTestResult {
     pub account_name: String,
@@ -242,7 +244,18 @@ where
                 "no ready session"
             );
             client
-                .write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .write_all(&[
+                    0x05,
+                    SOCKS5_NETWORK_UNREACHABLE,
+                    0x00,
+                    0x01,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ])
                 .await
                 .map_err(|err| err.to_string())?;
             return Ok(());
@@ -331,7 +344,18 @@ async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<
                 "no ready session"
             );
             client
-                .write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .write_all(&[
+                    0x05,
+                    SOCKS5_NETWORK_UNREACHABLE,
+                    0x00,
+                    0x01,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ])
                 .await
                 .map_err(|err| err.to_string())?;
             return Ok(());

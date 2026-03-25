@@ -13,5 +13,5 @@ async fn socks5_proxy_returns_failure_when_no_ready_session_exists() {
     let result = smelly_connect_cli::proxy::socks5::proxy_socks5_no_ready_session_for_test()
         .await
         .unwrap();
-    assert_eq!(result.reply_code, 0x01);
+    assert_eq!(result.reply_code, 0x03);
 }
