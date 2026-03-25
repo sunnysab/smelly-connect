@@ -1,0 +1,14 @@
+[package]
+name = "smelly-connect-cli"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "smelly_connect_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "smelly-connect-cli"
+path = "src/main.rs"
+
+[dependencies]

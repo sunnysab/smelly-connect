@@ -1,3 +1,3 @@
 [workspace]
-members = ["smelly-connect", "smelly-tls"]
+members = ["smelly-connect", "smelly-connect-cli", "smelly-tls"]
 resolver = "3"

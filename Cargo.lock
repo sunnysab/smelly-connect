@@ -1275,6 +1275,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelly-connect-cli"
+version = "0.1.0"
+
+[[package]]
 name = "smelly-tls"
 version = "0.1.0"
 dependencies = [
