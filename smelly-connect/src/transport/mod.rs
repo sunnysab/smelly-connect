@@ -26,12 +26,20 @@ pub mod tests {
         pub async fn read_for_stack(&self) -> Vec<u8> {
             self.device.read_for_stack().await.unwrap()
         }
+
+        pub async fn write_from_stack(&self, packet: Vec<u8>) {
+            self.device.write_from_stack(packet).await;
+        }
+
+        pub async fn read_for_vpn(&self) -> Vec<u8> {
+            self.device.read_for_vpn().await.unwrap()
+        }
     }
 
     pub fn packet_harness() -> PacketHarness {
         let (vpn_tx, vpn_rx) = mpsc::channel(4);
-        let (stack_tx, _stack_rx) = mpsc::channel(4);
-        let device = PacketDevice::new(vpn_tx, vpn_rx, stack_tx);
+        let (stack_tx, stack_rx) = mpsc::channel(4);
+        let device = PacketDevice::new(vpn_tx, vpn_rx, stack_tx, stack_rx);
         PacketHarness { device }
     }
 

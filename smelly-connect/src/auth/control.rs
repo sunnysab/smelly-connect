@@ -13,6 +13,7 @@ use crate::error::{BootstrapError, Error};
 use crate::resolver::SessionResolver;
 use crate::resource::{ResourceSet, parse_resources};
 use crate::session::EasyConnectSession;
+use crate::transport::device::PacketDevice;
 use crate::transport::{TransportStack, VpnStream};
 
 use super::{encrypt_password, parse_login_auth};
@@ -212,6 +213,39 @@ pub async fn open_send_tunnel(
         legacy_cipher_hint,
     )
     .await
+}
+
+pub async fn spawn_legacy_packet_device(
+    addr: SocketAddr,
+    token: &crate::protocol::DerivedToken,
+    client_ip: Ipv4Addr,
+    legacy_cipher_hint: Option<&str>,
+) -> Result<PacketDevice, Error> {
+    let recv = open_recv_tunnel(addr, token, client_ip, legacy_cipher_hint).await?;
+    let send = open_send_tunnel(addr, token, client_ip, legacy_cipher_hint).await?;
+
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(128);
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(128);
+    let mut device = PacketDevice::new(inbound_tx.clone(), inbound_rx, outbound_tx, outbound_rx);
+    let mut outbound_rx = device
+        .take_outbound_rx()
+        .ok_or_else(|| Error::Bootstrap(BootstrapError::AuthFlowFailed("missing outbound rx".to_string())))?;
+
+    tokio::spawn(async move {
+        let mut recv = recv;
+        while let Ok(packet) = recv.read_application_data().await {
+            let _ = inbound_tx.send(packet).await;
+        }
+    });
+
+    tokio::spawn(async move {
+        let mut send = send;
+        while let Some(packet) = outbound_rx.recv().await {
+            let _ = send.send_application_data(&packet).await;
+        }
+    });
+
+    Ok(device)
 }
 
 fn resolve_server_addr(server: &str) -> Result<SocketAddr, Error> {
