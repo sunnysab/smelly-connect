@@ -9,8 +9,8 @@ pub struct LoginAuthResponse {
 
 pub fn parse_login_auth(body: &str) -> Result<LoginAuthResponse, ParseLoginAuthError> {
     let twfid = extract_tag(body, "TwfID").ok_or(ParseLoginAuthError::MissingTag("TwfID"))?;
-    let rsa_key_hex =
-        extract_tag(body, "RSA_ENCRYPT_KEY").ok_or(ParseLoginAuthError::MissingTag("RSA_ENCRYPT_KEY"))?;
+    let rsa_key_hex = extract_tag(body, "RSA_ENCRYPT_KEY")
+        .ok_or(ParseLoginAuthError::MissingTag("RSA_ENCRYPT_KEY"))?;
     let rsa_exp = extract_tag(body, "RSA_ENCRYPT_EXP")
         .unwrap_or("65537")
         .parse()
@@ -38,8 +38,8 @@ pub fn encrypt_password(
         None => password.to_string(),
     };
 
-    let modulus = BigUint::parse_bytes(rsa_key_hex.as_bytes(), 16)
-        .ok_or(AuthError::InvalidModulusHex)?;
+    let modulus =
+        BigUint::parse_bytes(rsa_key_hex.as_bytes(), 16).ok_or(AuthError::InvalidModulusHex)?;
     let public_key = RsaPublicKey::new(modulus, BigUint::from(rsa_exp))
         .map_err(|_| AuthError::InvalidPublicExponent)?;
 
