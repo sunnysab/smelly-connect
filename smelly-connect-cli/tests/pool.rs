@@ -39,7 +39,7 @@ async fn pool_fails_fast_when_no_ready_sessions_exist() {
 #[tokio::test]
 async fn pool_removes_failed_session_from_rotation_and_retries_after_fixed_delay() {
     let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
-    pool.force_one_failure_for_test().await;
+    pool.force_failures_for_test(3).await;
     assert_eq!(pool.ready_count().await, 0);
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     assert!(pool.ready_count().await >= 1);
@@ -80,4 +80,30 @@ fn resilience_defaults_are_present() {
     assert_eq!(cfg.pool.backoff_base_secs, 30);
     assert_eq!(cfg.pool.backoff_max_secs, 600);
     assert!(cfg.pool.allow_request_triggered_probe);
+}
+
+#[tokio::test]
+async fn single_failure_marks_node_suspect_but_keeps_it_selectable() {
+    let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
+    pool.force_failures_for_test(1).await;
+    assert!(pool.state_summary_for_test().await.contains("Suspect"));
+    assert!(pool.has_selectable_nodes_for_test().await);
+}
+
+#[tokio::test]
+async fn threshold_crossing_moves_node_to_open_and_removes_it_from_rotation() {
+    let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
+    pool.force_failures_for_test(3).await;
+    assert!(pool.state_summary_for_test().await.contains("Open"));
+    assert!(!pool.has_selectable_nodes_for_test().await);
+}
+
+#[tokio::test]
+async fn normal_selection_uses_ready_and_suspect_but_excludes_open_and_half_open() {
+    let pool = smelly_connect_cli::pool::SessionPool::from_mixed_state_pool_for_test().await;
+    let picks = pool.collect_selected_accounts_for_test(4).await;
+    assert!(
+        picks.iter()
+            .all(|name| name == "ready-01" || name == "suspect-01")
+    );
 }

@@ -42,7 +42,9 @@ pub enum AccountState {
     Configured(AccountConfig),
     Connecting,
     Ready(Box<PooledSession>),
-    Failed(AccountFailure),
+    Suspect(Box<PooledSession>),
+    Open(AccountFailure),
+    HalfOpen(AccountConfig),
 }
 
 #[derive(Clone)]
@@ -50,6 +52,8 @@ struct AccountNode {
     name: String,
     state: AccountState,
     flaky_retry: bool,
+    consecutive_failures: u32,
+    failure_threshold: u32,
 }
 
 #[derive(Default)]
@@ -110,6 +114,8 @@ impl SessionPool {
                 name,
                 state,
                 flaky_retry: false,
+                consecutive_failures: 0,
+                failure_threshold: 3,
             });
         }
         Self {
@@ -132,6 +138,8 @@ impl SessionPool {
                     .into(),
                 ),
                 flaky_retry: false,
+                consecutive_failures: 0,
+                failure_threshold: 3,
             })
             .collect();
         Self {
@@ -168,7 +176,7 @@ impl SessionPool {
                 ),
                 Err(message) => (
                     format!("failed-{idx}"),
-                    AccountState::Failed(AccountFailure {
+                    AccountState::Open(AccountFailure {
                         message: message.to_string(),
                     }),
                 ),
@@ -177,6 +185,8 @@ impl SessionPool {
                 name,
                 state,
                 flaky_retry: false,
+                consecutive_failures: 0,
+                failure_threshold: 3,
             });
         }
         Self {
@@ -191,10 +201,12 @@ impl SessionPool {
         for idx in 0..total {
             nodes.push(AccountNode {
                 name: format!("failed-{:02}", idx + 1),
-                state: AccountState::Failed(AccountFailure {
+                state: AccountState::Open(AccountFailure {
                     message: "not ready".to_string(),
                 }),
                 flaky_retry: false,
+                consecutive_failures: 0,
+                failure_threshold: 3,
             });
         }
         Self {
@@ -217,6 +229,8 @@ impl SessionPool {
                         .into(),
                     ),
                     flaky_retry: true,
+                    consecutive_failures: 0,
+                    failure_threshold: 3,
                 }],
                 cursor: 0,
             })),
@@ -237,6 +251,8 @@ impl SessionPool {
                 name: account.name.clone(),
                 state: AccountState::Configured(account.clone()),
                 flaky_retry: false,
+                consecutive_failures: 0,
+                failure_threshold: cfg.pool.failure_threshold,
             });
         }
 
@@ -279,7 +295,9 @@ impl SessionPool {
                     AccountState::Configured(_) => "Configured",
                     AccountState::Connecting => "Connecting",
                     AccountState::Ready(_) => "Ready",
-                    AccountState::Failed(_) => "Failed",
+                    AccountState::Suspect(_) => "Suspect",
+                    AccountState::Open(_) => "Open",
+                    AccountState::HalfOpen(_) => "HalfOpen",
                 };
                 format!("{}:{label}", node.name)
             })
@@ -292,7 +310,76 @@ impl SessionPool {
         state
             .nodes
             .iter()
-            .any(|node| matches!(node.state, AccountState::Ready(_)))
+            .any(|node| matches!(node.state, AccountState::Ready(_) | AccountState::Suspect(_)))
+    }
+
+    pub async fn from_mixed_state_pool_for_test() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(PoolState {
+                nodes: vec![
+                    AccountNode {
+                        name: "ready-01".to_string(),
+                        state: AccountState::Ready(
+                            PooledSession {
+                                account_name: "ready-01".to_string(),
+                                session: None,
+                            }
+                            .into(),
+                        ),
+                        flaky_retry: false,
+                        consecutive_failures: 0,
+                        failure_threshold: 3,
+                    },
+                    AccountNode {
+                        name: "suspect-01".to_string(),
+                        state: AccountState::Suspect(
+                            PooledSession {
+                                account_name: "suspect-01".to_string(),
+                                session: None,
+                            }
+                            .into(),
+                        ),
+                        flaky_retry: false,
+                        consecutive_failures: 1,
+                        failure_threshold: 3,
+                    },
+                    AccountNode {
+                        name: "open-01".to_string(),
+                        state: AccountState::Open(AccountFailure {
+                            message: "open".to_string(),
+                        }),
+                        flaky_retry: false,
+                        consecutive_failures: 3,
+                        failure_threshold: 3,
+                    },
+                    AccountNode {
+                        name: "half-open-01".to_string(),
+                        state: AccountState::HalfOpen(AccountConfig {
+                            name: "half-open-01".to_string(),
+                            username: "half-open-01".to_string(),
+                            password: "pass".to_string(),
+                        }),
+                        flaky_retry: false,
+                        consecutive_failures: 3,
+                        failure_threshold: 3,
+                    },
+                ],
+                cursor: 0,
+            })),
+            retry_delay: Duration::from_secs(1),
+            server: None,
+        }
+    }
+
+    pub async fn collect_selected_accounts_for_test(&self, count: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        for _ in 0..count {
+            match self.next_account_name().await {
+                Ok(name) => out.push(name),
+                Err(_) => break,
+            }
+        }
+        out
     }
 
     pub async fn next_account_name(&self) -> Result<String, PoolError> {
@@ -306,7 +393,9 @@ impl SessionPool {
             .iter()
             .enumerate()
             .filter_map(|(idx, node)| match &node.state {
-                AccountState::Ready(session) => Some((idx, session.as_ref().clone())),
+                AccountState::Ready(session) | AccountState::Suspect(session) => {
+                    Some((idx, session.as_ref().clone()))
+                }
                 _ => None,
             })
             .collect();
@@ -340,42 +429,76 @@ impl SessionPool {
     }
 
     pub async fn force_one_failure_for_test(&self) {
-        let mut should_retry = None;
-        {
-            let mut state = self.inner.lock().await;
-            if let Some(node) = state
-                .nodes
-                .iter_mut()
-                .find(|node| matches!(node.state, AccountState::Ready(_)))
-            {
-                let name = node.name.clone();
-                let flaky_retry = node.flaky_retry;
-                node.state = AccountState::Failed(AccountFailure {
-                    message: "forced failure".to_string(),
-                });
-                tracing::warn!(account = %name, "account forced into failed state");
-                should_retry = flaky_retry.then_some(name);
-            }
-        }
+        self.force_failures_for_test(1).await;
+    }
 
-        if let Some(name) = should_retry {
-            let inner = Arc::clone(&self.inner);
-            let retry_delay = self.retry_delay;
-            tokio::spawn(async move {
-                tracing::warn!(account = %name, delay_ms = retry_delay.as_millis(), "retrying account after fixed-delay backoff");
-                tokio::time::sleep(retry_delay).await;
-                let mut state = inner.lock().await;
-                if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
-                    node.state = AccountState::Ready(
-                        PooledSession {
-                            account_name: node.name.clone(),
-                            session: None,
+    pub async fn force_failures_for_test(&self, count: u32) {
+        for _ in 0..count {
+            let mut should_retry = None;
+            {
+                let mut state = self.inner.lock().await;
+                if let Some(node) = state.nodes.iter_mut().find(|node| {
+                    matches!(node.state, AccountState::Ready(_) | AccountState::Suspect(_))
+                }) {
+                    let name = node.name.clone();
+                    let flaky_retry = node.flaky_retry;
+                    node.consecutive_failures += 1;
+
+                    let session = match std::mem::replace(
+                        &mut node.state,
+                        AccountState::Open(AccountFailure {
+                            message: "forced failure".to_string(),
+                        }),
+                    ) {
+                        AccountState::Ready(session) | AccountState::Suspect(session) => session,
+                        other => {
+                            node.state = other;
+                            continue;
                         }
-                        .into(),
-                    );
-                    tracing::info!(account = %node.name, "account ready");
+                    };
+
+                    if node.consecutive_failures >= node.failure_threshold {
+                        tracing::warn!(
+                            account = %name,
+                            failures = node.consecutive_failures,
+                            "node moved to open"
+                        );
+                        should_retry = flaky_retry.then_some(name);
+                    } else {
+                        node.state = AccountState::Suspect(session);
+                        tracing::warn!(
+                            account = %name,
+                            failures = node.consecutive_failures,
+                            "node marked suspect"
+                        );
+                    }
                 }
-            });
+            }
+
+            if let Some(name) = should_retry {
+                let inner = Arc::clone(&self.inner);
+                let retry_delay = self.retry_delay;
+                tokio::spawn(async move {
+                    tracing::warn!(
+                        account = %name,
+                        delay_ms = retry_delay.as_millis(),
+                        "retrying account after fixed-delay backoff"
+                    );
+                    tokio::time::sleep(retry_delay).await;
+                    let mut state = inner.lock().await;
+                    if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
+                        node.state = AccountState::Ready(
+                            PooledSession {
+                                account_name: node.name.clone(),
+                                session: None,
+                            }
+                            .into(),
+                        );
+                        node.consecutive_failures = 0;
+                        tracing::info!(account = %node.name, "account ready");
+                    }
+                });
+            }
         }
     }
 
@@ -406,7 +529,7 @@ impl SessionPool {
             .iter()
             .enumerate()
             .filter_map(|(idx, node)| match &node.state {
-                AccountState::Ready(session) => session
+                AccountState::Ready(session) | AccountState::Suspect(session) => session
                     .session()
                     .cloned()
                     .map(|live| (idx, session.account_name().to_string(), live)),
@@ -466,7 +589,7 @@ impl SessionPool {
             Err(err) => {
                 let mut state = self.inner.lock().await;
                 if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
-                    node.state = AccountState::Failed(AccountFailure {
+                    node.state = AccountState::Open(AccountFailure {
                         message: err.to_string(),
                     });
                 }
