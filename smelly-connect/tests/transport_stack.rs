@@ -18,6 +18,17 @@ async fn stack_can_create_outbound_tcp_stream_handle() {
     let _stream = harness.connect(("10.0.0.8", 443)).await.unwrap();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn packet_device_builds_real_smoltcp_transport() {
+    let harness = smelly_connect::transport::tests::packet_harness();
+    let transport = smelly_connect::transport::netstack::build_transport_from_packet_device(
+        harness.into_device(),
+        "10.0.0.8".parse().unwrap(),
+    )
+    .unwrap();
+    let _ = transport;
+}
+
 #[tokio::test]
 async fn session_connect_tcp_returns_async_stream() {
     let harness = smelly_connect::session::tests::login_harness();

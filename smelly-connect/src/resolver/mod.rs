@@ -32,9 +32,17 @@ impl SessionResolver {
         {
             return Ok(*ip);
         }
-        self.system_dns
-            .get(host)
-            .copied()
+        if let Some(ip) = self.system_dns.get(host) {
+            return Ok(*ip);
+        }
+
+        tokio::net::lookup_host((host, 0))
+            .await
+            .map_err(|_| ResolveError::NoRecordFound)?
+            .find_map(|addr| match addr.ip() {
+                IpAddr::V4(ip) => Some(IpAddr::V4(ip)),
+                IpAddr::V6(_) => None,
+            })
             .ok_or(ResolveError::NoRecordFound)
     }
 }

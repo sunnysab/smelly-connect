@@ -82,19 +82,28 @@ impl EasyConnectConfig {
         .await?;
 
         let mut system_dns = std::collections::HashMap::new();
-        for host in state.resources.domain_rules.keys() {
-            system_dns.insert(host.clone(), std::net::IpAddr::V4(client_ip));
-        }
         for (host, resolved) in &state.resources.static_dns {
             system_dns.insert(host.clone(), *resolved);
         }
 
         let server_addr = crate::auth::control::resolve_server_addr(&self.server)?;
+        let device = crate::auth::control::spawn_legacy_packet_device(
+            server_addr,
+            &token,
+            client_ip,
+            state.legacy_cipher_hint.as_deref(),
+        )
+        .await?;
+        let transport =
+            crate::transport::netstack::build_transport_from_packet_device(device, client_ip)
+                .map_err(|err| {
+                    Error::Transport(crate::error::TransportError::ConnectFailed(err.to_string()))
+                })?;
         Ok(EasyConnectSession::new(
             client_ip,
             state.resources,
             SessionResolver::new(std::collections::HashMap::new(), None, system_dns),
-            EasyConnectSession::failing_transport("connect_tcp not wired to packet stack yet"),
+            transport,
         )
         .with_legacy_data_plane(server_addr, token, state.legacy_cipher_hint))
     }
