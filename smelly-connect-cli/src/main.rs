@@ -20,5 +20,24 @@ fn main() {
                 }
             });
         }
+        smelly_connect_cli::cli::Command::Test(cmd) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build runtime");
+            rt.block_on(async move {
+                match cmd {
+                    smelly_connect_cli::cli::TestCommand::Tcp { target } => {
+                        let _ = smelly_connect_cli::commands::test::run_tcp(&target).await;
+                    }
+                    smelly_connect_cli::cli::TestCommand::Icmp { target } => {
+                        let _ = smelly_connect_cli::commands::test::run_icmp(&target).await;
+                    }
+                    smelly_connect_cli::cli::TestCommand::Http { url } => {
+                        let _ = smelly_connect_cli::commands::test::run_http(&url).await;
+                    }
+                }
+            });
+        }
     }
 }

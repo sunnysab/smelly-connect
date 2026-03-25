@@ -17,6 +17,8 @@ pub enum Command {
     Proxy,
     #[command(subcommand)]
     Inspect(InspectCommand),
+    #[command(subcommand)]
+    Test(TestCommand),
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -27,6 +29,13 @@ pub enum InspectCommand {
         port: u16,
     },
     Session,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum TestCommand {
+    Tcp { target: String },
+    Icmp { target: String },
+    Http { url: String },
 }
 
 impl Cli {
