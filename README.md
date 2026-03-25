@@ -72,53 +72,117 @@ cargo test --workspace
 cargo test -p smelly-connect
 ```
 
+如果你只关心 CLI：
+
+```bash
+cargo test -p smelly-connect-cli
+```
+
+## CLI
+
+当前正式命令行入口是 `smelly-connect-cli`，配置文件默认读取当前工作目录下的 `config.toml`。
+
+构建 CLI：
+
+```bash
+cargo build -p smelly-connect-cli --release
+```
+
+一个最小 `config.toml` 例子：
+
+```toml
+[vpn]
+server = "vpn1.sit.edu.cn"
+default_keepalive_host = "jwxt.sit.edu.cn"
+
+[pool]
+prewarm = 2
+connect_timeout_secs = 20
+healthcheck_interval_secs = 60
+selection = "round_robin"
+
+[[accounts]]
+name = "acct-01"
+username = "user1"
+password = "pass1"
+
+[[accounts]]
+name = "acct-02"
+username = "user2"
+password = "pass2"
+
+[proxy.http]
+enabled = true
+listen = "127.0.0.1:8080"
+
+[proxy.socks5]
+enabled = true
+listen = "127.0.0.1:1080"
+```
+
+当前 CLI 命令面：
+
+```bash
+smelly-connect-cli --config ./config.toml proxy --listen-http 127.0.0.1:8080 --listen-socks5 127.0.0.1:1080
+smelly-connect-cli --config ./config.toml inspect route jwxt.sit.edu.cn 443
+smelly-connect-cli --config ./config.toml inspect session
+smelly-connect-cli --config ./config.toml test tcp 10.0.0.8:443
+smelly-connect-cli --config ./config.toml test icmp 10.0.0.8
+smelly-connect-cli --config ./config.toml test http http://intranet.zju.edu.cn/health
+```
+
+配置优先级：
+
+- CLI 显式参数覆盖 `config.toml`
+- `config.toml` 覆盖内建默认值
+
+当前实现说明：
+
+- `smelly-connect` 库本身不依赖 `.env` / `dotenv`
+- `smelly-connect-cli` 走 `config.toml`
+- `smelly-connect` 下的 examples 仍然使用显式环境变量，便于快速手工调试
+
 ## 环境变量
 
-示例程序默认读取这些环境变量：
+示例程序读取这些显式环境变量：
 
 - `VPN_HOST` 或 `VPN_URL`
-- `VPN_USER` 或 `USER`
-- `VPN_PASS` 或 `PASS`
+- `VPN_USER`
+- `VPN_PASS`
 
 可选变量：
 
 - `TARGET_URL`
+- `TARGET_HOST`
+- `TARGET_PORT`
 - `HOLD_SECONDS`
 - `SMOKE_TCP=1`
 - `SMOKE_ICMP=1`
 - `IDLE_MODE=1`
 - `KEEPALIVE_ICMP_TARGET`
 
-一个典型的 `.env` 可以是：
-
-```env
-USER=your_username
-PASS=your_password
-VPN_URL=https://vpn1.sit.edu.cn
-```
+这些示例只依赖进程环境变量本身，不依赖 `.env` 文件或 `dotenv` 加载器。  
+如果你想使用 shell 配置文件、direnv、systemd Environment、CI secrets，或者手工 `export`，都可以。
 
 ## 示例
 
 获取服务端分配 IP：
 
 ```bash
-set -a
-source .env
-set +a
+export VPN_URL=https://vpn1.sit.edu.cn
+export VPN_USER=your_username
+export VPN_PASS=your_password
 VPN_HOST=${VPN_URL#https://}
 VPN_HOST=${VPN_HOST#http://}
-VPN_USER=$USER
-VPN_PASS=$PASS
 cargo run -p smelly-connect --example request_ip
 ```
 
 调试目标路由是否命中资源规则：
 
 ```bash
-set -a
-source .env
-set +a
-VPN_URL=${VPN_URL:-https://vpn1.sit.edu.cn}
+export VPN_URL=https://vpn1.sit.edu.cn
+export VPN_USER=your_username
+export VPN_PASS=your_password
 TARGET_HOST=jwxt.sit.edu.cn
 cargo run -p smelly-connect --example debug_route
 ```
@@ -126,10 +190,9 @@ cargo run -p smelly-connect --example debug_route
 访问 `jwxt.sit.edu.cn`：
 
 ```bash
-set -a
-source .env
-set +a
-VPN_URL=${VPN_URL:-https://vpn1.sit.edu.cn}
+export VPN_URL=https://vpn1.sit.edu.cn
+export VPN_USER=your_username
+export VPN_PASS=your_password
 TARGET_URL=https://jwxt.sit.edu.cn/
 cargo run -p smelly-connect --example fetch_jwxt
 ```
@@ -137,10 +200,9 @@ cargo run -p smelly-connect --example fetch_jwxt
 只测试 TCP 建链：
 
 ```bash
-set -a
-source .env
-set +a
-VPN_URL=${VPN_URL:-https://vpn1.sit.edu.cn}
+export VPN_URL=https://vpn1.sit.edu.cn
+export VPN_USER=your_username
+export VPN_PASS=your_password
 TARGET_URL=https://jwxt.sit.edu.cn/
 SMOKE_TCP=1
 cargo run -p smelly-connect --example fetch_jwxt
@@ -149,10 +211,9 @@ cargo run -p smelly-connect --example fetch_jwxt
 只测试 ICMP Echo：
 
 ```bash
-set -a
-source .env
-set +a
-VPN_URL=${VPN_URL:-https://vpn1.sit.edu.cn}
+export VPN_URL=https://vpn1.sit.edu.cn
+export VPN_USER=your_username
+export VPN_PASS=your_password
 TARGET_URL=https://jwxt.sit.edu.cn/
 SMOKE_ICMP=1
 cargo run -p smelly-connect --example fetch_jwxt
@@ -161,10 +222,9 @@ cargo run -p smelly-connect --example fetch_jwxt
 纯 idle 保活 10 分钟，然后再访问一次页面：
 
 ```bash
-set -a
-source .env
-set +a
-VPN_URL=${VPN_URL:-https://vpn1.sit.edu.cn}
+export VPN_URL=https://vpn1.sit.edu.cn
+export VPN_USER=your_username
+export VPN_PASS=your_password
 TARGET_URL=https://jwxt.sit.edu.cn/
 KEEPALIVE_ICMP_TARGET=jwxt.sit.edu.cn
 IDLE_MODE=1

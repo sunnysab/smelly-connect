@@ -9,14 +9,8 @@ async fn main() {
         .or_else(|| std::env::var("VPN_URL").ok())
         .map(normalize_server)
         .expect("VPN_HOST or VPN_URL");
-    let username = std::env::var("VPN_USER")
-        .ok()
-        .or_else(|| std::env::var("USER").ok())
-        .expect("VPN_USER or USER");
-    let password = std::env::var("VPN_PASS")
-        .ok()
-        .or_else(|| std::env::var("PASS").ok())
-        .expect("VPN_PASS or PASS");
+    let username = std::env::var("VPN_USER").expect("VPN_USER");
+    let password = std::env::var("VPN_PASS").expect("VPN_PASS");
     let target =
         std::env::var("TARGET_URL").unwrap_or_else(|_| "https://jwxt.sit.edu.cn/".to_string());
     let hold_seconds = std::env::var("HOLD_SECONDS")
