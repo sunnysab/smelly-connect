@@ -3,14 +3,16 @@ use std::net::Ipv4Addr;
 use crate::error::{AuthError, ProtocolError};
 
 pub fn parse_login_psw_success(body: &str, current_twfid: &str) -> Result<String, AuthError> {
-    if !body.contains("<Result>1</Result>") {
-        return Err(AuthError::MissingSuccessMarker);
-    }
-
-    extract_tag(body, "TwfID")
-        .map(ToOwned::to_owned)
-        .or_else(|| (!current_twfid.is_empty()).then(|| current_twfid.to_string()))
-        .ok_or(AuthError::MissingTwfId)
+    crate::kernel::control::parse_login_success(body, current_twfid).map_err(|err| match err {
+        crate::kernel::control::ControlParseError::MissingSuccessMarker => {
+            AuthError::MissingSuccessMarker
+        }
+        crate::kernel::control::ControlParseError::MissingTwfId => AuthError::MissingTwfId,
+        crate::kernel::control::ControlParseError::MissingTag(_)
+        | crate::kernel::control::ControlParseError::InvalidRsaExponent => {
+            unreachable!("login success parser returned an unexpected control parse error")
+        }
+    })
 }
 
 pub fn parse_assigned_ip_reply(reply: &[u8]) -> Result<Ipv4Addr, ProtocolError> {
@@ -22,12 +24,4 @@ pub fn parse_assigned_ip_reply(reply: &[u8]) -> Result<Ipv4Addr, ProtocolError> 
     }
 
     Ok(Ipv4Addr::new(reply[4], reply[5], reply[6], reply[7]))
-}
-
-fn extract_tag<'a>(body: &'a str, tag: &str) -> Option<&'a str> {
-    let start_tag = format!("<{tag}>");
-    let end_tag = format!("</{tag}>");
-    let start = body.find(&start_tag)? + start_tag.len();
-    let end = body[start..].find(&end_tag)? + start;
-    Some(body[start..end].trim())
 }
