@@ -6,7 +6,10 @@ use smelly_connect::test_support;
 pub async fn run_tcp_for_test(target: &str) -> Result<String, String> {
     let session = test_support::session::login_harness().ready_session().await;
     let (host, port) = split_target(target)?;
-    let _stream = session.connect_tcp((host.as_str(), port)).await.map_err(|err| format!("{err:?}"))?;
+    let _stream = session
+        .connect_tcp((host.as_str(), port))
+        .await
+        .map_err(|err| format!("{err:?}"))?;
     Ok(format!("tcp ok: {host}:{port}"))
 }
 
@@ -50,6 +53,8 @@ fn split_target(target: &str) -> Result<(String, u16), String> {
     let (host, port) = target
         .rsplit_once(':')
         .ok_or_else(|| "missing :port".to_string())?;
-    let port = port.parse::<u16>().map_err(|_| "invalid port".to_string())?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| "invalid port".to_string())?;
     Ok((host.to_string(), port))
 }

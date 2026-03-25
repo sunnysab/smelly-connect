@@ -16,10 +16,9 @@ async fn test_icmp_uses_session_level_ping() {
 
 #[tokio::test]
 async fn test_http_fetches_url() {
-    let output = smelly_connect_cli::commands::test::run_http_for_test(
-        "http://intranet.zju.edu.cn/health",
-    )
-    .await
-    .unwrap();
+    let output =
+        smelly_connect_cli::commands::test::run_http_for_test("http://intranet.zju.edu.cn/health")
+            .await
+            .unwrap();
     assert!(output.contains("status="));
 }

@@ -102,13 +102,19 @@ pub async fn proxy_connect_for_test() -> Result<ConnectProxyTestResult, String> 
         .map_err(|err| err.to_string())?;
 
     let mut header = [0_u8; 128];
-    let n = client.read(&mut header).await.map_err(|err| err.to_string())?;
+    let n = client
+        .read(&mut header)
+        .await
+        .map_err(|err| err.to_string())?;
     let header = String::from_utf8_lossy(&header[..n]);
     if !header.starts_with("HTTP/1.1 200") {
         return Err(format!("unexpected connect response: {header}"));
     }
 
-    client.write_all(b"ping").await.map_err(|err| err.to_string())?;
+    client
+        .write_all(b"ping")
+        .await
+        .map_err(|err| err.to_string())?;
     let mut echoed = [0_u8; 4];
     client
         .read_exact(&mut echoed)
@@ -158,6 +164,14 @@ pub async fn proxy_http_no_ready_session_for_test() -> Result<NoReadySessionResu
 
 pub async fn serve_http() -> Result<(), String> {
     Err("serve_http is not wired to the real CLI runtime yet".to_string())
+}
+
+struct ForwardRequest<'a> {
+    method: &'a str,
+    target: &'a str,
+    version: &'a str,
+    headers: Vec<&'a str>,
+    leftover: Vec<u8>,
 }
 
 async fn spawn_test_proxy<F, Fut>(pool: SessionPool, connector: F) -> Result<SocketAddr, String>
@@ -221,11 +235,13 @@ where
         account_name,
         connector,
         client,
-        method,
-        target,
-        version,
-        lines.collect(),
-        leftover,
+        ForwardRequest {
+            method,
+            target,
+            version,
+            headers: lines.collect(),
+            leftover,
+        },
     )
     .await
 }
@@ -265,38 +281,34 @@ async fn handle_forward<F, Fut>(
     account_name: String,
     connector: F,
     mut client: TcpStream,
-    method: &str,
-    target: &str,
-    version: &str,
-    headers: Vec<&str>,
-    leftover: Vec<u8>,
+    request: ForwardRequest<'_>,
 ) -> Result<(), String>
 where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    let (host, port, path) = parse_absolute_target(target)?;
+    let (host, port, path) = parse_absolute_target(request.target)?;
     let mut upstream = connector(account_name, host.clone(), port)
         .await
         .map_err(|err| err.to_string())?;
 
-    let mut request = format!("{method} {path} {version}\r\n");
-    for header in headers {
+    let mut upstream_request = format!("{} {path} {}\r\n", request.method, request.version);
+    for header in request.headers {
         if header.to_ascii_lowercase().starts_with("proxy-connection:") {
             continue;
         }
-        request.push_str(header);
-        request.push_str("\r\n");
+        upstream_request.push_str(header);
+        upstream_request.push_str("\r\n");
     }
-    request.push_str("\r\n");
+    upstream_request.push_str("\r\n");
 
     upstream
-        .write_all(request.as_bytes())
+        .write_all(upstream_request.as_bytes())
         .await
         .map_err(|err| err.to_string())?;
-    if !leftover.is_empty() {
+    if !request.leftover.is_empty() {
         upstream
-            .write_all(&leftover)
+            .write_all(&request.leftover)
             .await
             .map_err(|err| err.to_string())?;
     }
@@ -343,9 +355,7 @@ fn parse_absolute_target(target: &str) -> Result<(String, u16, String), String> 
 
 fn split_host_port(target: &str, default_port: u16) -> Result<(&str, u16), String> {
     if let Some((host, port)) = target.rsplit_once(':') {
-        let port = port
-            .parse()
-            .map_err(|_| "invalid port".to_string())?;
+        let port = port.parse().map_err(|_| "invalid port".to_string())?;
         Ok((host, port))
     } else {
         Ok((target, default_port))

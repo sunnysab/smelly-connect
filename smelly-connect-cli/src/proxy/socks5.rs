@@ -67,10 +67,16 @@ pub async fn proxy_socks5_for_test() -> Result<Socks5ProxyTestResult, String> {
         .await
         .map_err(|err| err.to_string())?;
     if connect_reply[1] != 0x00 {
-        return Err(format!("unexpected socks5 reply code: {}", connect_reply[1]));
+        return Err(format!(
+            "unexpected socks5 reply code: {}",
+            connect_reply[1]
+        ));
     }
 
-    client.write_all(b"ping").await.map_err(|err| err.to_string())?;
+    client
+        .write_all(b"ping")
+        .await
+        .map_err(|err| err.to_string())?;
     let mut echoed = [0_u8; 4];
     client
         .read_exact(&mut echoed)

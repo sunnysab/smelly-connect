@@ -6,6 +6,8 @@
 
 - `smelly-connect`
   EasyConnect 控制面登录、资源解析、会话管理、本地 HTTP 代理、`reqwest` 适配、Rust 数据面与保活逻辑。
+- `smelly-connect-cli`
+  基于 `smelly-connect` 的独立 CLI 工具，负责 `config.toml`、多账号池、测试命令以及 HTTP/SOCKS5 代理服务。
 - `smelly-tls`
   面向 EasyConnect 旧协议的最小 TLS 1.1 客户端实现，用于旧式隧道握手与数据传输。
 
@@ -45,6 +47,7 @@
 ```text
 .
 ├── Cargo.toml
+├── smelly-connect-cli/
 ├── smelly-connect/
 └── smelly-tls/
 ```

@@ -6,7 +6,8 @@ async fn pool_prewarms_first_n_accounts() {
 
 #[tokio::test]
 async fn pool_selects_ready_sessions_round_robin() {
-    let pool = smelly_connect_cli::pool::SessionPool::from_named_ready_accounts(["a", "b", "c"]).await;
+    let pool =
+        smelly_connect_cli::pool::SessionPool::from_named_ready_accounts(["a", "b", "c"]).await;
     assert_eq!(pool.next_account_name().await.unwrap(), "a");
     assert_eq!(pool.next_account_name().await.unwrap(), "b");
     assert_eq!(pool.next_account_name().await.unwrap(), "c");

@@ -4,6 +4,8 @@
 
 当前 crate 版本：`0.2.0`
 
+正式命令行入口由工作区中的 `smelly-connect-cli` crate 提供；本 crate 保持库定位。
+
 当前已经支持：
 
 - 用户名/密码登录
