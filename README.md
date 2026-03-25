@@ -191,6 +191,38 @@ smelly-connect-cli --config ./config.toml test http http://intranet.zju.edu.cn/h
 - `GET /healthz` 返回池健康摘要
 - `GET /stats` 返回当前连接数、累计连接数、双向流量统计，以及 pool 节点状态摘要
 
+## 部署
+
+Docker：
+
+```bash
+docker build -f deploy/Dockerfile -t smelly-connect-cli:latest .
+docker run --rm \
+  --cap-add=NET_RAW \
+  -p 127.0.0.1:8080:8080 \
+  -p 127.0.0.1:1080:1080 \
+  -p 127.0.0.1:9090:9090 \
+  -v "$(pwd)/config.toml:/etc/smelly-connect/config.toml:ro" \
+  smelly-connect-cli:latest
+```
+
+如果代理或管理 API 需要被宿主机外访问，把 `config.toml` 里的监听地址从 `127.0.0.1` 改成对应的容器内绑定地址，例如 `0.0.0.0`。
+
+也可以直接使用 [`deploy/docker-compose.yml`](deploy/docker-compose.yml)。
+
+systemd：
+
+- 把二进制放到 `/usr/local/bin/smelly-connect-cli`
+- 把配置文件放到 `/etc/smelly-connect/config.toml`
+- 把 [`deploy/smelly-connect-cli.service`](deploy/smelly-connect-cli.service) 安装到 `/etc/systemd/system/`
+- 创建运行用户：`sudo useradd --system --home /var/lib/smelly-connect --create-home smelly-connect`
+- 执行：`sudo systemctl daemon-reload && sudo systemctl enable --now smelly-connect-cli`
+
+说明：
+
+- `CAP_NET_RAW` 用于 ICMP keepalive；如果你完全不用 ICMP 探测，可以按环境再收紧
+- 当前 service 文件假设使用前台 `proxy` 模式，由 systemd 负责守护与重启
+
 ## 环境变量
 
 示例程序读取这些显式环境变量：

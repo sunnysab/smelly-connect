@@ -1,0 +1,20 @@
+[Unit]
+Description=smelly-connect-cli proxy service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=smelly-connect
+Group=smelly-connect
+WorkingDirectory=/var/lib/smelly-connect
+ExecStart=/usr/local/bin/smelly-connect-cli --config /etc/smelly-connect/config.toml proxy
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

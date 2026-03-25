@@ -1,0 +1,20 @@
+services:
+  smelly-connect:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: smelly-connect-cli:latest
+    container_name: smelly-connect
+    restart: unless-stopped
+    cap_add:
+      - NET_RAW
+    volumes:
+      - ../config.toml:/etc/smelly-connect/config.toml:ro
+    command:
+      - --config
+      - /etc/smelly-connect/config.toml
+      - proxy
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:1080:1080"
+      - "127.0.0.1:9090:9090"

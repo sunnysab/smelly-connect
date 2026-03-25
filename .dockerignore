@@ -1,0 +1,7 @@
+.git
+.idea
+.worktrees
+target
+.env
+config.toml
+smelly-connect-cli/test.log
