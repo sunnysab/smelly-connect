@@ -129,8 +129,17 @@ pub async fn proxy_socks5_no_ready_session_for_test() -> Result<Socks5FailureRes
     })
 }
 
-pub async fn serve_socks5() -> Result<(), String> {
-    Err("serve_socks5 is not wired to the real CLI runtime yet".to_string())
+pub async fn serve_socks5(listen: String, pool: SessionPool) -> Result<(), String> {
+    let listener = TcpListener::bind(listen)
+        .await
+        .map_err(|err| err.to_string())?;
+    loop {
+        let (stream, _) = listener.accept().await.map_err(|err| err.to_string())?;
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let _ = handle_live_client(stream, pool).await;
+        });
+    }
 }
 
 async fn spawn_test_socks5<F, Fut>(pool: SessionPool, connector: F) -> Result<SocketAddr, String>
@@ -226,6 +235,85 @@ where
     let mut upstream = connector(account_name, host, port)
         .await
         .map_err(|err| err.to_string())?;
+    client
+        .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
+        .await
+        .map_err(|err| err.to_string())?;
+    let _ = copy_bidirectional(&mut client, &mut upstream)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<(), String> {
+    let mut greeting = [0_u8; 2];
+    client
+        .read_exact(&mut greeting)
+        .await
+        .map_err(|err| err.to_string())?;
+    let methods_len = greeting[1] as usize;
+    let mut methods = vec![0_u8; methods_len];
+    client
+        .read_exact(&mut methods)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(&[0x05, 0x00])
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let mut header = [0_u8; 4];
+    client
+        .read_exact(&mut header)
+        .await
+        .map_err(|err| err.to_string())?;
+    let atyp = header[3];
+    let host = match atyp {
+        0x01 => {
+            let mut ip = [0_u8; 4];
+            client
+                .read_exact(&mut ip)
+                .await
+                .map_err(|err| err.to_string())?;
+            Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]).to_string()
+        }
+        0x03 => {
+            let mut len = [0_u8; 1];
+            client
+                .read_exact(&mut len)
+                .await
+                .map_err(|err| err.to_string())?;
+            let mut host = vec![0_u8; len[0] as usize];
+            client
+                .read_exact(&mut host)
+                .await
+                .map_err(|err| err.to_string())?;
+            String::from_utf8(host).map_err(|err| err.to_string())?
+        }
+        _ => return Err("unsupported atyp".to_string()),
+    };
+    let mut port_bytes = [0_u8; 2];
+    client
+        .read_exact(&mut port_bytes)
+        .await
+        .map_err(|err| err.to_string())?;
+    let port = u16::from_be_bytes(port_bytes);
+
+    let (account_name, session) = match pool.next_live_session().await {
+        Ok(ready) => ready,
+        Err(_) => {
+            client
+                .write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .map_err(|err| err.to_string())?;
+            return Ok(());
+        }
+    };
+
+    let mut upstream = session
+        .connect_tcp((host.as_str(), port))
+        .await
+        .map_err(|err| format!("{account_name}: {err:?}"))?;
     client
         .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
         .await

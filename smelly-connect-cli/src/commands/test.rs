@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
@@ -35,18 +36,90 @@ pub async fn run_http_for_test(url: &str) -> Result<String, String> {
 }
 
 pub async fn run_tcp(target: &str) -> Result<(), String> {
-    println!("{}", run_tcp_for_test(target).await?);
+    let output = run_tcp_with_config("config.toml", target).await?;
+    println!("{output}");
     Ok(())
 }
 
 pub async fn run_icmp(target: &str) -> Result<(), String> {
-    println!("{}", run_icmp_for_test(target).await?);
+    let output = run_icmp_with_config("config.toml", target).await?;
+    println!("{output}");
     Ok(())
 }
 
 pub async fn run_http(url: &str) -> Result<(), String> {
-    println!("{}", run_http_for_test(url).await?);
+    let output = run_http_with_config("config.toml", url).await?;
+    println!("{output}");
     Ok(())
+}
+
+pub async fn run_tcp_with_config(
+    config_path: impl AsRef<Path>,
+    target: &str,
+) -> Result<String, String> {
+    let config = crate::config::load(config_path)?;
+    let pool = crate::pool::SessionPool::from_config(&config)
+        .await
+        .map_err(|err| err.to_string())?;
+    let (_account_name, session) = pool
+        .next_live_session()
+        .await
+        .map_err(|err| err.to_string())?;
+    let (host, port) = split_target(target)?;
+    let _stream = session
+        .connect_tcp((host.as_str(), port))
+        .await
+        .map_err(|err| format!("{err:?}"))?;
+    Ok(format!("tcp ok: {host}:{port}"))
+}
+
+pub async fn run_icmp_with_config(
+    config_path: impl AsRef<Path>,
+    target: &str,
+) -> Result<String, String> {
+    let config = crate::config::load(config_path)?;
+    let pool = crate::pool::SessionPool::from_config(&config)
+        .await
+        .map_err(|err| err.to_string())?;
+    let (_account_name, session) = pool
+        .next_live_session()
+        .await
+        .map_err(|err| err.to_string())?;
+    session
+        .icmp_ping(target.into())
+        .await
+        .map_err(|err| format!("{err:?}"))?;
+    Ok(format!("icmp ok: {target}"))
+}
+
+pub async fn run_http_with_config(
+    config_path: impl AsRef<Path>,
+    url: &str,
+) -> Result<String, String> {
+    let config = crate::config::load(config_path)?;
+    let pool = crate::pool::SessionPool::from_config(&config)
+        .await
+        .map_err(|err| err.to_string())?;
+    let (_account_name, session) = pool
+        .next_live_session()
+        .await
+        .map_err(|err| err.to_string())?;
+    let client = session
+        .reqwest_client()
+        .await
+        .map_err(|err| format!("{err:?}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|err| err.to_string())?;
+    let body_len = body.len();
+    let has_html = body.to_ascii_lowercase().contains("<html");
+    Ok(format!(
+        "status={status} body_len={body_len} html={has_html}"
+    ))
 }
 
 fn split_target(target: &str) -> Result<(String, u16), String> {

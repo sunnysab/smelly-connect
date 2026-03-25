@@ -162,8 +162,17 @@ pub async fn proxy_http_no_ready_session_for_test() -> Result<NoReadySessionResu
     Ok(NoReadySessionResult { status_code })
 }
 
-pub async fn serve_http() -> Result<(), String> {
-    Err("serve_http is not wired to the real CLI runtime yet".to_string())
+pub async fn serve_http(listen: String, pool: SessionPool) -> Result<(), String> {
+    let listener = TcpListener::bind(listen)
+        .await
+        .map_err(|err| err.to_string())?;
+    loop {
+        let (stream, _) = listener.accept().await.map_err(|err| err.to_string())?;
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let _ = handle_live_client(stream, pool).await;
+        });
+    }
 }
 
 struct ForwardRequest<'a> {
@@ -244,6 +253,90 @@ where
         },
     )
     .await
+}
+
+async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<(), String> {
+    let mut buffer = Vec::with_capacity(1024);
+    let header_end = read_headers(&mut client, &mut buffer)
+        .await
+        .map_err(|err| err.to_string())?;
+    let header_bytes = &buffer[..header_end];
+    let leftover = buffer[header_end..].to_vec();
+    let header_text = String::from_utf8_lossy(header_bytes);
+    let mut lines = header_text.split("\r\n").filter(|line| !line.is_empty());
+    let request_line = lines
+        .next()
+        .ok_or_else(|| "missing request line".to_string())?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let target = parts.next().unwrap_or_default();
+    let version = parts.next().unwrap_or("HTTP/1.1");
+
+    let (account_name, session) = match pool.next_live_session().await {
+        Ok(ready) => ready,
+        Err(_) => {
+            client
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .map_err(|err| err.to_string())?;
+            return Ok(());
+        }
+    };
+
+    if method.eq_ignore_ascii_case("CONNECT") {
+        let (host, port) = split_host_port(target, 443)?;
+        let mut upstream = session
+            .connect_tcp((host, port))
+            .await
+            .map_err(|err| format!("{account_name}: {err:?}"))?;
+        client
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await
+            .map_err(|err| err.to_string())?;
+        if !leftover.is_empty() {
+            upstream
+                .write_all(&leftover)
+                .await
+                .map_err(|err| err.to_string())?;
+        }
+        let _ = copy_bidirectional(&mut client, &mut upstream)
+            .await
+            .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+
+    let (host, port, path) = parse_absolute_target(target)?;
+    let mut upstream = session
+        .connect_tcp((host.as_str(), port))
+        .await
+        .map_err(|err| format!("{account_name}: {err:?}"))?;
+
+    let mut upstream_request = format!("{method} {path} {version}\r\n");
+    for header in lines {
+        if header.to_ascii_lowercase().starts_with("proxy-connection:") {
+            continue;
+        }
+        upstream_request.push_str(header);
+        upstream_request.push_str("\r\n");
+    }
+    upstream_request.push_str("\r\n");
+
+    upstream
+        .write_all(upstream_request.as_bytes())
+        .await
+        .map_err(|err| err.to_string())?;
+    if !leftover.is_empty() {
+        upstream
+            .write_all(&leftover)
+            .await
+            .map_err(|err| err.to_string())?;
+    }
+    tokio::io::copy(&mut upstream, &mut client)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 async fn handle_connect<F, Fut>(

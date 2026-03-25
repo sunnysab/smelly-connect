@@ -45,6 +45,10 @@ pub struct ListenerConfig {
     pub listen: String,
 }
 
+pub fn load(path: impl AsRef<Path>) -> Result<AppConfig, String> {
+    load_for_test(path)
+}
+
 pub fn load_for_test(path: impl AsRef<Path>) -> Result<AppConfig, String> {
     let body = fs::read_to_string(path).map_err(|err| err.to_string())?;
     toml::from_str(&body).map_err(|err| err.to_string())
@@ -64,6 +68,15 @@ pub fn merge_for_test<const N: usize>(
         return Err("expected proxy command".to_string());
     };
     apply_proxy_overrides(&mut cfg, &command);
+    Ok(cfg)
+}
+
+pub fn merge_proxy_command(
+    path: impl AsRef<Path>,
+    command: &ProxyCommand,
+) -> Result<AppConfig, String> {
+    let mut cfg = load(path)?;
+    apply_proxy_overrides(&mut cfg, command);
     Ok(cfg)
 }
 

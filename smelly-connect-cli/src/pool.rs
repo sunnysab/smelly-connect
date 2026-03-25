@@ -2,16 +2,33 @@ use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
 
+use smelly_connect::{CaptchaError, CaptchaHandler, EasyConnectClient, Session};
 use tokio::sync::Mutex;
 
-#[derive(Debug, Clone)]
+use crate::config::{AccountConfig, AppConfig};
+
+#[derive(Clone)]
 pub struct PooledSession {
     account_name: String,
+    session: Option<Session>,
 }
 
 impl PooledSession {
     pub fn account_name(&self) -> &str {
         &self.account_name
+    }
+
+    pub fn session(&self) -> Option<&Session> {
+        self.session.as_ref()
+    }
+}
+
+impl std::fmt::Debug for PooledSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PooledSession")
+            .field("account_name", &self.account_name)
+            .field("has_session", &self.session.is_some())
+            .finish()
     }
 }
 
@@ -20,22 +37,22 @@ pub struct AccountFailure {
     pub message: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum AccountState {
-    Configured,
+    Configured(AccountConfig),
     Connecting,
-    Ready(PooledSession),
+    Ready(Box<PooledSession>),
     Failed(AccountFailure),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct AccountNode {
     name: String,
     state: AccountState,
     flaky_retry: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct PoolState {
     nodes: Vec<AccountNode>,
     cursor: usize,
@@ -45,6 +62,7 @@ struct PoolState {
 pub struct SessionPool {
     inner: Arc<Mutex<PoolState>>,
     retry_delay: Duration,
+    server: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,9 +94,15 @@ impl SessionPool {
             let state = if idx < prewarm {
                 AccountState::Ready(PooledSession {
                     account_name: name.clone(),
-                })
+                    session: None,
+                }
+                .into())
             } else {
-                AccountState::Configured
+                AccountState::Configured(AccountConfig {
+                    name: name.clone(),
+                    username: name.clone(),
+                    password: "pass".to_string(),
+                })
             };
             nodes.push(AccountNode {
                 name,
@@ -89,6 +113,7 @@ impl SessionPool {
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
+            server: None,
         }
     }
 
@@ -99,13 +124,16 @@ impl SessionPool {
                 name: name.to_string(),
                 state: AccountState::Ready(PooledSession {
                     account_name: name.to_string(),
-                }),
+                    session: None,
+                }
+                .into()),
                 flaky_retry: false,
             })
             .collect();
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
+            server: None,
         }
     }
 
@@ -120,9 +148,18 @@ impl SessionPool {
                     name.to_string(),
                     AccountState::Ready(PooledSession {
                         account_name: name.to_string(),
+                        session: None,
+                    }
+                    .into()),
+                ),
+                Ok(name) => (
+                    name.to_string(),
+                    AccountState::Configured(AccountConfig {
+                        name: name.to_string(),
+                        username: name.to_string(),
+                        password: "pass".to_string(),
                     }),
                 ),
-                Ok(name) => (name.to_string(), AccountState::Configured),
                 Err(message) => (
                     format!("failed-{idx}"),
                     AccountState::Failed(AccountFailure {
@@ -139,6 +176,7 @@ impl SessionPool {
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
+            server: None,
         }
     }
 
@@ -156,6 +194,7 @@ impl SessionPool {
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
+            server: None,
         }
     }
 
@@ -166,13 +205,39 @@ impl SessionPool {
                     name: "acct-01".to_string(),
                     state: AccountState::Ready(PooledSession {
                         account_name: "acct-01".to_string(),
-                    }),
+                        session: None,
+                    }
+                    .into()),
                     flaky_retry: true,
                 }],
                 cursor: 0,
             })),
             retry_delay: Duration::from_millis(100),
+            server: None,
         }
+    }
+
+    pub async fn from_config(cfg: &AppConfig) -> Result<Self, PoolError> {
+        let mut nodes = Vec::new();
+        for account in &cfg.accounts {
+            nodes.push(AccountNode {
+                name: account.name.clone(),
+                state: AccountState::Configured(account.clone()),
+                flaky_retry: false,
+            });
+        }
+
+        let pool = Self {
+            inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            retry_delay: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
+            server: Some(cfg.vpn.server.clone()),
+        };
+
+        pool.prewarm(cfg.pool.prewarm).await;
+        if pool.ready_count().await == 0 {
+            return Err(PoolError::new("no ready session after prewarm"));
+        }
+        Ok(pool)
     }
 
     pub async fn ready_count(&self) -> usize {
@@ -195,7 +260,7 @@ impl SessionPool {
             .iter()
             .enumerate()
             .filter_map(|(idx, node)| match &node.state {
-                AccountState::Ready(session) => Some((idx, session.clone())),
+                AccountState::Ready(session) => Some((idx, session.as_ref().clone())),
                 _ => None,
             })
             .collect();
@@ -214,11 +279,13 @@ impl SessionPool {
         if let Some(node) = state
             .nodes
             .iter_mut()
-            .find(|node| matches!(node.state, AccountState::Configured))
+            .find(|node| matches!(node.state, AccountState::Configured(_)))
         {
             node.state = AccountState::Ready(PooledSession {
                 account_name: node.name.clone(),
-            });
+                session: None,
+            }
+            .into());
             return Ok(());
         }
         Err(PoolError::new("no configurable account remaining"))
@@ -251,9 +318,125 @@ impl SessionPool {
                 if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
                     node.state = AccountState::Ready(PooledSession {
                         account_name: node.name.clone(),
-                    });
+                        session: None,
+                    }
+                    .into());
                 }
             });
         }
     }
+
+    pub async fn next_live_session(&self) -> Result<(String, Session), PoolError> {
+        if let Some(ready) = self.next_ready_with_session().await? {
+            return Ok(ready);
+        }
+
+        self.connect_one_configured().await?;
+
+        if let Some(ready) = self.next_ready_with_session().await? {
+            return Ok(ready);
+        }
+
+        Err(PoolError::new("no ready session"))
+    }
+
+    async fn prewarm(&self, count: usize) {
+        for _ in 0..count {
+            let _ = self.connect_one_configured().await;
+        }
+    }
+
+    async fn next_ready_with_session(&self) -> Result<Option<(String, Session)>, PoolError> {
+        let mut state = self.inner.lock().await;
+        let ready: Vec<_> = state
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, node)| match &node.state {
+                AccountState::Ready(session) => session
+                    .session()
+                    .cloned()
+                    .map(|live| (idx, session.account_name().to_string(), live)),
+                _ => None,
+            })
+            .collect();
+
+        if ready.is_empty() {
+            return Ok(None);
+        }
+
+        let pos = state.cursor % ready.len();
+        state.cursor += 1;
+        let (_, account_name, session) = ready[pos].clone();
+        Ok(Some((account_name, session)))
+    }
+
+    async fn connect_one_configured(&self) -> Result<(), PoolError> {
+        let (name, account, server) = {
+            let mut state = self.inner.lock().await;
+            let Some(server) = self.server.clone() else {
+                return Err(PoolError::new("real server configuration unavailable"));
+            };
+            let Some(idx) = state
+                .nodes
+                .iter_mut()
+                .enumerate()
+                .find(|(_, node)| matches!(node.state, AccountState::Configured(_)))
+                .map(|(idx, _)| idx)
+            else {
+                return Err(PoolError::new("no configurable account remaining"));
+            };
+            let AccountState::Configured(account) = &state.nodes[idx].state else {
+                unreachable!();
+            };
+            let account = account.clone();
+            let name = state.nodes[idx].name.clone();
+            state.nodes[idx].state = AccountState::Connecting;
+            (name, account, server)
+        };
+
+        match connect_account(&server, &account, self.retry_delay).await {
+            Ok(session) => {
+                let mut state = self.inner.lock().await;
+                if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
+                    node.state = AccountState::Ready(PooledSession {
+                        account_name: account.name.clone(),
+                        session: Some(session),
+                    }
+                    .into());
+                }
+                Ok(())
+            }
+            Err(err) => {
+                let mut state = self.inner.lock().await;
+                if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
+                    node.state = AccountState::Failed(AccountFailure {
+                        message: err.to_string(),
+                    });
+                }
+                Err(err)
+            }
+        }
+    }
+}
+
+async fn connect_account(
+    server: &str,
+    account: &AccountConfig,
+    timeout: Duration,
+) -> Result<Session, PoolError> {
+    let client = EasyConnectClient::builder(server.to_string())
+        .credentials(account.username.clone(), account.password.clone())
+        .with_captcha_handler(CaptchaHandler::from_async(|_, _| async move {
+            Err(CaptchaError::new(
+                "captcha callback not configured for smelly-connect-cli",
+            ))
+        }))
+        .build()
+        .map_err(|err| PoolError::new(format!("{err:?}")))?;
+
+    tokio::time::timeout(timeout, client.connect())
+        .await
+        .map_err(|_| PoolError::new("session connect timeout"))?
+        .map_err(|err| PoolError::new(format!("{err:?}")))
 }
