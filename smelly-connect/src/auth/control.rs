@@ -15,7 +15,8 @@ use crate::transport::{TransportStack, VpnStream};
 
 pub type ControlPlaneState = crate::runtime::control_plane::ControlPlaneState;
 
-pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlaneState, Error> {
+#[allow(dead_code)]
+pub(crate) async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlaneState, Error> {
     crate::runtime::control_plane::run_control_plane(config).await
 }
 
@@ -64,7 +65,7 @@ pub async fn request_ip_via_tunnel(
     Ok(ip)
 }
 
-pub async fn request_ip_via_tunnel_with_conn(
+pub(crate) async fn request_ip_via_tunnel_with_conn(
     addr: SocketAddr,
     token: &crate::protocol::DerivedToken,
     legacy_cipher_hint: Option<&str>,

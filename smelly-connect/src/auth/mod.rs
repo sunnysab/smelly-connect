@@ -3,7 +3,7 @@ pub mod control;
 pub mod login;
 
 pub use captcha::CaptchaHandler;
-pub use control::{ControlPlaneState, run_control_plane};
+pub use control::ControlPlaneState;
 pub use login::{LoginAuthResponse, encrypt_password, parse_login_auth};
 
 pub mod tests {

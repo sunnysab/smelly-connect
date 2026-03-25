@@ -37,6 +37,7 @@ pub struct EasyConnectSession {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct LegacyDataPlaneConfig {
     server_addr: SocketAddr,
     token: crate::protocol::DerivedToken,
@@ -59,7 +60,7 @@ impl EasyConnectSession {
         }
     }
 
-    pub fn with_legacy_data_plane(
+    pub(crate) fn with_legacy_data_plane(
         mut self,
         server_addr: SocketAddr,
         token: crate::protocol::DerivedToken,
@@ -155,7 +156,8 @@ impl EasyConnectSession {
         crate::integration::reqwest::build_client(self).await
     }
 
-    pub async fn spawn_packet_device(&self) -> Result<PacketDevice, Error> {
+    #[allow(dead_code)]
+    pub(crate) async fn spawn_packet_device(&self) -> Result<PacketDevice, Error> {
         let cfg = self
             .legacy_data_plane
             .as_ref()

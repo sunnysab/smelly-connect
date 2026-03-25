@@ -1,0 +1,54 @@
+error[E0603]: function `request_ip_via_tunnel_with_conn` is private
+ --> tests/ui/legacy_public_api.rs:1:37
+  |
+1 | use smelly_connect::auth::control::{request_ip_via_tunnel_with_conn, run_control_plane};
+  |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
+  |
+note: the function `request_ip_via_tunnel_with_conn` is defined here
+ --> src/auth/control.rs
+  |
+  | / pub(crate) async fn request_ip_via_tunnel_with_conn(
+  | |     addr: SocketAddr,
+  | |     token: &crate::protocol::DerivedToken,
+  | |     legacy_cipher_hint: Option<&str>,
+  | | ) -> Result<(Ipv4Addr, TunnelConnection), Error> {
+  | |________________________________________________^
+
+error[E0603]: function `run_control_plane` is private
+ --> tests/ui/legacy_public_api.rs:1:70
+  |
+1 | use smelly_connect::auth::control::{request_ip_via_tunnel_with_conn, run_control_plane};
+  |                                                                      ^^^^^^^^^^^^^^^^^ private function
+  |
+note: the function `run_control_plane` is defined here
+ --> src/auth/control.rs
+  |
+  | pub(crate) async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlaneState, Error> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0624]: method `with_legacy_data_plane` is private
+ --> tests/ui/legacy_public_api.rs:7:33
+  |
+7 |       let _ = EasyConnectSession::with_legacy_data_plane;
+  |                                   ^^^^^^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/session.rs
+  |
+  | /     pub(crate) fn with_legacy_data_plane(
+  | |         mut self,
+  | |         server_addr: SocketAddr,
+  | |         token: crate::protocol::DerivedToken,
+  | |         legacy_cipher_hint: Option<String>,
+  | |     ) -> Self {
+  | |_____________- private method defined here
+
+error[E0624]: method `spawn_packet_device` is private
+ --> tests/ui/legacy_public_api.rs:8:33
+  |
+8 |     let _ = EasyConnectSession::spawn_packet_device;
+  |                                 ^^^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/session.rs
+  |
+  |     pub(crate) async fn spawn_packet_device(&self) -> Result<PacketDevice, Error> {
+  |     ----------------------------------------------------------------------------- private method defined here
