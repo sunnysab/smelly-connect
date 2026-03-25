@@ -1,6 +1,9 @@
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
 
+use rsa::pkcs8::DecodePublicKey;
+use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
+
 pub const TLS11: u16 = 0x0302;
 pub const TLS_RSA_WITH_RC4_128_SHA: u16 = 0x0005;
 pub const TLS_EMPTY_RENEGOTIATION_INFO_SCSV: u16 = 0x00ff;
@@ -251,4 +254,41 @@ pub fn derive_easyconnect_token(session_id: &[u8; 32], twfid: &str) -> Option<[u
     let mut out = [0_u8; 48];
     out.copy_from_slice(bytes);
     Some(out)
+}
+
+pub fn build_premaster_secret(random_tail: [u8; 46]) -> [u8; 48] {
+    let mut premaster = [0_u8; 48];
+    premaster[..2].copy_from_slice(&TLS11.to_be_bytes());
+    premaster[2..].copy_from_slice(&random_tail);
+    premaster
+}
+
+pub fn encrypt_premaster_secret(
+    public_key_der: &[u8],
+    premaster: &[u8; 48],
+) -> io::Result<Vec<u8>> {
+    let public_key = RsaPublicKey::from_public_key_der(public_key_der)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    let mut rng = rsa::rand_core::OsRng;
+    public_key
+        .encrypt(&mut rng, Pkcs1v15Encrypt, premaster)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
+}
+
+pub fn build_client_key_exchange(
+    public_key_der: &[u8],
+    premaster: &[u8; 48],
+) -> io::Result<Vec<u8>> {
+    let encrypted = encrypt_premaster_secret(public_key_der, premaster)?;
+
+    let mut body = Vec::with_capacity(encrypted.len() + 2);
+    body.extend_from_slice(&(encrypted.len() as u16).to_be_bytes());
+    body.extend_from_slice(&encrypted);
+
+    let mut handshake = Vec::with_capacity(body.len() + 4);
+    handshake.push(16);
+    let body_len = body.len() as u32;
+    handshake.extend_from_slice(&body_len.to_be_bytes()[1..4]);
+    handshake.extend_from_slice(&body);
+    Ok(handshake)
 }
