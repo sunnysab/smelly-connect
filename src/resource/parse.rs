@@ -55,10 +55,10 @@ pub fn parse_resources(body: &str) -> Result<ResourceSet, roxmltree::Error> {
             let _ = parts.next();
             let host = parts.next();
             let ip = parts.next();
-            if let (Some(host), Some(ip)) = (host, ip) {
-                if let Ok(parsed) = ip.parse::<IpAddr>() {
-                    resources.static_dns.insert(host.to_string(), parsed);
-                }
+            if let (Some(host), Some(ip)) = (host, ip)
+                && let Ok(parsed) = ip.parse::<IpAddr>()
+            {
+                resources.static_dns.insert(host.to_string(), parsed);
             }
         }
     }

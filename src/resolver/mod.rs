@@ -27,10 +27,10 @@ impl SessionResolver {
         if let Some(ip) = self.static_dns.get(host) {
             return Ok(*ip);
         }
-        if let Some(remote_dns) = &self.remote_dns {
-            if let Some(ip) = remote_dns.get(host) {
-                return Ok(*ip);
-            }
+        if let Some(remote_dns) = &self.remote_dns
+            && let Some(ip) = remote_dns.get(host)
+        {
+            return Ok(*ip);
         }
         self.system_dns
             .get(host)
