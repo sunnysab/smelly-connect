@@ -15,6 +15,18 @@ pub struct Cli {
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
     Proxy,
+    #[command(subcommand)]
+    Inspect(InspectCommand),
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum InspectCommand {
+    Route {
+        host: String,
+        #[arg(default_value_t = 443)]
+        port: u16,
+    },
+    Session,
 }
 
 impl Cli {

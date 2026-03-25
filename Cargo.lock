@@ -1403,6 +1403,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "serde",
+ "smelly-connect",
  "tokio",
  "toml 0.8.23",
 ]
