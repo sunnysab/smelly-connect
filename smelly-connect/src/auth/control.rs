@@ -248,7 +248,7 @@ pub async fn spawn_legacy_packet_device(
     Ok(device)
 }
 
-fn resolve_server_addr(server: &str) -> Result<SocketAddr, Error> {
+pub(crate) fn resolve_server_addr(server: &str) -> Result<SocketAddr, Error> {
     let target = if server.contains(':') {
         server.to_string()
     } else {

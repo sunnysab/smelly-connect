@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use crate::proxy::http::HttpProxyHandle;
 use crate::resolver::SessionResolver;
 use crate::resource::{DomainRule, IpRule, ResourceSet};
 use crate::target::TargetAddr;
+use crate::transport::device::PacketDevice;
 use crate::transport::{TransportStack, VpnStream};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +25,14 @@ pub struct EasyConnectSession {
     resources: ResourceSet,
     resolver: SessionResolver,
     transport: TransportStack,
+    legacy_data_plane: Option<LegacyDataPlaneConfig>,
+}
+
+#[derive(Clone)]
+struct LegacyDataPlaneConfig {
+    server_addr: SocketAddr,
+    token: crate::protocol::DerivedToken,
+    legacy_cipher_hint: Option<String>,
 }
 
 impl EasyConnectSession {
@@ -37,7 +47,22 @@ impl EasyConnectSession {
             resources,
             resolver,
             transport,
+            legacy_data_plane: None,
         }
+    }
+
+    pub fn with_legacy_data_plane(
+        mut self,
+        server_addr: SocketAddr,
+        token: crate::protocol::DerivedToken,
+        legacy_cipher_hint: Option<String>,
+    ) -> Self {
+        self.legacy_data_plane = Some(LegacyDataPlaneConfig {
+            server_addr,
+            token,
+            legacy_cipher_hint,
+        });
+        self
     }
 
     pub fn client_ip(&self) -> Ipv4Addr {
@@ -82,6 +107,20 @@ impl EasyConnectSession {
         Ok(client)
     }
 
+    pub async fn spawn_packet_device(&self) -> Result<PacketDevice, Error> {
+        let cfg = self
+            .legacy_data_plane
+            .as_ref()
+            .ok_or_else(|| Error::Transport(TransportError::ConnectFailed("legacy data plane unavailable".to_string())))?;
+        crate::auth::control::spawn_legacy_packet_device(
+            cfg.server_addr,
+            &cfg.token,
+            self.client_ip,
+            cfg.legacy_cipher_hint.as_deref(),
+        )
+        .await
+    }
+
     pub async fn plan_tcp_connect<T>(&self, target: T) -> Result<RoutePlan, Error>
     where
         T: Into<TargetAddr>,
@@ -120,6 +159,10 @@ impl EasyConnectSession {
             IpAddr::V4(ip),
             port,
         )))
+    }
+
+    pub fn failing_transport(message: &'static str) -> TransportStack {
+        TransportStack::new(move |_| async move { Err(io::Error::other(message)) })
     }
 }
 
@@ -207,4 +250,5 @@ pub mod tests {
             Ok(VpnStream::new(client))
         })
     }
+
 }

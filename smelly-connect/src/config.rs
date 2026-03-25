@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use crate::auth::{CaptchaHandler, ControlPlaneState, run_control_plane};
-use crate::error::{BootstrapError, Error};
+use crate::error::Error;
 use crate::session::EasyConnectSession;
+use crate::resolver::SessionResolver;
 
 type SessionFactory = dyn Fn() -> Result<EasyConnectSession, Error> + Send + Sync + 'static;
 type SessionBootstrap =
@@ -61,7 +62,7 @@ impl EasyConnectConfig {
         let state = run_control_plane(&self).await?;
         match self.session_bootstrap {
             Some(bootstrap) => bootstrap(state),
-            None => Err(Error::Bootstrap(BootstrapError::NotImplemented)),
+            None => self.default_bootstrap(state).await,
         }
     }
 
@@ -69,5 +70,32 @@ impl EasyConnectConfig {
         self.base_url
             .clone()
             .unwrap_or_else(|| format!("https://{}", self.server))
+    }
+
+    async fn default_bootstrap(self, state: ControlPlaneState) -> Result<EasyConnectSession, Error> {
+        let token = crate::auth::control::request_token(&self.server, &state.authorized_twfid)?;
+        let client_ip = crate::auth::control::request_ip_for_server(
+            &self.server,
+            &token,
+            state.legacy_cipher_hint.as_deref(),
+        )
+        .await?;
+
+        let mut system_dns = std::collections::HashMap::new();
+        for host in state.resources.domain_rules.keys() {
+            system_dns.insert(host.clone(), std::net::IpAddr::V4(client_ip));
+        }
+        for (host, resolved) in &state.resources.static_dns {
+            system_dns.insert(host.clone(), *resolved);
+        }
+
+        let server_addr = crate::auth::control::resolve_server_addr(&self.server)?;
+        Ok(EasyConnectSession::new(
+            client_ip,
+            state.resources,
+            SessionResolver::new(std::collections::HashMap::new(), None, system_dns),
+            EasyConnectSession::failing_transport("connect_tcp not wired to packet stack yet"),
+        )
+        .with_legacy_data_plane(server_addr, token, state.legacy_cipher_hint))
     }
 }
