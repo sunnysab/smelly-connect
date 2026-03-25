@@ -54,6 +54,7 @@ async fn main() {
 
     let first = fetch_once(&client, &target).await;
     println!("first fetch: {}", first);
+    println!("jwxt ok");
 
     if hold_seconds == 0 {
         return;
@@ -67,6 +68,7 @@ async fn main() {
     }
 
     println!("hold complete: {}s", hold_seconds);
+    println!("hold ok");
 }
 
 async fn fetch_once(client: &reqwest::Client, target: &str) -> String {
