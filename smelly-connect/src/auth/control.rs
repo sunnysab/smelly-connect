@@ -303,16 +303,8 @@ async fn connect_legacy_tunnel(
     addr: SocketAddr,
     legacy_cipher_hint: Option<&str>,
 ) -> Result<TunnelConnection, Error> {
-    let preferred = legacy_cipher_hint
-        .and_then(smelly_tls::legacy_cipher_suite_from_hint)
-        .unwrap_or(smelly_tls::TLS_RSA_WITH_RC4_128_SHA);
-    let mut attempts = vec![preferred];
-    if preferred != smelly_tls::TLS_RSA_WITH_RC4_128_SHA {
-        attempts.push(smelly_tls::TLS_RSA_WITH_RC4_128_SHA);
-    }
-
     let mut last_err = None;
-    for cipher_suite in attempts {
+    for cipher_suite in crate::kernel::tunnel::cipher_suite_attempts(legacy_cipher_hint) {
         let hello = ClientHelloConfig::new(
             [0x41; 32],
             *b"L3IP\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
