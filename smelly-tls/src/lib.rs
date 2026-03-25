@@ -357,6 +357,95 @@ pub fn decrypt_rc4_sha1_record(
     Ok(plaintext)
 }
 
+pub struct Rc4Sha1Encryptor {
+    sequence_number: u64,
+    mac_key: [u8; 20],
+    cipher: Rc4<rc4::consts::U16>,
+}
+
+impl Rc4Sha1Encryptor {
+    pub fn new(mac_key: [u8; 20], enc_key: [u8; 16]) -> Self {
+        let cipher = Rc4::<rc4::consts::U16>::new_from_slice(&enc_key).unwrap();
+        Self {
+            sequence_number: 0,
+            mac_key,
+            cipher,
+        }
+    }
+
+    pub fn encrypt(&mut self, content_type: u8, plaintext: &[u8]) -> io::Result<Vec<u8>> {
+        let mac = tls10_record_mac(&self.mac_key, self.sequence_number, content_type, plaintext)?;
+        let mut payload = Vec::with_capacity(plaintext.len() + mac.len());
+        payload.extend_from_slice(plaintext);
+        payload.extend_from_slice(&mac);
+        self.cipher.apply_keystream(&mut payload);
+        self.sequence_number += 1;
+        Ok(payload)
+    }
+}
+
+pub struct Rc4Sha1Decryptor {
+    sequence_number: u64,
+    mac_key: [u8; 20],
+    cipher: Rc4<rc4::consts::U16>,
+}
+
+impl Rc4Sha1Decryptor {
+    pub fn new(mac_key: [u8; 20], enc_key: [u8; 16]) -> Self {
+        let cipher = Rc4::<rc4::consts::U16>::new_from_slice(&enc_key).unwrap();
+        Self {
+            sequence_number: 0,
+            mac_key,
+            cipher,
+        }
+    }
+
+    pub fn decrypt(&mut self, content_type: u8, ciphertext: &[u8]) -> io::Result<Vec<u8>> {
+        if ciphertext.len() < 20 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "record too short"));
+        }
+        let mut payload = ciphertext.to_vec();
+        self.cipher.apply_keystream(&mut payload);
+        let split = payload.len() - 20;
+        let plaintext = payload[..split].to_vec();
+        let received_mac = &payload[split..];
+        let expected_mac =
+            tls10_record_mac(&self.mac_key, self.sequence_number, content_type, &plaintext)?;
+        if received_mac != expected_mac.as_slice() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad record mac"));
+        }
+        self.sequence_number += 1;
+        Ok(plaintext)
+    }
+}
+
+pub fn derive_finished_verify_data(
+    master_secret: &[u8; 48],
+    client: bool,
+    handshake_transcript: &[u8],
+) -> [u8; 12] {
+    let handshake_hash = md5_sha1(handshake_transcript);
+    let label = if client {
+        b"client finished".as_slice()
+    } else {
+        b"server finished".as_slice()
+    };
+    let bytes = tls10_prf(master_secret, label, &handshake_hash, 12);
+    let mut out = [0_u8; 12];
+    out.copy_from_slice(&bytes);
+    out
+}
+
+pub fn build_finished_handshake(verify_data: [u8; 12]) -> Vec<u8> {
+    let mut out = vec![20, 0, 0, 12];
+    out.extend_from_slice(&verify_data);
+    out
+}
+
+pub fn build_change_cipher_spec_record() -> Vec<u8> {
+    vec![20, 0x03, 0x02, 0x00, 0x01, 0x01]
+}
+
 fn tls10_prf(secret: &[u8], label: &[u8], seed: &[u8], len: usize) -> Vec<u8> {
     let full_seed = [label, seed].concat();
     let left = &secret[..secret.len().div_ceil(2)];
@@ -370,6 +459,14 @@ fn tls10_prf(secret: &[u8], label: &[u8], seed: &[u8], len: usize) -> Vec<u8> {
         .zip(sha1_bytes.iter())
         .map(|(a, b)| a ^ b)
         .collect()
+}
+
+fn md5_sha1(data: &[u8]) -> Vec<u8> {
+    use md5::Digest as _;
+
+    let md5 = Md5::digest(data);
+    let sha1 = Sha1::digest(data);
+    [md5.as_slice(), sha1.as_slice()].concat()
 }
 
 fn p_hash<M>(secret: &[u8], seed: &[u8], len: usize) -> Vec<u8>
