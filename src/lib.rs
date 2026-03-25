@@ -6,6 +6,7 @@ pub mod resolver;
 pub mod resource;
 pub mod session;
 pub mod target;
+pub mod transport;
 
 pub use auth::captcha::CaptchaHandler;
 pub use config::EasyConnectConfig;
