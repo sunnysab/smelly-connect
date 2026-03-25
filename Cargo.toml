@@ -3,6 +3,9 @@ name = "smelly-connect"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["crates/smelly-tls"]
+
 [lib]
 name = "smelly_connect"
 path = "src/lib.rs"
