@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
 use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use reqwest::header::{CONTENT_TYPE, COOKIE, USER_AGENT};
+use smelly_tls::ClientHelloConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -101,7 +102,7 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
         .await
         .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
 
-    let authorized_twfid = crate::protocol::parse_login_psw_success(&login_psw_body)
+    let authorized_twfid = crate::protocol::parse_login_psw_success(&login_psw_body, &parsed.twfid)
         .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(format!("{err:?}"))))?;
 
     let resource_body = client
@@ -154,6 +155,74 @@ pub fn request_token(server: &str, twfid: &str) -> Result<crate::protocol::Deriv
         .ok_or_else(|| Error::Bootstrap(BootstrapError::AuthFlowFailed("missing SSL session".to_string())))?;
     crate::protocol::derive_token(&hex::encode(session.id()), twfid)
         .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(format!("{err:?}"))))
+}
+
+pub async fn request_ip_via_tunnel(
+    addr: SocketAddr,
+    token: &crate::protocol::DerivedToken,
+    legacy_cipher_hint: Option<&str>,
+) -> Result<Ipv4Addr, Error> {
+    let request_ip = crate::protocol::build_request_ip_message(token);
+    let preferred = legacy_cipher_hint
+        .and_then(smelly_tls::legacy_cipher_suite_from_hint)
+        .unwrap_or(smelly_tls::TLS_RSA_WITH_RC4_128_SHA);
+    let mut attempts = vec![preferred];
+    if preferred != smelly_tls::TLS_RSA_WITH_RC4_128_SHA {
+        attempts.push(smelly_tls::TLS_RSA_WITH_RC4_128_SHA);
+    }
+
+    let mut last_err = None;
+    for cipher_suite in attempts {
+        let hello = ClientHelloConfig::new(
+            [0x41; 32],
+            *b"L3IP\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+        )
+        .with_cipher_suite(cipher_suite)
+        .with_compression_methods(vec![1, 0]);
+
+        match smelly_tls::connect_tunnel(addr, &hello).await {
+            Ok(mut conn) => {
+                conn.send_application_data(&request_ip)
+                    .await
+                    .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+                let reply = conn
+                    .read_application_data()
+                    .await
+                    .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+                return crate::protocol::parse_assigned_ip_reply(&reply)
+                    .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(format!("{err:?}"))));
+            }
+            Err(err) => {
+                last_err = Some(err.to_string());
+            }
+        }
+    }
+
+    Err(Error::Bootstrap(BootstrapError::AuthFlowFailed(
+        last_err.unwrap_or_else(|| "legacy tunnel failed".to_string()),
+    )))
+}
+
+pub async fn request_ip_for_server(
+    server: &str,
+    token: &crate::protocol::DerivedToken,
+    legacy_cipher_hint: Option<&str>,
+) -> Result<Ipv4Addr, Error> {
+    let addr = resolve_server_addr(server)?;
+    request_ip_via_tunnel(addr, token, legacy_cipher_hint).await
+}
+
+fn resolve_server_addr(server: &str) -> Result<SocketAddr, Error> {
+    let target = if server.contains(':') {
+        server.to_string()
+    } else {
+        format!("{server}:443")
+    };
+    target
+        .to_socket_addrs()
+        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?
+        .next()
+        .ok_or_else(|| Error::Bootstrap(BootstrapError::AuthFlowFailed("no resolved address".to_string())))
 }
 
 pub mod tests {
