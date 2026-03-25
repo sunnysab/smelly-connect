@@ -1,6 +1,8 @@
+#[cfg(any(test, debug_assertions))]
 use smelly_connect::test_support;
 use std::path::Path;
 
+#[cfg(any(test, debug_assertions))]
 pub async fn inspect_route_for_test(host: &str, port: u16) -> String {
     let session = test_support::session::login_harness().ready_session().await;
     match session.plan_tcp_connect((host, port)).await {
@@ -9,6 +11,7 @@ pub async fn inspect_route_for_test(host: &str, port: u16) -> String {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn inspect_session_for_test() -> String {
     let pool = crate::pool::SessionPool::from_named_ready_accounts(["acct-01", "acct-02"]).await;
     let ready = pool.ready_count().await;

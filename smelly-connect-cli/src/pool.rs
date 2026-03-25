@@ -54,6 +54,7 @@ struct AccountNode {
     name: String,
     account: AccountConfig,
     state: AccountState,
+    #[allow(dead_code)]
     flaky_retry: bool,
     consecutive_failures: u32,
     failure_threshold: u32,
@@ -111,7 +112,7 @@ pub struct AccountNodeSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PoolSnapshot {
+pub struct PoolSummary {
     pub status: PoolHealthStatus,
     pub total_nodes: usize,
     pub selectable_nodes: usize,
@@ -121,6 +122,12 @@ pub struct PoolSnapshot {
     pub half_open_nodes: usize,
     pub connecting_nodes: usize,
     pub configured_nodes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PoolSnapshot {
+    #[serde(flatten)]
+    pub summary: PoolSummary,
     pub nodes: Vec<AccountNodeSnapshot>,
 }
 
@@ -145,6 +152,7 @@ impl SessionPool {
         Self::from_config_with_startup_mode(cfg, PoolStartupMode::AllowEmpty).await
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn from_test_accounts(total: usize, prewarm: usize) -> Self {
         let mut nodes = Vec::new();
         for idx in 0..total {
@@ -189,6 +197,7 @@ impl SessionPool {
         }
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn from_named_ready_accounts<const N: usize>(names: [&str; N]) -> Self {
         let nodes = names
             .into_iter()
@@ -223,6 +232,7 @@ impl SessionPool {
         }
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn from_test_outcomes<const N: usize>(
         outcomes: [Result<&str, &str>; N],
         prewarm: usize,
@@ -280,6 +290,7 @@ impl SessionPool {
         }
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn from_failed_accounts(total: usize) -> Self {
         let mut nodes = Vec::new();
         for idx in 0..total {
@@ -311,6 +322,7 @@ impl SessionPool {
         }
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn from_flaky_account_for_test() -> Self {
         Self {
             inner: Arc::new(Mutex::new(PoolState {
@@ -411,6 +423,7 @@ impl SessionPool {
             .count()
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn state_summary_for_test(&self) -> String {
         self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
@@ -428,23 +441,10 @@ impl SessionPool {
     pub async fn snapshot(&self) -> PoolSnapshot {
         self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
-        let mut ready_nodes = 0;
-        let mut suspect_nodes = 0;
-        let mut open_nodes = 0;
-        let mut half_open_nodes = 0;
-        let mut connecting_nodes = 0;
-        let mut configured_nodes = 0;
+        let summary = build_pool_summary(&state);
         let mut nodes = Vec::with_capacity(state.nodes.len());
 
         for node in &state.nodes {
-            match node.state {
-                AccountState::Configured(_) => configured_nodes += 1,
-                AccountState::Connecting => connecting_nodes += 1,
-                AccountState::Ready(_) => ready_nodes += 1,
-                AccountState::Suspect(_) => suspect_nodes += 1,
-                AccountState::Open(_) => open_nodes += 1,
-                AccountState::HalfOpen(_) => half_open_nodes += 1,
-            }
             nodes.push(AccountNodeSnapshot {
                 name: node.name.clone(),
                 state: state_label(&node.state).to_ascii_lowercase(),
@@ -453,29 +453,16 @@ impl SessionPool {
             });
         }
 
-        let selectable_nodes = ready_nodes + suspect_nodes;
-        let status = if selectable_nodes > 0 {
-            PoolHealthStatus::Healthy
-        } else if half_open_nodes > 0 || connecting_nodes > 0 {
-            PoolHealthStatus::Recovering
-        } else {
-            PoolHealthStatus::Down
-        };
-
-        PoolSnapshot {
-            status,
-            total_nodes: state.nodes.len(),
-            selectable_nodes,
-            ready_nodes,
-            suspect_nodes,
-            open_nodes,
-            half_open_nodes,
-            connecting_nodes,
-            configured_nodes,
-            nodes,
-        }
+        PoolSnapshot { summary, nodes }
     }
 
+    pub async fn summary(&self) -> PoolSummary {
+        self.refresh_time_based_states().await;
+        let state = self.inner.lock().await;
+        build_pool_summary(&state)
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub async fn has_selectable_nodes_for_test(&self) -> bool {
         self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
@@ -487,6 +474,7 @@ impl SessionPool {
         })
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn from_mixed_state_pool_for_test() -> Self {
         Self {
             inner: Arc::new(Mutex::new(PoolState {
@@ -582,6 +570,7 @@ impl SessionPool {
         }
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn from_exhausted_pool_for_test() -> Self {
         let account = AccountConfig {
             name: "acct-01".to_string(),
@@ -612,6 +601,7 @@ impl SessionPool {
         }
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn collect_selected_accounts_for_test(&self, count: usize) -> Vec<String> {
         let mut out = Vec::new();
         for _ in 0..count {
@@ -623,6 +613,7 @@ impl SessionPool {
         out
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn current_backoff_for_test(&self) -> Duration {
         let state = self.inner.lock().await;
         state
@@ -632,6 +623,7 @@ impl SessionPool {
             .unwrap_or_default()
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn try_request_triggered_probe_for_test(&self) -> Result<PooledSession, PoolError> {
         let Some((name, account)) = self.claim_request_triggered_probe().await? else {
             return Err(PoolError::new("no ready session"));
@@ -645,6 +637,7 @@ impl SessionPool {
         Ok(session)
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn run_concurrent_probe_race_for_test(&self) -> ProbeRaceResult {
         let first = {
             let pool = self.clone();
@@ -674,6 +667,7 @@ impl SessionPool {
         results
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn force_probe_failure_for_test(&self) {
         let mut state = self.inner.lock().await;
         if let Some(node) = state.nodes.first_mut() {
@@ -698,6 +692,7 @@ impl SessionPool {
         }
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn next_account_name(&self) -> Result<String, PoolError> {
         Ok(self.next_session().await?.account_name().to_string())
     }
@@ -726,6 +721,7 @@ impl SessionPool {
         Ok(ready[pos].1.clone())
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn ensure_additional_capacity_for_test(&self) -> Result<(), PoolError> {
         let mut state = self.inner.lock().await;
         if let Some(node) = state
@@ -745,10 +741,12 @@ impl SessionPool {
         Err(PoolError::new("no configurable account remaining"))
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn force_one_failure_for_test(&self) {
         self.force_failures_for_test(1).await;
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub async fn force_failures_for_test(&self, count: u32) {
         for _ in 0..count {
             let mut should_retry = None;
@@ -1092,6 +1090,47 @@ fn state_label(state: &AccountState) -> &'static str {
         AccountState::Suspect(_) => "Suspect",
         AccountState::Open(_) => "Open",
         AccountState::HalfOpen(_) => "HalfOpen",
+    }
+}
+
+fn build_pool_summary(state: &PoolState) -> PoolSummary {
+    let mut ready_nodes = 0;
+    let mut suspect_nodes = 0;
+    let mut open_nodes = 0;
+    let mut half_open_nodes = 0;
+    let mut connecting_nodes = 0;
+    let mut configured_nodes = 0;
+
+    for node in &state.nodes {
+        match node.state {
+            AccountState::Configured(_) => configured_nodes += 1,
+            AccountState::Connecting => connecting_nodes += 1,
+            AccountState::Ready(_) => ready_nodes += 1,
+            AccountState::Suspect(_) => suspect_nodes += 1,
+            AccountState::Open(_) => open_nodes += 1,
+            AccountState::HalfOpen(_) => half_open_nodes += 1,
+        }
+    }
+
+    let selectable_nodes = ready_nodes + suspect_nodes;
+    let status = if selectable_nodes > 0 {
+        PoolHealthStatus::Healthy
+    } else if half_open_nodes > 0 || connecting_nodes > 0 {
+        PoolHealthStatus::Recovering
+    } else {
+        PoolHealthStatus::Down
+    };
+
+    PoolSummary {
+        status,
+        total_nodes: state.nodes.len(),
+        selectable_nodes,
+        ready_nodes,
+        suspect_nodes,
+        open_nodes,
+        half_open_nodes,
+        connecting_nodes,
+        configured_nodes,
     }
 }
 

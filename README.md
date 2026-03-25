@@ -188,8 +188,62 @@ smelly-connect-cli --config ./config.toml test http http://intranet.zju.edu.cn/h
 
 - 这是一个独立监听口，默认建议只绑定 `127.0.0.1`
 - 需要使用 `management-api` feature 编译
+- 如果 `config.toml` 里启用了 `[management].enabled = true`，但二进制没有带 `management-api` feature，`proxy` 启动会直接失败
 - `GET /healthz` 返回池健康摘要
 - `GET /stats` 返回当前连接数、累计连接数、双向流量统计，以及 pool 节点状态摘要
+- `GET /nodes` 返回逐节点状态明细
+
+最小返回示例：
+
+```json
+{
+  "status": "healthy",
+  "pool": {
+    "total_nodes": 2,
+    "selectable_nodes": 2,
+    "ready_nodes": 2,
+    "suspect_nodes": 0,
+    "open_nodes": 0,
+    "half_open_nodes": 0,
+    "connecting_nodes": 0,
+    "configured_nodes": 0
+  }
+}
+```
+
+```json
+{
+  "status": "healthy",
+  "pool": {
+    "total_nodes": 2,
+    "selectable_nodes": 2,
+    "ready_nodes": 2,
+    "suspect_nodes": 0,
+    "open_nodes": 0,
+    "half_open_nodes": 0,
+    "connecting_nodes": 0,
+    "configured_nodes": 0
+  },
+  "total": {
+    "current_connections": 3,
+    "total_connections": 27,
+    "client_to_upstream_bytes": 10240,
+    "upstream_to_client_bytes": 55296
+  },
+  "http": {
+    "current_connections": 1,
+    "total_connections": 20,
+    "client_to_upstream_bytes": 4096,
+    "upstream_to_client_bytes": 32768
+  },
+  "socks5": {
+    "current_connections": 2,
+    "total_connections": 7,
+    "client_to_upstream_bytes": 6144,
+    "upstream_to_client_bytes": 22528
+  }
+}
+```
 
 ## 部署
 

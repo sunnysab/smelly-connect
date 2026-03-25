@@ -1,18 +1,28 @@
+#[cfg(any(test, debug_assertions))]
 use std::future::Future;
+#[cfg(any(test, debug_assertions))]
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
+#[cfg(any(test, debug_assertions))]
+use std::net::SocketAddr;
+#[cfg(any(test, debug_assertions))]
 use std::sync::Arc;
+#[cfg(any(test, debug_assertions))]
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
+#[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
 
 use crate::pool::SessionPool;
-use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeSnapshot, RuntimeStats};
+#[cfg(any(test, debug_assertions))]
+use crate::runtime::RuntimeSnapshot;
+use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 
 const SOCKS5_NETWORK_UNREACHABLE: u8 = 0x03;
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
 pub struct Socks5ProxyTestResult {
     pub account_name: String,
@@ -20,11 +30,13 @@ pub struct Socks5ProxyTestResult {
     pub echoed_bytes: Vec<u8>,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
 pub struct Socks5FailureResult {
     pub reply_code: u8,
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_for_test() -> Result<Socks5ProxyTestResult, String> {
     let upstream = spawn_echo_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
@@ -98,6 +110,7 @@ pub async fn proxy_socks5_for_test() -> Result<Socks5ProxyTestResult, String> {
     })
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_no_ready_session_for_test() -> Result<Socks5FailureResult, String> {
     let pool = SessionPool::from_failed_accounts(1).await;
     let addr = spawn_test_socks5(pool, |_account_name, _host, _port| async move {
@@ -108,6 +121,7 @@ pub async fn proxy_socks5_no_ready_session_for_test() -> Result<Socks5FailureRes
     request_no_ready_session(addr).await
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_no_ready_session_sequence_for_test(
     count: usize,
 ) -> Result<Vec<Socks5FailureResult>, String> {
@@ -124,6 +138,7 @@ pub async fn proxy_socks5_no_ready_session_sequence_for_test(
     Ok(results)
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_runtime_stats_for_test() -> Result<RuntimeSnapshot, String> {
     let upstream = spawn_echo_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
@@ -172,14 +187,14 @@ pub async fn proxy_socks5_runtime_stats_for_test() -> Result<RuntimeSnapshot, St
     drop(client);
     for _ in 0..10 {
         tokio::task::yield_now().await;
-        let snapshot = stats.snapshot(pool.snapshot().await);
+        let snapshot = stats.snapshot(pool.summary().await);
         if snapshot.socks5.current_connections == 0 {
             return Ok(snapshot);
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    Ok(stats.snapshot(pool.snapshot().await))
+    Ok(stats.snapshot(pool.summary().await))
 }
 
 pub async fn serve_socks5(
@@ -206,6 +221,7 @@ pub async fn serve_socks5(
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn spawn_test_socks5<F, Fut>(pool: SessionPool, connector: F) -> Result<SocketAddr, String>
 where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
@@ -214,6 +230,7 @@ where
     spawn_test_socks5_internal(pool, None, connector).await
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn spawn_test_socks5_with_stats<F, Fut>(
     pool: SessionPool,
     stats: RuntimeStats,
@@ -226,6 +243,7 @@ where
     spawn_test_socks5_internal(pool, Some(stats), connector).await
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn spawn_test_socks5_internal<F, Fut>(
     pool: SessionPool,
     stats: Option<RuntimeStats>,
@@ -255,6 +273,7 @@ where
     Ok(addr)
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn request_no_ready_session(addr: SocketAddr) -> Result<Socks5FailureResult, String> {
     let mut client = TcpStream::connect(addr)
         .await
@@ -284,6 +303,7 @@ async fn request_no_ready_session(addr: SocketAddr) -> Result<Socks5FailureResul
     })
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn handle_client<F, Fut>(
     mut client: TcpStream,
     pool: SessionPool,
@@ -505,6 +525,7 @@ async fn relay_tunnel(
     Ok(())
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn spawn_echo_upstream() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

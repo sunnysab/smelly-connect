@@ -1,13 +1,17 @@
+#[cfg(any(test, debug_assertions))]
 use std::net::SocketAddr;
 
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
+#[cfg(any(test, debug_assertions))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
+#[cfg(any(test, debug_assertions))]
+use tokio::net::TcpStream;
 
-use crate::pool::{PoolHealthStatus, PoolSnapshot, SessionPool};
+use crate::pool::{PoolHealthStatus, PoolSummary, SessionPool};
 use crate::runtime::RuntimeStats;
 
 #[derive(Clone)]
@@ -19,7 +23,13 @@ struct ManagementState {
 #[derive(Debug, Clone, Serialize)]
 struct HealthResponse {
     status: PoolHealthStatus,
-    pool: PoolSnapshot,
+    pool: PoolSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NodesResponse {
+    total_nodes: usize,
+    nodes: Vec<crate::pool::AccountNodeSnapshot>,
 }
 
 pub async fn serve_management(
@@ -37,6 +47,7 @@ pub async fn serve_management(
         .map_err(|err| err.to_string())
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn fetch_json_for_test(
     pool: SessionPool,
     runtime_stats: RuntimeStats,
@@ -61,11 +72,12 @@ fn router(pool: SessionPool, runtime_stats: RuntimeStats) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .route("/stats", get(stats_snapshot))
+        .route("/nodes", get(nodes))
         .with_state(state)
 }
 
 async fn health(State(state): State<ManagementState>) -> Json<HealthResponse> {
-    let pool = state.pool.snapshot().await;
+    let pool = state.pool.summary().await;
     Json(HealthResponse {
         status: pool.status,
         pool,
@@ -75,10 +87,19 @@ async fn health(State(state): State<ManagementState>) -> Json<HealthResponse> {
 async fn stats_snapshot(
     State(state): State<ManagementState>,
 ) -> Json<crate::runtime::RuntimeSnapshot> {
-    let pool = state.pool.snapshot().await;
+    let pool = state.pool.summary().await;
     Json(state.stats.snapshot(pool))
 }
 
+async fn nodes(State(state): State<ManagementState>) -> Json<NodesResponse> {
+    let snapshot = state.pool.snapshot().await;
+    Json(NodesResponse {
+        total_nodes: snapshot.summary.total_nodes,
+        nodes: snapshot.nodes,
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
 async fn request_json(addr: SocketAddr, path: &str) -> Result<String, String> {
     let mut client = TcpStream::connect(addr)
         .await

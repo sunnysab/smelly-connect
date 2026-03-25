@@ -1,10 +1,11 @@
+#[cfg(any(test, debug_assertions))]
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
-use crate::pool::PoolSnapshot;
+use crate::pool::PoolSummary;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyProtocol {
@@ -23,7 +24,7 @@ impl RuntimeStats {
         self.protocol_stats(protocol).open_connection()
     }
 
-    pub fn snapshot(&self, pool: PoolSnapshot) -> RuntimeSnapshot {
+    pub fn snapshot(&self, pool: PoolSummary) -> RuntimeSnapshot {
         let http = self.http.snapshot();
         let socks5 = self.socks5.snapshot();
         let total = ProtocolStatsSnapshot {
@@ -43,6 +44,7 @@ impl RuntimeStats {
         }
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub fn seed_protocol_for_test(&self, protocol: &str, values: BTreeMap<&str, u64>) {
         let stats = match protocol {
             "http" => &self.http,
@@ -144,7 +146,7 @@ pub struct ProtocolStatsSnapshot {
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeSnapshot {
     pub status: crate::pool::PoolHealthStatus,
-    pub pool: PoolSnapshot,
+    pub pool: PoolSummary,
     pub total: ProtocolStatsSnapshot,
     pub http: ProtocolStatsSnapshot,
     pub socks5: ProtocolStatsSnapshot,

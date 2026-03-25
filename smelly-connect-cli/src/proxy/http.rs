@@ -1,15 +1,24 @@
+#[cfg(any(test, debug_assertions))]
 use std::future::Future;
 use std::io;
+#[cfg(any(test, debug_assertions))]
 use std::net::SocketAddr;
+#[cfg(any(test, debug_assertions))]
 use std::sync::Arc;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
+#[cfg(any(test, debug_assertions))]
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
+#[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
 
 use crate::pool::SessionPool;
-use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeSnapshot, RuntimeStats};
+#[cfg(any(test, debug_assertions))]
+use crate::runtime::RuntimeSnapshot;
+use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
 pub struct HttpProxyTestResult {
     pub body: String,
@@ -17,17 +26,20 @@ pub struct HttpProxyTestResult {
     pub used_pool_selection: bool,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
 pub struct ConnectProxyTestResult {
     pub account_name: String,
     pub echoed_bytes: Vec<u8>,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
 pub struct NoReadySessionResult {
     pub status_code: u16,
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_for_test() -> Result<HttpProxyTestResult, String> {
     let upstream = spawn_http_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
@@ -76,6 +88,7 @@ pub async fn proxy_http_for_test() -> Result<HttpProxyTestResult, String> {
     })
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_connect_for_test() -> Result<ConnectProxyTestResult, String> {
     let upstream = spawn_echo_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
@@ -132,6 +145,7 @@ pub async fn proxy_connect_for_test() -> Result<ConnectProxyTestResult, String> 
     })
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_no_ready_session_for_test() -> Result<NoReadySessionResult, String> {
     let pool = SessionPool::from_failed_accounts(1).await;
     let addr = spawn_test_proxy(pool, |_account_name, _host, _port| async move {
@@ -142,6 +156,7 @@ pub async fn proxy_http_no_ready_session_for_test() -> Result<NoReadySessionResu
     request_no_ready_session(addr).await
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_no_ready_session_sequence_for_test(
     count: usize,
 ) -> Result<Vec<NoReadySessionResult>, String> {
@@ -158,6 +173,7 @@ pub async fn proxy_http_no_ready_session_sequence_for_test(
     Ok(results)
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_runtime_stats_for_test() -> Result<RuntimeSnapshot, String> {
     let upstream = spawn_http_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
@@ -184,7 +200,7 @@ pub async fn proxy_http_runtime_stats_for_test() -> Result<RuntimeSnapshot, Stri
         .await
         .map_err(|err| err.to_string())?;
 
-    Ok(stats.snapshot(pool.snapshot().await))
+    Ok(stats.snapshot(pool.summary().await))
 }
 
 pub async fn serve_http(
@@ -211,6 +227,7 @@ pub async fn serve_http(
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 struct ForwardRequest<'a> {
     method: &'a str,
     target: &'a str,
@@ -219,6 +236,7 @@ struct ForwardRequest<'a> {
     leftover: Vec<u8>,
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn spawn_test_proxy<F, Fut>(pool: SessionPool, connector: F) -> Result<SocketAddr, String>
 where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
@@ -227,6 +245,7 @@ where
     spawn_test_proxy_internal(pool, None, connector).await
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn spawn_test_proxy_with_stats<F, Fut>(
     pool: SessionPool,
     stats: RuntimeStats,
@@ -239,6 +258,7 @@ where
     spawn_test_proxy_internal(pool, Some(stats), connector).await
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn spawn_test_proxy_internal<F, Fut>(
     pool: SessionPool,
     stats: Option<RuntimeStats>,
@@ -268,6 +288,7 @@ where
     Ok(addr)
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn request_no_ready_session(addr: SocketAddr) -> Result<NoReadySessionResult, String> {
     let mut client = TcpStream::connect(addr)
         .await
@@ -293,6 +314,7 @@ async fn request_no_ready_session(addr: SocketAddr) -> Result<NoReadySessionResu
     Ok(NoReadySessionResult { status_code })
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn handle_client<F, Fut>(
     mut client: TcpStream,
     pool: SessionPool,
@@ -488,6 +510,7 @@ async fn handle_live_client(
     Ok(())
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn handle_connect<F, Fut>(
     account_name: String,
     connector: F,
@@ -508,6 +531,7 @@ where
     relay_connect_tunnel(&mut client, &mut upstream, &leftover, connection.as_ref()).await
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn handle_forward<F, Fut>(
     account_name: String,
     connector: F,
@@ -545,6 +569,7 @@ where
     .await
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn relay_connect_tunnel(
     client: &mut TcpStream,
     upstream: &mut (impl AsyncRead + AsyncWrite + Unpin),
@@ -569,6 +594,7 @@ async fn relay_connect_tunnel(
     Ok(())
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn relay_forward_stream(
     client: &mut TcpStream,
     upstream: &mut (impl AsyncRead + AsyncWrite + Unpin),
@@ -662,6 +688,7 @@ fn split_host_port(target: &str, default_port: u16) -> Result<(&str, u16), Strin
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn spawn_http_upstream() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -677,6 +704,7 @@ async fn spawn_http_upstream() -> SocketAddr {
     addr
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn spawn_echo_upstream() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

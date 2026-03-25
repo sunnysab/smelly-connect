@@ -1,14 +1,20 @@
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+#[cfg(any(test, debug_assertions))]
+use std::io::Write;
+use std::io::{self};
 use std::path::Path;
+#[cfg(any(test, debug_assertions))]
 use std::sync::{Arc, Mutex};
 
+#[cfg(any(test, debug_assertions))]
 use tracing::dispatcher::with_default;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::fmt::time::UtcTime;
-use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriter, MakeWriterExt};
+#[cfg(any(test, debug_assertions))]
+use tracing_subscriber::fmt::writer::MakeWriter;
+use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
 use tracing_subscriber::prelude::*;
 
 use crate::config::{LoggingConfig, LoggingLevel, LoggingMode};
@@ -36,6 +42,7 @@ pub fn init_logging(cfg: &LoggingConfig) -> Result<LoggingGuard, String> {
     Ok(LoggingGuard { _file_guard: guard })
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn init_for_test(mode: &str, level: &str, file: Option<&str>) -> Result<(), String> {
     let cfg = LoggingConfig {
         mode: parse_mode(mode)?,
@@ -46,6 +53,7 @@ pub fn init_for_test(mode: &str, level: &str, file: Option<&str>) -> Result<(), 
     Ok(())
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn capture_level_filter_for_test(level: &str) -> Vec<String> {
     capture_lines(
         parse_mode("stdout").unwrap(),
@@ -57,6 +65,7 @@ pub fn capture_level_filter_for_test(level: &str) -> Vec<String> {
     )
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn capture_one_info_line_for_test() -> String {
     capture_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, || {
         tracing::info!(target: "smelly_connect_cli::logging_test", "hello");
@@ -66,6 +75,7 @@ pub fn capture_one_info_line_for_test() -> String {
     .unwrap_or_default()
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn capture_pool_events_for_test() -> Vec<String> {
     capture_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, || {
         tracing::info!(configured = 2, prewarm = 1, "pool prewarm start");
@@ -74,30 +84,35 @@ pub fn capture_pool_events_for_test() -> Vec<String> {
     })
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn capture_http_request_log_for_test() -> Vec<String> {
     capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
         let _ = crate::proxy::http::proxy_http_for_test().await;
     })
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn capture_http_connect_log_for_test() -> Vec<String> {
     capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
         let _ = crate::proxy::http::proxy_connect_for_test().await;
     })
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn capture_socks5_request_log_for_test() -> Vec<String> {
     capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
         let _ = crate::proxy::socks5::proxy_socks5_for_test().await;
     })
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn capture_no_ready_session_warn_for_test() -> Vec<String> {
     capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Warn, async {
         let _ = crate::proxy::http::proxy_http_no_ready_session_for_test().await;
     })
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn capture_config_load_error_for_test(path: &str) -> Vec<String> {
     capture_lines(parse_mode("stdout").unwrap(), LoggingLevel::Error, || {
         if let Err(err) = crate::config::load(path) {
@@ -106,12 +121,14 @@ pub fn capture_config_load_error_for_test(path: &str) -> Vec<String> {
     })
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn capture_invalid_logging_config_error_for_test() -> Vec<String> {
     capture_lines(parse_mode("stdout").unwrap(), LoggingLevel::Error, || {
         tracing::error!("invalid logging config");
     })
 }
 
+#[cfg(any(test, debug_assertions))]
 fn capture_lines<F>(mode: LoggingMode, level: LoggingLevel, emit: F) -> Vec<String>
 where
     F: FnOnce(),
@@ -137,6 +154,7 @@ where
     capture.lines()
 }
 
+#[cfg(any(test, debug_assertions))]
 fn capture_async_lines<Fut>(mode: LoggingMode, level: LoggingLevel, emit: Fut) -> Vec<String>
 where
     Fut: std::future::Future<Output = ()>,
@@ -194,6 +212,7 @@ fn level_filter(level: &LoggingLevel) -> LevelFilter {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 fn parse_mode(value: &str) -> Result<LoggingMode, String> {
     match value {
         "stdout" => Ok(LoggingMode::Stdout),
@@ -204,6 +223,7 @@ fn parse_mode(value: &str) -> Result<LoggingMode, String> {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 fn parse_level(value: &str) -> Result<LoggingLevel, String> {
     match value {
         "error" => Ok(LoggingLevel::Error),
@@ -214,9 +234,11 @@ fn parse_level(value: &str) -> Result<LoggingLevel, String> {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Clone, Default)]
 struct CaptureBuffer(Arc<Mutex<Vec<u8>>>);
 
+#[cfg(any(test, debug_assertions))]
 impl CaptureBuffer {
     fn lines(&self) -> Vec<String> {
         let bytes = self.0.lock().expect("capture mutex poisoned").clone();
@@ -227,6 +249,7 @@ impl CaptureBuffer {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 impl<'a> MakeWriter<'a> for CaptureBuffer {
     type Writer = CaptureGuard;
 
@@ -237,10 +260,12 @@ impl<'a> MakeWriter<'a> for CaptureBuffer {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 struct CaptureGuard {
     inner: Arc<Mutex<Vec<u8>>>,
 }
 
+#[cfg(any(test, debug_assertions))]
 impl Write for CaptureGuard {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.inner

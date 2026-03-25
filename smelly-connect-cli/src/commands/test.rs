@@ -1,9 +1,13 @@
 use std::path::Path;
+#[cfg(any(test, debug_assertions))]
 use std::sync::Arc;
+#[cfg(any(test, debug_assertions))]
 use std::sync::atomic::AtomicUsize;
 
+#[cfg(any(test, debug_assertions))]
 use smelly_connect::test_support;
 
+#[cfg(any(test, debug_assertions))]
 pub async fn run_tcp_for_test(target: &str) -> Result<String, String> {
     let session = test_support::session::login_harness().ready_session().await;
     let (host, port) = split_target(target)?;
@@ -14,6 +18,7 @@ pub async fn run_tcp_for_test(target: &str) -> Result<String, String> {
     Ok(format!("tcp ok: {host}:{port}"))
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn run_icmp_for_test(target: &str) -> Result<String, String> {
     let counter = Arc::new(AtomicUsize::new(0));
     let session = test_support::session::session_with_icmp_ping(counter);
@@ -24,6 +29,7 @@ pub async fn run_icmp_for_test(target: &str) -> Result<String, String> {
     Ok(format!("icmp ok: {target}"))
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn run_http_for_test(url: &str) -> Result<String, String> {
     let harness = test_support::integration::reqwest_harness().await;
     let client = harness

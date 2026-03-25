@@ -1,4 +1,5 @@
 use serde::Deserialize;
+#[cfg(any(test, debug_assertions))]
 use std::fs;
 use std::path::Path;
 
@@ -150,14 +151,17 @@ impl LoggingLevel {
 }
 
 pub fn load(path: impl AsRef<Path>) -> Result<AppConfig, String> {
-    load_for_test(path)
+    let body = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+    toml::from_str(&body).map_err(|err| err.to_string())
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn load_for_test(path: impl AsRef<Path>) -> Result<AppConfig, String> {
     let body = fs::read_to_string(path).map_err(|err| err.to_string())?;
     toml::from_str(&body).map_err(|err| err.to_string())
 }
 
+#[cfg(any(test, debug_assertions))]
 pub fn merge_for_test<const N: usize>(
     path: impl AsRef<Path>,
     args: [&str; N],
