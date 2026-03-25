@@ -2,13 +2,14 @@ use std::net::Ipv4Addr;
 
 use crate::error::{AuthError, ProtocolError};
 
-pub fn parse_login_psw_success(body: &str) -> Result<String, AuthError> {
+pub fn parse_login_psw_success(body: &str, current_twfid: &str) -> Result<String, AuthError> {
     if !body.contains("<Result>1</Result>") {
         return Err(AuthError::MissingSuccessMarker);
     }
 
     extract_tag(body, "TwfID")
         .map(ToOwned::to_owned)
+        .or_else(|| (!current_twfid.is_empty()).then(|| current_twfid.to_string()))
         .ok_or(AuthError::MissingTwfId)
 }
 

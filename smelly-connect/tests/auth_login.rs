@@ -40,8 +40,15 @@ fn login_password_payload_uses_rsa_and_optional_csrf_suffix() {
 #[test]
 fn login_psw_success_updates_twfid() {
     let body = include_str!("fixtures/login_psw_success.xml");
-    let twfid = smelly_connect::protocol::parse_login_psw_success(body).unwrap();
+    let twfid = smelly_connect::protocol::parse_login_psw_success(body, "previous-twfid").unwrap();
     assert_eq!(twfid, "updated-twfid");
+}
+
+#[test]
+fn login_psw_success_keeps_existing_twfid_when_response_omits_it() {
+    let body = "<Response><Result>1</Result></Response>";
+    let twfid = smelly_connect::protocol::parse_login_psw_success(body, "previous-twfid").unwrap();
+    assert_eq!(twfid, "previous-twfid");
 }
 
 #[test]
