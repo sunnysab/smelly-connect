@@ -60,3 +60,10 @@ pub fn connect_probe(addr: SocketAddr, config: &ClientHelloConfig) -> io::Result
     let record = build_client_hello_record(config);
     stream.write_all(&record)
 }
+
+#[cfg(feature = "tokio")]
+pub async fn connect_hello_probe(addr: SocketAddr, config: &ClientHelloConfig) -> io::Result<()> {
+    let mut stream = tokio::net::TcpStream::connect(addr).await?;
+    let record = build_client_hello_record(config);
+    tokio::io::AsyncWriteExt::write_all(&mut stream, &record).await
+}

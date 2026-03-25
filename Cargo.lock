@@ -1040,6 +1040,9 @@ dependencies = [
 [[package]]
 name = "smelly-tls"
 version = "0.1.0"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "socket2"

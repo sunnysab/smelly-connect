@@ -8,3 +8,8 @@ name = "smelly_tls"
 path = "src/lib.rs"
 
 [dependencies]
+tokio = { version = "1", features = ["net", "io-util", "macros", "rt"], optional = true }
+
+[features]
+default = []
+tokio = ["dep:tokio"]
