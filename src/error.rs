@@ -37,7 +37,10 @@ pub enum RouteError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootstrapError {
+    AuthFlowFailed(String),
+    CaptchaRequired,
     NotImplemented,
+    ResourceParseFailed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

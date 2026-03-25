@@ -148,7 +148,10 @@ pub mod tests {
                 server: "rvpn.example.com".to_string(),
                 username: "user".to_string(),
                 password: "pass".to_string(),
+                base_url: None,
+                captcha_handler: None,
                 session_factory: Some(Arc::new(move || Ok(ready_session(host.as_ref(), ip)))),
+                session_bootstrap: None,
             }
         }
 
