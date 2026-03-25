@@ -14,7 +14,7 @@ use openssl::x509::{X509, X509NameBuilder};
 use openssl_sys as ffi;
 use smelly_connect::protocol::legacy_tls::{
     EASYCONNECT_SESSION_ID, HEARTBEAT_EXT_TYPE, PROBE_EXT_TYPE, build_easyconnect_connector,
-    configure_easyconnect_ssl_probe,
+    configure_easyconnect_ssl, configure_easyconnect_ssl_probe,
 };
 
 #[derive(Debug)]
@@ -24,7 +24,6 @@ struct ObservedHello {
     compression_methods: Vec<u8>,
     heartbeat_present: bool,
     probe_ext_present: bool,
-    extension_ids: Vec<u16>,
 }
 
 #[test]
@@ -48,7 +47,6 @@ fn easyconnect_clienthello_probe_sets_tls11_and_session_id() {
                     .to_vec(),
                 heartbeat_present: has_extension(ssl, HEARTBEAT_EXT_TYPE),
                 probe_ext_present: has_extension(ssl, PROBE_EXT_TYPE),
-                extension_ids: extension_ids(ssl),
             };
             tx.send(observed).unwrap();
             Ok(ClientHelloResponse::SUCCESS)
@@ -68,7 +66,6 @@ fn easyconnect_clienthello_probe_sets_tls11_and_session_id() {
     let observed = rx.recv().unwrap();
     server.join().unwrap();
 
-    eprintln!("extensions: {:?}", observed.extension_ids);
     assert_eq!(observed.session_id, EASYCONNECT_SESSION_ID);
     assert_eq!(observed.legacy_version, SslVersion::TLS1_1);
     assert!(!observed.compression_methods.is_empty());
@@ -79,28 +76,74 @@ fn easyconnect_clienthello_probe_sets_tls11_and_session_id() {
     assert!(!observed.heartbeat_present);
 }
 
+#[test]
+fn easyconnect_clienthello_probe_is_visible_on_wire() {
+    let (tx, rx) = mpsc::channel();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let hello = read_client_hello_record(&mut stream);
+        tx.send(hello).unwrap();
+    });
+
+    let connector = build_easyconnect_connector().unwrap();
+    let config = connector.configure().unwrap();
+    let mut ssl = config.into_ssl("localhost").unwrap();
+    configure_easyconnect_ssl_probe(&mut ssl).unwrap();
+    let stream = TcpStream::connect(addr).unwrap();
+    let _ = ssl.connect(stream);
+
+    let raw = rx.recv().unwrap();
+    server.join().unwrap();
+    let parsed = parse_client_hello(&raw).unwrap();
+
+    assert_eq!(parsed.legacy_version, 0x0302);
+    assert_eq!(parsed.session_id, EASYCONNECT_SESSION_ID);
+    assert!(!parsed.compression_methods.is_empty());
+    assert!(parsed.extension_ids.contains(&PROBE_EXT_TYPE));
+    assert!(parsed.extension_ids.contains(&HEARTBEAT_EXT_TYPE));
+}
+
+#[test]
+fn strict_easyconnect_ssl_configuration_fails_without_rc4_support() {
+    let connector = build_easyconnect_connector().unwrap();
+    let config = connector.configure().unwrap();
+    let mut ssl = config.into_ssl("localhost").unwrap();
+    assert!(configure_easyconnect_ssl(&mut ssl).is_err());
+}
+
+#[test]
+fn easyconnect_clienthello_probe_does_not_offer_rc4_on_this_host() {
+    let (tx, rx) = mpsc::channel();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let hello = read_client_hello_record(&mut stream);
+        tx.send(hello).unwrap();
+    });
+
+    let connector = build_easyconnect_connector().unwrap();
+    let config = connector.configure().unwrap();
+    let mut ssl = config.into_ssl("localhost").unwrap();
+    configure_easyconnect_ssl_probe(&mut ssl).unwrap();
+    let stream = TcpStream::connect(addr).unwrap();
+    let _ = ssl.connect(stream);
+
+    let raw = rx.recv().unwrap();
+    server.join().unwrap();
+    let parsed = parse_client_hello(&raw).unwrap();
+    assert!(!parsed.cipher_suites.contains(&0x0005));
+}
+
 fn has_extension(ssl: &openssl::ssl::SslRef, ext_type: u16) -> bool {
     unsafe {
         let mut out = std::ptr::null();
         let mut outlen = 0;
         ffi::SSL_client_hello_get0_ext(ssl.as_ptr(), ext_type as u32, &mut out, &mut outlen) == 1
-    }
-}
-
-fn extension_ids(ssl: &openssl::ssl::SslRef) -> Vec<u16> {
-    unsafe {
-        let mut out = std::ptr::null_mut();
-        let mut outlen = 0;
-        if ffi::SSL_client_hello_get1_extensions_present(ssl.as_ptr(), &mut out, &mut outlen) != 1
-        {
-            return Vec::new();
-        }
-        let values = std::slice::from_raw_parts(out, outlen)
-            .iter()
-            .map(|value| *value as u16)
-            .collect::<Vec<_>>();
-        ffi::OPENSSL_free(out.cast());
-        values
     }
 }
 
@@ -125,4 +168,71 @@ fn self_signed_cert() -> (X509, PKey<openssl::pkey::Private>) {
     builder.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref()).unwrap();
     builder.sign(&key, MessageDigest::sha256()).unwrap();
     (builder.build(), key)
+}
+
+fn read_client_hello_record(stream: &mut TcpStream) -> Vec<u8> {
+    use std::io::Read;
+
+    let mut header = [0_u8; 5];
+    stream.read_exact(&mut header).unwrap();
+    let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+    let mut body = vec![0_u8; len];
+    stream.read_exact(&mut body).unwrap();
+    [header.to_vec(), body].concat()
+}
+
+#[derive(Debug)]
+struct ParsedClientHello {
+    legacy_version: u16,
+    session_id: Vec<u8>,
+    cipher_suites: Vec<u16>,
+    compression_methods: Vec<u8>,
+    extension_ids: Vec<u16>,
+}
+
+fn parse_client_hello(record: &[u8]) -> Option<ParsedClientHello> {
+    if record.len() < 9 || record[0] != 22 || record[5] != 1 {
+        return None;
+    }
+    let mut idx = 9;
+    let legacy_version = u16::from_be_bytes([record[idx], record[idx + 1]]);
+    idx += 2;
+    idx += 32;
+    let session_id_len = record[idx] as usize;
+    idx += 1;
+    let session_id = record.get(idx..idx + session_id_len)?.to_vec();
+    idx += session_id_len;
+
+    let cipher_len = u16::from_be_bytes([record[idx], record[idx + 1]]) as usize;
+    idx += 2;
+    let cipher_suites = record
+        .get(idx..idx + cipher_len)?
+        .chunks_exact(2)
+        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    idx += cipher_len;
+
+    let compression_len = record[idx] as usize;
+    idx += 1;
+    let compression_methods = record.get(idx..idx + compression_len)?.to_vec();
+    idx += compression_len;
+
+    let ext_len = u16::from_be_bytes([record[idx], record[idx + 1]]) as usize;
+    idx += 2;
+    let end = idx + ext_len;
+    let mut extension_ids = Vec::new();
+    while idx + 4 <= end {
+        let ext_type = u16::from_be_bytes([record[idx], record[idx + 1]]);
+        let ext_size = u16::from_be_bytes([record[idx + 2], record[idx + 3]]) as usize;
+        extension_ids.push(ext_type);
+        idx += 4 + ext_size;
+    }
+
+    Some(ParsedClientHello {
+        legacy_version,
+        session_id,
+        cipher_suites,
+        compression_methods,
+        extension_ids,
+    })
 }

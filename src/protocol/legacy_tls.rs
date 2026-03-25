@@ -12,6 +12,7 @@ pub const HEARTBEAT_EXT_TYPE: u16 = 0x000f;
 pub const PROBE_EXT_TYPE: u16 = 0xffa5;
 pub const EASYCONNECT_SESSION_ID: &[u8; 32] = b"L3IP\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 static LEGACY_PROVIDER: OnceLock<Option<Provider>> = OnceLock::new();
+static LEGACY_COMPRESSION: OnceLock<()> = OnceLock::new();
 static PROBE_EXT_BYTES: [u8; 1] = [0x42];
 static HEARTBEAT_EXT_BYTES: [u8; 1] = [0x01];
 
@@ -57,6 +58,8 @@ unsafe extern "C" {
         >,
         parse_arg: *mut std::ffi::c_void,
     ) -> c_int;
+    fn COMP_zlib() -> *mut std::ffi::c_void;
+    fn SSL_COMP_add_compression_method(id: c_int, cm: *mut std::ffi::c_void) -> c_int;
 }
 
 pub fn build_easyconnect_connector() -> Result<SslConnector, ErrorStack> {
@@ -104,6 +107,12 @@ pub fn configure_easyconnect_ssl(ssl: &mut SslRef) -> Result<(), ErrorStack> {
 
 pub fn configure_easyconnect_ssl_probe(ssl: &mut SslRef) -> Result<(), ErrorStack> {
     let _ = LEGACY_PROVIDER.get_or_init(|| Provider::try_load(None, "legacy", true).ok());
+    let _ = LEGACY_COMPRESSION.get_or_init(|| unsafe {
+        let zlib = COMP_zlib();
+        if !zlib.is_null() {
+            let _ = SSL_COMP_add_compression_method(1, zlib);
+        }
+    });
     ssl.set_min_proto_version(Some(SslVersion::TLS1_1))?;
     ssl.set_max_proto_version(Some(SslVersion::TLS1_1))?;
     // This relaxed path is only for local probing. It proves that OpenSSL can emit
