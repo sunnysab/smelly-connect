@@ -112,6 +112,50 @@ async fn async_read_server_hello_extracts_session_id_and_derives_token() {
     );
 }
 
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_read_server_flight_parses_certificate_chain_and_hello_done() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_session_id = *b"fedcba9876543210fedcba9876543210";
+
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut header = [0_u8; 5];
+        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut header)
+            .await
+            .unwrap();
+        let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        let mut body = vec![0_u8; len];
+        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut body)
+            .await
+            .unwrap();
+        let flight = build_server_flight_record(server_session_id, &[b"cert-one", b"cert-two"]);
+        tokio::io::AsyncWriteExt::write_all(&mut stream, &flight)
+            .await
+            .unwrap();
+    });
+
+    let config = ClientHelloConfig::new([0x55; 32], EXPECTED_SESSION_ID);
+    let flight = smelly_tls::connect_and_read_server_flight(addr, &config)
+        .await
+        .unwrap();
+
+    server.await.unwrap();
+    assert_eq!(flight.server_hello.session_id, server_session_id);
+    assert_eq!(flight.server_hello.cipher_suite, 0x0005);
+    assert_eq!(flight.server_hello.compression_method, 0);
+    assert_eq!(
+        flight
+            .certificate_chain
+            .iter()
+            .map(|cert| cert.as_slice())
+            .collect::<Vec<_>>(),
+        vec![b"cert-one".as_slice(), b"cert-two".as_slice()]
+    );
+    assert!(flight.server_hello_done);
+}
+
 struct ParsedClientHello {
     legacy_version: u16,
     session_id: [u8; 32],
@@ -193,4 +237,60 @@ fn build_server_hello_record(session_id: [u8; 32]) -> Vec<u8> {
     record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
     record.extend_from_slice(&handshake);
     record
+}
+
+#[cfg(feature = "tokio")]
+fn build_server_flight_record(session_id: [u8; 32], certs: &[&[u8]]) -> Vec<u8> {
+    let server_hello = build_server_hello_handshake(session_id);
+    let certificate = build_certificate_handshake(certs);
+    let server_hello_done = vec![14, 0, 0, 0];
+    let payload = [server_hello, certificate, server_hello_done].concat();
+
+    let mut record = Vec::new();
+    record.push(22);
+    record.extend_from_slice(&0x0302_u16.to_be_bytes());
+    record.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    record.extend_from_slice(&payload);
+    record
+}
+
+#[cfg(feature = "tokio")]
+fn build_server_hello_handshake(session_id: [u8; 32]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&0x0302_u16.to_be_bytes());
+    body.extend_from_slice(&[0x55; 32]);
+    body.push(session_id.len() as u8);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&0x0005_u16.to_be_bytes());
+    body.push(0);
+    body.extend_from_slice(&0_u16.to_be_bytes());
+
+    let mut handshake = Vec::new();
+    handshake.push(2);
+    let body_len = body.len() as u32;
+    handshake.extend_from_slice(&body_len.to_be_bytes()[1..4]);
+    handshake.extend_from_slice(&body);
+    handshake
+}
+
+#[cfg(feature = "tokio")]
+fn build_certificate_handshake(certs: &[&[u8]]) -> Vec<u8> {
+    let mut cert_list = Vec::new();
+    for cert in certs {
+        let len = cert.len() as u32;
+        cert_list.extend_from_slice(&len.to_be_bytes()[1..4]);
+        cert_list.extend_from_slice(cert);
+    }
+
+    let mut body = Vec::new();
+    let cert_list_len = cert_list.len() as u32;
+    body.extend_from_slice(&cert_list_len.to_be_bytes()[1..4]);
+    body.extend_from_slice(&cert_list);
+
+    let mut handshake = Vec::new();
+    handshake.push(11);
+    let body_len = body.len() as u32;
+    handshake.extend_from_slice(&body_len.to_be_bytes()[1..4]);
+    handshake.extend_from_slice(&body);
+    handshake
 }

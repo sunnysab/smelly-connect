@@ -74,6 +74,20 @@ pub struct ServerHelloResult {
     pub derived_token: [u8; 48],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedServerHello {
+    pub session_id: [u8; 32],
+    pub cipher_suite: u16,
+    pub compression_method: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerFlight {
+    pub server_hello: ParsedServerHello,
+    pub certificate_chain: Vec<Vec<u8>>,
+    pub server_hello_done: bool,
+}
+
 #[cfg(feature = "tokio")]
 pub async fn connect_and_read_server_hello(
     addr: SocketAddr,
@@ -104,6 +118,28 @@ pub async fn connect_and_read_server_hello(
     })
 }
 
+#[cfg(feature = "tokio")]
+pub async fn connect_and_read_server_flight(
+    addr: SocketAddr,
+    config: &ClientHelloConfig,
+) -> io::Result<ServerFlight> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await?;
+    let hello = build_client_hello_record(config);
+    stream.write_all(&hello).await?;
+
+    let mut header = [0_u8; 5];
+    stream.read_exact(&mut header).await?;
+    let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+    let mut body = vec![0_u8; len];
+    stream.read_exact(&mut body).await?;
+    let record = [header.to_vec(), body].concat();
+
+    parse_server_flight(&record)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid server flight"))
+}
+
 pub fn parse_server_hello_session_id(record: &[u8]) -> Option<[u8; 32]> {
     if record.len() < 9 || record[0] != 22 || record[5] != 2 {
         return None;
@@ -120,6 +156,89 @@ pub fn parse_server_hello_session_id(record: &[u8]) -> Option<[u8; 32]> {
     let mut session_id = [0_u8; 32];
     session_id.copy_from_slice(record.get(idx..idx + sid_len)?);
     Some(session_id)
+}
+
+pub fn parse_server_flight(record: &[u8]) -> Option<ServerFlight> {
+    if record.len() < 9 || record[0] != 22 {
+        return None;
+    }
+
+    let mut idx = 5;
+    let mut server_hello = None;
+    let mut certificate_chain = Vec::new();
+    let mut server_hello_done = false;
+
+    while idx + 4 <= record.len() {
+        let handshake_type = record[idx];
+        let length =
+            u32::from_be_bytes([0, record[idx + 1], record[idx + 2], record[idx + 3]]) as usize;
+        idx += 4;
+        let body = record.get(idx..idx + length)?;
+        idx += length;
+
+        match handshake_type {
+            2 => {
+                server_hello = Some(parse_server_hello_body(body)?);
+            }
+            11 => {
+                certificate_chain = parse_certificate_body(body)?;
+            }
+            14 => {
+                if !body.is_empty() {
+                    return None;
+                }
+                server_hello_done = true;
+            }
+            _ => {}
+        }
+    }
+
+    Some(ServerFlight {
+        server_hello: server_hello?,
+        certificate_chain,
+        server_hello_done,
+    })
+}
+
+fn parse_server_hello_body(body: &[u8]) -> Option<ParsedServerHello> {
+    let mut idx = 0;
+    idx += 2;
+    idx += 32;
+    let sid_len = *body.get(idx)? as usize;
+    idx += 1;
+    if sid_len != 32 {
+        return None;
+    }
+    let mut session_id = [0_u8; 32];
+    session_id.copy_from_slice(body.get(idx..idx + sid_len)?);
+    idx += sid_len;
+    let cipher_suite = u16::from_be_bytes([*body.get(idx)?, *body.get(idx + 1)?]);
+    idx += 2;
+    let compression_method = *body.get(idx)?;
+
+    Some(ParsedServerHello {
+        session_id,
+        cipher_suite,
+        compression_method,
+    })
+}
+
+fn parse_certificate_body(body: &[u8]) -> Option<Vec<Vec<u8>>> {
+    if body.len() < 3 {
+        return None;
+    }
+    let total_len = u32::from_be_bytes([0, body[0], body[1], body[2]]) as usize;
+    let mut idx = 3;
+    let end = idx + total_len;
+    let mut certs = Vec::new();
+    while idx + 3 <= end && idx + 3 <= body.len() {
+        let cert_len =
+            u32::from_be_bytes([0, body[idx], body[idx + 1], body[idx + 2]]) as usize;
+        idx += 3;
+        certs.push(body.get(idx..idx + cert_len)?.to_vec());
+        idx += cert_len;
+    }
+    Some(certs)
 }
 
 pub fn derive_easyconnect_token(session_id: &[u8; 32], twfid: &str) -> Option<[u8; 48]> {
