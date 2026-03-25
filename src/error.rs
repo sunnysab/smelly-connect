@@ -1,7 +1,10 @@
 use std::fmt::{Display, Formatter};
 
-#[derive(Debug)]
-pub enum Error {}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    Resolve(ResolveError),
+    Route(RouteError),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthError {
@@ -16,6 +19,16 @@ pub enum AuthError {
 pub enum ProtocolError {
     UnexpectedReplyType(u8),
     ReplyTooShort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveError {
+    NoRecordFound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteError {
+    TargetNotAllowed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
