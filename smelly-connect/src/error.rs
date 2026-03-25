@@ -2,11 +2,12 @@ use std::fmt::{Display, Formatter};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    Bootstrap(BootstrapError),
+    ControlPlane(ControlPlaneError),
     Integration(IntegrationError),
     Proxy(ProxyError),
     Resolve(ResolveError),
-    Route(RouteError),
+    RouteDecision(RouteDecisionError),
+    TunnelBootstrap(TunnelBootstrapError),
     Transport(TransportError),
 }
 
@@ -32,16 +33,21 @@ pub enum ResolveError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RouteError {
+pub enum RouteDecisionError {
     TargetNotAllowed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BootstrapError {
+pub enum ControlPlaneError {
     AuthFlowFailed(String),
     CaptchaRequired,
     NotImplemented,
     ResourceParseFailed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TunnelBootstrapError {
+    HandshakeFailed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

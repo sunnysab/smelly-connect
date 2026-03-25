@@ -12,6 +12,7 @@ pub mod resolver;
 pub mod resource;
 pub mod session;
 pub mod target;
+pub mod test_support;
 pub mod transport;
 
 pub use domain::session::Session;

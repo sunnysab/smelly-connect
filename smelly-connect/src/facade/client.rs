@@ -1,6 +1,6 @@
 use crate::auth::CaptchaHandler;
 use crate::config::EasyConnectConfig;
-use crate::error::{BootstrapError, Error};
+use crate::error::{ControlPlaneError, Error};
 use crate::facade::session::Session;
 
 pub struct EasyConnectClient {
@@ -54,12 +54,12 @@ impl EasyConnectClientBuilder {
 
     pub fn build(self) -> Result<EasyConnectClient, Error> {
         let username = self.username.ok_or_else(|| {
-            Error::Bootstrap(BootstrapError::AuthFlowFailed(
+            Error::ControlPlane(ControlPlaneError::AuthFlowFailed(
                 "missing EasyConnect username".to_string(),
             ))
         })?;
         let password = self.password.ok_or_else(|| {
-            Error::Bootstrap(BootstrapError::AuthFlowFailed(
+            Error::ControlPlane(ControlPlaneError::AuthFlowFailed(
                 "missing EasyConnect password".to_string(),
             ))
         })?;

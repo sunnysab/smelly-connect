@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::io::duplex;
 
 use crate::config::EasyConnectConfig;
-use crate::error::{Error, ProxyError, RouteError, TransportError};
+use crate::error::{Error, ProxyError, RouteDecisionError, TransportError};
 use crate::proxy::http::ProxyHandle;
 use crate::resolver::SessionResolver;
 use crate::runtime::tasks::keepalive::KeepaliveHandle;
@@ -184,7 +184,7 @@ impl EasyConnectSession {
         }
 
         if !self.resources.matches_domain(&host, port) {
-            return Err(Error::Route(RouteError::TargetNotAllowed));
+            return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
 
         let ip = self
@@ -198,7 +198,7 @@ impl EasyConnectSession {
 
     fn plan_ip(&self, ip: Ipv4Addr, port: u16) -> Result<RoutePlan, Error> {
         if !self.resources.matches_ip(IpAddr::V4(ip), port) {
-            return Err(Error::Route(RouteError::TargetNotAllowed));
+            return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
 
         Ok(RoutePlan::VpnResolved(SocketAddr::new(

@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::EasyConnectConfig;
-use crate::error::{BootstrapError, Error};
+use crate::error::{Error, TunnelBootstrapError};
 use crate::resolver::SessionResolver;
 use crate::session::EasyConnectSession;
 use crate::transport::device::PacketDevice;
@@ -22,7 +22,7 @@ pub(crate) async fn run_control_plane(config: &EasyConnectConfig) -> Result<Cont
 
 pub fn request_token(server: &str, twfid: &str) -> Result<crate::protocol::DerivedToken, Error> {
     let mut builder = SslConnector::builder(SslMethod::tls_client())
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+        .map_err(|err| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string())))?;
     builder.set_verify(SslVerifyMode::NONE);
     let connector = builder.build();
 
@@ -32,28 +32,28 @@ pub fn request_token(server: &str, twfid: &str) -> Result<crate::protocol::Deriv
         format!("{server}:443")
     };
     let tcp = std::net::TcpStream::connect(&tcp_target)
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+        .map_err(|err| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string())))?;
     let domain = server.split(':').next().unwrap_or(server);
     let mut stream = connector
         .connect(domain, tcp)
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+        .map_err(|err| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string())))?;
 
     let request = format!(
         "GET /por/conf.csp HTTP/1.1\r\nHost: {server}\r\nCookie: TWFID={twfid}\r\n\r\nGET /por/rclist.csp HTTP/1.1\r\nHost: {server}\r\nCookie: TWFID={twfid}\r\n\r\n"
     );
     stream
         .write_all(request.as_bytes())
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+        .map_err(|err| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string())))?;
     let mut probe = [0_u8; 8];
     let _ = stream
         .read(&mut probe)
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+        .map_err(|err| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string())))?;
     let session = stream
         .ssl()
         .session()
-        .ok_or_else(|| Error::Bootstrap(BootstrapError::AuthFlowFailed("missing SSL session".to_string())))?;
+        .ok_or_else(|| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed("missing SSL session".to_string())))?;
     crate::protocol::derive_token(&hex::encode(session.id()), twfid)
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(format!("{err:?}"))))
+        .map_err(|err| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!("{err:?}"))))
 }
 
 pub async fn request_ip_via_tunnel(
@@ -74,13 +74,13 @@ pub(crate) async fn request_ip_via_tunnel_with_conn(
     let mut conn = connect_legacy_tunnel(addr, legacy_cipher_hint).await?;
     conn.send_application_data(&request_ip)
         .await
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+        .map_err(|err| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string())))?;
     let reply = conn
         .read_application_data()
         .await
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+        .map_err(|err| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string())))?;
     let ip = crate::protocol::parse_assigned_ip_reply(&reply)
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(format!("{err:?}"))))?;
+        .map_err(|err| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!("{err:?}"))))?;
     Ok((ip, conn))
 }
 
@@ -137,7 +137,7 @@ pub async fn spawn_legacy_packet_device(
     let mut device = PacketDevice::new(inbound_tx.clone(), inbound_rx, outbound_tx, outbound_rx);
     let mut outbound_rx = device
         .take_outbound_rx()
-        .ok_or_else(|| Error::Bootstrap(BootstrapError::AuthFlowFailed("missing outbound rx".to_string())))?;
+        .ok_or_else(|| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed("missing outbound rx".to_string())))?;
 
     tokio::spawn(async move {
         let mut recv = recv;
@@ -164,9 +164,9 @@ pub(crate) fn resolve_server_addr(server: &str) -> Result<SocketAddr, Error> {
     };
     target
         .to_socket_addrs()
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?
+        .map_err(|err| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string())))?
         .next()
-        .ok_or_else(|| Error::Bootstrap(BootstrapError::AuthFlowFailed("no resolved address".to_string())))
+        .ok_or_else(|| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed("no resolved address".to_string())))
 }
 
 async fn open_stream_tunnel(
@@ -178,14 +178,14 @@ async fn open_stream_tunnel(
     let mut conn = connect_legacy_tunnel(addr, legacy_cipher_hint).await?;
     conn.send_application_data(&handshake)
         .await
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+        .map_err(|err| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string())))?;
     let reply = conn
         .read_application_data()
         .await
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+        .map_err(|err| Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string())))?;
     let actual = reply.first().copied().unwrap_or_default();
     if actual != expected_reply_type {
-        return Err(Error::Bootstrap(BootstrapError::AuthFlowFailed(format!(
+        return Err(Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!(
             "unexpected stream handshake reply: got 0x{actual:02x}, want 0x{expected_reply_type:02x}"
         ))));
     }
@@ -211,7 +211,7 @@ async fn connect_legacy_tunnel(
         }
     }
 
-    Err(Error::Bootstrap(BootstrapError::AuthFlowFailed(
+    Err(Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(
         last_err.unwrap_or_else(|| "legacy tunnel failed".to_string()),
     )))
 }

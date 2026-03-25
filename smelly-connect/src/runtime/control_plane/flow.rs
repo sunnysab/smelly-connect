@@ -4,7 +4,7 @@ use reqwest::header::{CONTENT_TYPE, COOKIE, USER_AGENT};
 
 use crate::auth::{encrypt_password, parse_login_auth};
 use crate::config::EasyConnectConfig;
-use crate::error::{BootstrapError, Error};
+use crate::error::{ControlPlaneError, Error};
 use crate::resource::parse_resources;
 
 use super::client::build_reqwest_client;
@@ -18,27 +18,27 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
         .get(format!("{base_url}/por/login_auth.csp?apiversion=1"))
         .send()
         .await
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?
+        .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?
         .text()
         .await
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+        .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
 
     let parsed = parse_login_auth(&login_auth_body)
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(format!("{err:?}"))))?;
+        .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(format!("{err:?}"))))?;
 
     let mut rand_code = String::new();
     if parsed.requires_captcha {
         let captcha_handler = config
             .captcha_handler
             .clone()
-            .ok_or(Error::Bootstrap(BootstrapError::CaptchaRequired))?;
+            .ok_or(Error::ControlPlane(ControlPlaneError::CaptchaRequired))?;
         let response = client
             .get(format!("{base_url}/por/rand_code.csp?apiversion=1"))
             .header(COOKIE, format!("TWFID={}", parsed.twfid))
             .header(USER_AGENT, "EasyConnect_windows")
             .send()
             .await
-            .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+            .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
         let mime_type = response
             .headers()
             .get(CONTENT_TYPE)
@@ -47,11 +47,11 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
         let bytes = response
             .bytes()
             .await
-            .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+            .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
         rand_code = captcha_handler
             .solve(bytes.to_vec(), mime_type)
             .await
-            .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+            .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
     }
 
     let encrypted_password = encrypt_password(
@@ -60,7 +60,7 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
         &parsed.rsa_key_hex,
         parsed.rsa_exp,
     )
-    .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(format!("{err:?}"))))?;
+    .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(format!("{err:?}"))))?;
 
     let mut form = HashMap::new();
     form.insert("svpn_rand_code", rand_code);
@@ -79,26 +79,26 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
         .form(&form)
         .send()
         .await
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?
+        .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?
         .text()
         .await
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+        .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
 
     let authorized_twfid = crate::protocol::parse_login_psw_success(&login_psw_body, &parsed.twfid)
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(format!("{err:?}"))))?;
+        .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(format!("{err:?}"))))?;
 
     let resource_body = client
         .get(format!("{base_url}/por/rclist.csp"))
         .header(COOKIE, format!("TWFID={authorized_twfid}"))
         .send()
         .await
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?
+        .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?
         .text()
         .await
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+        .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
 
     let resources = parse_resources(&resource_body)
-        .map_err(|err| Error::Bootstrap(BootstrapError::ResourceParseFailed(err.to_string())))?;
+        .map_err(|err| Error::ControlPlane(ControlPlaneError::ResourceParseFailed(err.to_string())))?;
 
     Ok(ControlPlaneState {
         authorized_twfid,
