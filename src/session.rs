@@ -1,10 +1,15 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 
-use crate::error::{Error, RouteError};
+use tokio::io::duplex;
+
+use crate::config::EasyConnectConfig;
+use crate::error::{Error, RouteError, TransportError};
 use crate::resolver::SessionResolver;
 use crate::resource::{DomainRule, IpRule, ResourceSet};
 use crate::target::TargetAddr;
+use crate::transport::{TransportStack, VpnStream};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoutePlan {
@@ -12,13 +17,43 @@ pub enum RoutePlan {
 }
 
 pub struct EasyConnectSession {
+    client_ip: Ipv4Addr,
     resources: ResourceSet,
     resolver: SessionResolver,
+    transport: TransportStack,
 }
 
 impl EasyConnectSession {
-    pub fn new(resources: ResourceSet, resolver: SessionResolver) -> Self {
-        Self { resources, resolver }
+    pub fn new(
+        client_ip: Ipv4Addr,
+        resources: ResourceSet,
+        resolver: SessionResolver,
+        transport: TransportStack,
+    ) -> Self {
+        Self {
+            client_ip,
+            resources,
+            resolver,
+            transport,
+        }
+    }
+
+    pub fn client_ip(&self) -> Ipv4Addr {
+        self.client_ip
+    }
+
+    pub async fn connect_tcp<T>(&self, target: T) -> Result<VpnStream, Error>
+    where
+        T: Into<TargetAddr>,
+    {
+        let route = self.plan_tcp_connect(target).await?;
+        match route {
+            RoutePlan::VpnResolved(addr) => self
+                .transport
+                .connect(addr)
+                .await
+                .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string()))),
+        }
     }
 
     pub async fn plan_tcp_connect<T>(&self, target: T) -> Result<RoutePlan, Error>
@@ -64,13 +99,48 @@ pub mod tests {
 
     pub fn fake_session_without_match() -> EasyConnectSession {
         EasyConnectSession::new(
+            Ipv4Addr::new(10, 0, 0, 8),
             ResourceSet::default(),
             SessionResolver::new(HashMap::new(), None, HashMap::new()),
+            ready_transport(),
         )
+    }
+
+    pub struct LoginHarness {
+        host: Arc<str>,
+        ip: Ipv4Addr,
+    }
+
+    impl LoginHarness {
+        pub fn config(&self) -> EasyConnectConfig {
+            let host = Arc::clone(&self.host);
+            let ip = self.ip;
+            EasyConnectConfig {
+                server: "rvpn.example.com".to_string(),
+                username: "user".to_string(),
+                password: "pass".to_string(),
+                session_factory: Some(Arc::new(move || Ok(ready_session(host.as_ref(), ip)))),
+            }
+        }
+
+        pub async fn ready_session(&self) -> EasyConnectSession {
+            ready_session(self.host.as_ref(), self.ip)
+        }
+    }
+
+    pub fn login_harness() -> LoginHarness {
+        LoginHarness {
+            host: Arc::<str>::from("libdb.zju.edu.cn"),
+            ip: Ipv4Addr::new(10, 0, 0, 8),
+        }
     }
 
     #[allow(dead_code)]
     pub fn session_with_domain_match(host: &str, ip: Ipv4Addr) -> EasyConnectSession {
+        ready_session(host, ip)
+    }
+
+    fn ready_session(host: &str, ip: Ipv4Addr) -> EasyConnectSession {
         let mut resources = ResourceSet::default();
         resources.domain_rules.insert(
             host.to_string(),
@@ -91,6 +161,18 @@ pub mod tests {
         let mut system = HashMap::new();
         system.insert(host.to_string(), IpAddr::V4(ip));
 
-        EasyConnectSession::new(resources, SessionResolver::new(HashMap::new(), None, system))
+        EasyConnectSession::new(
+            ip,
+            resources,
+            SessionResolver::new(HashMap::new(), None, system),
+            ready_transport(),
+        )
+    }
+
+    fn ready_transport() -> TransportStack {
+        TransportStack::new(|_| {
+            let (client, _server) = duplex(1024);
+            Ok(client)
+        })
     }
 }

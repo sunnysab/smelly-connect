@@ -6,6 +6,7 @@ use crate::transport::stream::VpnStream;
 
 type Connector = dyn Fn(TargetAddr) -> io::Result<VpnStream> + Send + Sync + 'static;
 
+#[derive(Clone)]
 pub struct TransportStack {
     connector: Arc<Connector>,
 }

@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetAddr {
     HostPort { host: String, port: u16 },
@@ -31,6 +33,15 @@ impl From<(String, u16)> for TargetAddr {
         Self::HostPort {
             host: value.0,
             port: value.1,
+        }
+    }
+}
+
+impl From<SocketAddr> for TargetAddr {
+    fn from(value: SocketAddr) -> Self {
+        Self::HostPort {
+            host: value.ip().to_string(),
+            port: value.port(),
         }
     }
 }

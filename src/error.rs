@@ -2,8 +2,10 @@ use std::fmt::{Display, Formatter};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    Bootstrap(BootstrapError),
     Resolve(ResolveError),
     Route(RouteError),
+    Transport(TransportError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +31,16 @@ pub enum ResolveError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteError {
     TargetNotAllowed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootstrapError {
+    NotImplemented,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportError {
+    ConnectFailed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
