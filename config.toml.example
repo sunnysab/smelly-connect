@@ -1,0 +1,34 @@
+# Example configuration for smelly-connect-cli
+
+[vpn]
+server = "vpn1.sit.edu.cn"
+# Optional session-level keepalive target used by the CLI pool/service layer.
+default_keepalive_host = "jwxt.sit.edu.cn"
+
+[pool]
+# Number of accounts to connect immediately during startup.
+prewarm = 2
+# Timeout for establishing a session for one account.
+connect_timeout_secs = 20
+# Fixed-delay retry / healthcheck interval for failed accounts.
+healthcheck_interval_secs = 60
+# Current implementation supports round_robin only.
+selection = "round_robin"
+
+[[accounts]]
+name = "acct-01"
+username = "user1"
+password = "pass1"
+
+[[accounts]]
+name = "acct-02"
+username = "user2"
+password = "pass2"
+
+[proxy.http]
+enabled = true
+listen = "127.0.0.1:8080"
+
+[proxy.socks5]
+enabled = true
+listen = "127.0.0.1:1080"
