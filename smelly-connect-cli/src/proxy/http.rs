@@ -8,6 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 use crate::pool::SessionPool;
+use crate::runtime::{ProxyProtocol, RuntimeStats};
 
 #[derive(Debug, Clone)]
 pub struct HttpProxyTestResult {
@@ -157,7 +158,11 @@ pub async fn proxy_http_no_ready_session_sequence_for_test(
     Ok(results)
 }
 
-pub async fn serve_http(listen: String, pool: SessionPool) -> Result<(), String> {
+pub async fn serve_http(
+    listen: String,
+    pool: SessionPool,
+    stats: RuntimeStats,
+) -> Result<(), String> {
     let listener = TcpListener::bind(listen)
         .await
         .map_err(|err| err.to_string())?;
@@ -170,8 +175,9 @@ pub async fn serve_http(listen: String, pool: SessionPool) -> Result<(), String>
     loop {
         let (stream, _) = listener.accept().await.map_err(|err| err.to_string())?;
         let pool = pool.clone();
+        let stats = stats.clone();
         tokio::spawn(async move {
-            let _ = handle_live_client(stream, pool).await;
+            let _ = handle_live_client(stream, pool, stats).await;
         });
     }
 }
@@ -305,7 +311,11 @@ where
     .await
 }
 
-async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<(), String> {
+async fn handle_live_client(
+    mut client: TcpStream,
+    pool: SessionPool,
+    stats: RuntimeStats,
+) -> Result<(), String> {
     let mut buffer = Vec::with_capacity(1024);
     let header_end = read_headers(&mut client, &mut buffer)
         .await
@@ -351,6 +361,7 @@ async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<
             .connect_tcp((host, port))
             .await
             .map_err(|err| format!("{account_name}: {err:?}"))?;
+        let connection = stats.open_connection(ProxyProtocol::Http);
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await
@@ -360,10 +371,14 @@ async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<
                 .write_all(&leftover)
                 .await
                 .map_err(|err| err.to_string())?;
+            connection.add_client_to_upstream_bytes(leftover.len() as u64);
         }
-        let _ = copy_bidirectional(&mut client, &mut upstream)
-            .await
-            .map_err(|err| err.to_string())?;
+        let (client_to_upstream, upstream_to_client) =
+            copy_bidirectional(&mut client, &mut upstream)
+                .await
+                .map_err(|err| err.to_string())?;
+        connection.add_client_to_upstream_bytes(client_to_upstream);
+        connection.add_upstream_to_client_bytes(upstream_to_client);
         return Ok(());
     }
 
@@ -379,6 +394,7 @@ async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<
         .connect_tcp((host.as_str(), port))
         .await
         .map_err(|err| format!("{account_name}: {err:?}"))?;
+    let connection = stats.open_connection(ProxyProtocol::Http);
 
     let mut upstream_request = format!("{method} {path} {version}\r\n");
     for header in lines {
@@ -394,15 +410,18 @@ async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<
         .write_all(upstream_request.as_bytes())
         .await
         .map_err(|err| err.to_string())?;
+    connection.add_client_to_upstream_bytes(upstream_request.len() as u64);
     if !leftover.is_empty() {
         upstream
             .write_all(&leftover)
             .await
             .map_err(|err| err.to_string())?;
+        connection.add_client_to_upstream_bytes(leftover.len() as u64);
     }
-    tokio::io::copy(&mut upstream, &mut client)
+    let upstream_to_client = tokio::io::copy(&mut upstream, &mut client)
         .await
         .map_err(|err| err.to_string())?;
+    connection.add_upstream_to_client_bytes(upstream_to_client);
     Ok(())
 }
 

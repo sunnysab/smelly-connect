@@ -11,6 +11,8 @@ pub struct AppConfig {
     pub accounts: Vec<AccountConfig>,
     pub proxy: ProxyConfig,
     #[serde(default)]
+    pub management: ManagementConfig,
+    #[serde(default)]
     pub logging: LoggingConfig,
 }
 
@@ -65,6 +67,22 @@ pub struct ProxyConfig {
 pub struct ListenerConfig {
     pub enabled: bool,
     pub listen: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ManagementConfig {
+    pub enabled: bool,
+    pub listen: String,
+}
+
+impl Default for ManagementConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: "127.0.0.1:9090".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

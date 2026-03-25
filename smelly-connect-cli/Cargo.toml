@@ -3,6 +3,10 @@ name = "smelly-connect-cli"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+management-api = ["dep:axum", "dep:serde_json"]
+
 [lib]
 name = "smelly_connect_cli"
 path = "src/lib.rs"
@@ -20,3 +24,5 @@ smelly-connect = { path = "../smelly-connect" }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "time"] }
+axum = { version = "0.8", optional = true, features = ["json"] }
+serde_json = { version = "1", optional = true }

@@ -41,6 +41,10 @@ listen = "127.0.0.1:8080"
 enabled = true
 listen = "127.0.0.1:1080"
 
+[management]
+enabled = false
+listen = "127.0.0.1:9090"
+
 [logging]
 mode = "stdout"
 level = "info"

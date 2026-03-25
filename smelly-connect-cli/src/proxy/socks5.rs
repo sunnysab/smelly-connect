@@ -8,6 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 use crate::pool::SessionPool;
+use crate::runtime::{ProxyProtocol, RuntimeStats};
 
 const SOCKS5_NETWORK_UNREACHABLE: u8 = 0x03;
 
@@ -122,7 +123,11 @@ pub async fn proxy_socks5_no_ready_session_sequence_for_test(
     Ok(results)
 }
 
-pub async fn serve_socks5(listen: String, pool: SessionPool) -> Result<(), String> {
+pub async fn serve_socks5(
+    listen: String,
+    pool: SessionPool,
+    stats: RuntimeStats,
+) -> Result<(), String> {
     let listener = TcpListener::bind(listen)
         .await
         .map_err(|err| err.to_string())?;
@@ -135,8 +140,9 @@ pub async fn serve_socks5(listen: String, pool: SessionPool) -> Result<(), Strin
     loop {
         let (stream, _) = listener.accept().await.map_err(|err| err.to_string())?;
         let pool = pool.clone();
+        let stats = stats.clone();
         tokio::spawn(async move {
-            let _ = handle_live_client(stream, pool).await;
+            let _ = handle_live_client(stream, pool, stats).await;
         });
     }
 }
@@ -302,7 +308,11 @@ where
     Ok(())
 }
 
-async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<(), String> {
+async fn handle_live_client(
+    mut client: TcpStream,
+    pool: SessionPool,
+    stats: RuntimeStats,
+) -> Result<(), String> {
     let mut greeting = [0_u8; 2];
     client
         .read_exact(&mut greeting)
@@ -393,13 +403,16 @@ async fn handle_live_client(mut client: TcpStream, pool: SessionPool) -> Result<
         .connect_tcp((host.as_str(), port))
         .await
         .map_err(|err| format!("{account_name}: {err:?}"))?;
+    let connection = stats.open_connection(ProxyProtocol::Socks5);
     client
         .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
         .await
         .map_err(|err| err.to_string())?;
-    let _ = copy_bidirectional(&mut client, &mut upstream)
+    let (client_to_upstream, upstream_to_client) = copy_bidirectional(&mut client, &mut upstream)
         .await
         .map_err(|err| err.to_string())?;
+    connection.add_client_to_upstream_bytes(client_to_upstream);
+    connection.add_upstream_to_client_bytes(upstream_to_client);
     Ok(())
 }
 

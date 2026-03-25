@@ -88,6 +88,12 @@ cargo test -p smelly-connect-cli
 cargo build -p smelly-connect-cli --release
 ```
 
+如果要启用管理 API：
+
+```bash
+cargo build -p smelly-connect-cli --release --features management-api
+```
+
 一个最小 `config.toml` 例子：
 
 ```toml
@@ -122,6 +128,10 @@ listen = "127.0.0.1:8080"
 [proxy.socks5]
 enabled = true
 listen = "127.0.0.1:1080"
+
+[management]
+enabled = false
+listen = "127.0.0.1:9090"
 
 [logging]
 mode = "stdout"
@@ -173,6 +183,13 @@ smelly-connect-cli --config ./config.toml test http http://intranet.zju.edu.cn/h
 - HTTP 空 upstream 立即返回 `503 Service Unavailable`
 - SOCKS5 空 upstream 返回 `network unreachable` (`0x03`)
 - `allow_request_triggered_probe = true` 时，首个到来的请求允许提前触发一次恢复探测
+
+管理 API：
+
+- 这是一个独立监听口，默认建议只绑定 `127.0.0.1`
+- 需要使用 `management-api` feature 编译
+- `GET /healthz` 返回池健康摘要
+- `GET /stats` 返回当前连接数、累计连接数、双向流量统计，以及 pool 节点状态摘要
 
 ## 环境变量
 

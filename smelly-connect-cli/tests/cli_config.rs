@@ -10,6 +10,8 @@ fn parses_sample_config() {
         toml::from_str(include_str!("fixtures/config.sample.toml")).unwrap();
     assert_eq!(cfg.accounts.len(), 2);
     assert_eq!(cfg.pool.prewarm, 2);
+    assert!(!cfg.management.enabled);
+    assert_eq!(cfg.management.listen, "127.0.0.1:9090");
 }
 
 #[test]

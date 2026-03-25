@@ -1,3 +1,4 @@
+use serde::Serialize;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
@@ -91,6 +92,36 @@ pub enum PoolStartupMode {
 pub struct ProbeRaceResult {
     pub successes: usize,
     pub fast_failures: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolHealthStatus {
+    Healthy,
+    Recovering,
+    Down,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountNodeSnapshot {
+    pub name: String,
+    pub state: String,
+    pub consecutive_failures: u32,
+    pub failure_threshold: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PoolSnapshot {
+    pub status: PoolHealthStatus,
+    pub total_nodes: usize,
+    pub selectable_nodes: usize,
+    pub ready_nodes: usize,
+    pub suspect_nodes: usize,
+    pub open_nodes: usize,
+    pub half_open_nodes: usize,
+    pub connecting_nodes: usize,
+    pub configured_nodes: usize,
+    pub nodes: Vec<AccountNodeSnapshot>,
 }
 
 impl PoolError {
@@ -387,18 +418,62 @@ impl SessionPool {
             .nodes
             .iter()
             .map(|node| {
-                let label = match node.state {
-                    AccountState::Configured(_) => "Configured",
-                    AccountState::Connecting => "Connecting",
-                    AccountState::Ready(_) => "Ready",
-                    AccountState::Suspect(_) => "Suspect",
-                    AccountState::Open(_) => "Open",
-                    AccountState::HalfOpen(_) => "HalfOpen",
-                };
+                let label = state_label(&node.state);
                 format!("{}:{label}", node.name)
             })
             .collect::<Vec<_>>()
             .join(",")
+    }
+
+    pub async fn snapshot(&self) -> PoolSnapshot {
+        self.refresh_time_based_states().await;
+        let state = self.inner.lock().await;
+        let mut ready_nodes = 0;
+        let mut suspect_nodes = 0;
+        let mut open_nodes = 0;
+        let mut half_open_nodes = 0;
+        let mut connecting_nodes = 0;
+        let mut configured_nodes = 0;
+        let mut nodes = Vec::with_capacity(state.nodes.len());
+
+        for node in &state.nodes {
+            match node.state {
+                AccountState::Configured(_) => configured_nodes += 1,
+                AccountState::Connecting => connecting_nodes += 1,
+                AccountState::Ready(_) => ready_nodes += 1,
+                AccountState::Suspect(_) => suspect_nodes += 1,
+                AccountState::Open(_) => open_nodes += 1,
+                AccountState::HalfOpen(_) => half_open_nodes += 1,
+            }
+            nodes.push(AccountNodeSnapshot {
+                name: node.name.clone(),
+                state: state_label(&node.state).to_ascii_lowercase(),
+                consecutive_failures: node.consecutive_failures,
+                failure_threshold: node.failure_threshold,
+            });
+        }
+
+        let selectable_nodes = ready_nodes + suspect_nodes;
+        let status = if selectable_nodes > 0 {
+            PoolHealthStatus::Healthy
+        } else if half_open_nodes > 0 || connecting_nodes > 0 {
+            PoolHealthStatus::Recovering
+        } else {
+            PoolHealthStatus::Down
+        };
+
+        PoolSnapshot {
+            status,
+            total_nodes: state.nodes.len(),
+            selectable_nodes,
+            ready_nodes,
+            suspect_nodes,
+            open_nodes,
+            half_open_nodes,
+            connecting_nodes,
+            configured_nodes,
+            nodes,
+        }
     }
 
     pub async fn has_selectable_nodes_for_test(&self) -> bool {
@@ -1006,6 +1081,17 @@ fn next_backoff(current: Duration, base: Duration, max: Duration) -> Duration {
         max
     } else {
         doubled
+    }
+}
+
+fn state_label(state: &AccountState) -> &'static str {
+    match state {
+        AccountState::Configured(_) => "Configured",
+        AccountState::Connecting => "Connecting",
+        AccountState::Ready(_) => "Ready",
+        AccountState::Suspect(_) => "Suspect",
+        AccountState::Open(_) => "Open",
+        AccountState::HalfOpen(_) => "HalfOpen",
     }
 }
 
