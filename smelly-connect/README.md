@@ -1,18 +1,22 @@
 # smelly-connect
 
-Rust rewrite of EasyConnect-oriented intranet access tooling.
+`smelly-connect` 是工作区中的主 crate，负责 EasyConnect 的控制面、会话、路由、代理与 Rust 数据面接入。
 
-Current status:
+当前已经支持：
 
-- library scaffolding, parsing, routing, transport abstractions
-- local HTTP proxy
-- reqwest helper through an internal local proxy
+- 用户名/密码登录
+- 图形验证码回调
+- 资源规则解析
+- 获取分配 IP
+- `connect_tcp()`
+- 本地 HTTP 代理
+- `reqwest_client()`
+- ICMP keepalive
 
-## Manual Verification
+示例程序：
 
-- password-only login against a real EasyConnect server
-- captcha callback flow against a real EasyConnect server
-- assigned client IP retrieval from the real protocol reply
-- local HTTP proxy request to an intranet HTTP target
-- local HTTPS CONNECT proxy request to an intranet HTTPS target
-- `reqwest_client()` request to an intranet HTTP target
+- `request_ip`
+- `debug_route`
+- `fetch_jwxt`
+
+更完整的中文说明见仓库根目录的 [README.md](../README.md)。
