@@ -2,8 +2,9 @@ use std::future::pending;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::auth::{CaptchaHandler, ControlPlaneState, run_control_plane};
+use crate::auth::CaptchaHandler;
 use crate::error::Error;
+use crate::runtime::control_plane::{ControlPlaneState, run_control_plane};
 use crate::session::{EasyConnectSession, IcmpKeepAliveTarget};
 use crate::resolver::SessionResolver;
 
