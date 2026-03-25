@@ -1038,6 +1038,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelly-tls"
+version = "0.1.0"
+
+[[package]]
 name = "socket2"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
