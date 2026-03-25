@@ -2,13 +2,14 @@ use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 use crate::pool::SessionPool;
-use crate::runtime::{ProxyProtocol, RuntimeStats};
+use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeSnapshot, RuntimeStats};
 
 const SOCKS5_NETWORK_UNREACHABLE: u8 = 0x03;
 
@@ -123,6 +124,64 @@ pub async fn proxy_socks5_no_ready_session_sequence_for_test(
     Ok(results)
 }
 
+pub async fn proxy_socks5_runtime_stats_for_test() -> Result<RuntimeSnapshot, String> {
+    let upstream = spawn_echo_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let stats = RuntimeStats::default();
+    let addr = spawn_test_socks5_with_stats(
+        pool.clone(),
+        stats.clone(),
+        move |_account_name, _host, _port| async move { TcpStream::connect(upstream).await },
+    )
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut method_reply = [0_u8; 2];
+    client
+        .read_exact(&mut method_reply)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(&[
+            0x05, 0x01, 0x00, 0x03, 0x10, b'l', b'i', b'b', b'd', b'b', b'.', b'z', b'j', b'u',
+            b'.', b'e', b'd', b'u', b'.', b'c', b'n', 0x01, 0xbb,
+        ])
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut connect_reply = [0_u8; 10];
+    client
+        .read_exact(&mut connect_reply)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(b"ping")
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut echoed = [0_u8; 4];
+    client
+        .read_exact(&mut echoed)
+        .await
+        .map_err(|err| err.to_string())?;
+    client.shutdown().await.map_err(|err| err.to_string())?;
+    drop(client);
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+        let snapshot = stats.snapshot(pool.snapshot().await);
+        if snapshot.socks5.current_connections == 0 {
+            return Ok(snapshot);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    Ok(stats.snapshot(pool.snapshot().await))
+}
+
 pub async fn serve_socks5(
     listen: String,
     pool: SessionPool,
@@ -152,6 +211,30 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
+    spawn_test_socks5_internal(pool, None, connector).await
+}
+
+async fn spawn_test_socks5_with_stats<F, Fut>(
+    pool: SessionPool,
+    stats: RuntimeStats,
+    connector: F,
+) -> Result<SocketAddr, String>
+where
+    F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
+{
+    spawn_test_socks5_internal(pool, Some(stats), connector).await
+}
+
+async fn spawn_test_socks5_internal<F, Fut>(
+    pool: SessionPool,
+    stats: Option<RuntimeStats>,
+    connector: F,
+) -> Result<SocketAddr, String>
+where
+    F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
+{
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|err| err.to_string())?;
@@ -162,9 +245,10 @@ where
                 break;
             };
             let pool = pool.clone();
+            let stats = stats.clone();
             let connector = connector.clone();
             tokio::spawn(async move {
-                let _ = handle_client(stream, pool, connector).await;
+                let _ = handle_client(stream, pool, stats, connector).await;
             });
         }
     });
@@ -203,6 +287,7 @@ async fn request_no_ready_session(addr: SocketAddr) -> Result<Socks5FailureResul
 async fn handle_client<F, Fut>(
     mut client: TcpStream,
     pool: SessionPool,
+    stats: Option<RuntimeStats>,
     connector: F,
 ) -> Result<(), String>
 where
@@ -298,14 +383,8 @@ where
     let mut upstream = connector(account_name, host, port)
         .await
         .map_err(|err| err.to_string())?;
-    client
-        .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
-        .await
-        .map_err(|err| err.to_string())?;
-    let _ = copy_bidirectional(&mut client, &mut upstream)
-        .await
-        .map_err(|err| err.to_string())?;
-    Ok(())
+    let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Socks5));
+    relay_tunnel(&mut client, &mut upstream, connection.as_ref()).await
 }
 
 async fn handle_live_client(
@@ -404,15 +483,25 @@ async fn handle_live_client(
         .await
         .map_err(|err| format!("{account_name}: {err:?}"))?;
     let connection = stats.open_connection(ProxyProtocol::Socks5);
+    relay_tunnel(&mut client, &mut upstream, Some(&connection)).await
+}
+
+async fn relay_tunnel(
+    client: &mut TcpStream,
+    upstream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    connection: Option<&ConnectionGuard>,
+) -> Result<(), String> {
     client
         .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
         .await
         .map_err(|err| err.to_string())?;
-    let (client_to_upstream, upstream_to_client) = copy_bidirectional(&mut client, &mut upstream)
+    let (client_to_upstream, upstream_to_client) = copy_bidirectional(client, upstream)
         .await
         .map_err(|err| err.to_string())?;
-    connection.add_client_to_upstream_bytes(client_to_upstream);
-    connection.add_upstream_to_client_bytes(upstream_to_client);
+    if let Some(connection) = connection {
+        connection.add_client_to_upstream_bytes(client_to_upstream);
+        connection.add_upstream_to_client_bytes(upstream_to_client);
+    }
     Ok(())
 }
 

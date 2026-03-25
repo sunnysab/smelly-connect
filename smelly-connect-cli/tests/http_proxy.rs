@@ -33,3 +33,14 @@ async fn http_proxy_listener_stays_bound_during_total_pool_outage() {
     assert_eq!(results.len(), 2);
     assert!(results.iter().all(|result| result.status_code == 503));
 }
+
+#[tokio::test]
+async fn http_proxy_updates_runtime_stats_after_forwarding() {
+    let snapshot = smelly_connect_cli::proxy::http::proxy_http_runtime_stats_for_test()
+        .await
+        .unwrap();
+    assert_eq!(snapshot.http.current_connections, 0);
+    assert_eq!(snapshot.http.total_connections, 1);
+    assert!(snapshot.http.client_to_upstream_bytes > 0);
+    assert!(snapshot.http.upstream_to_client_bytes > 0);
+}

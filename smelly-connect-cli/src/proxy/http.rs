@@ -3,12 +3,12 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 use crate::pool::SessionPool;
-use crate::runtime::{ProxyProtocol, RuntimeStats};
+use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeSnapshot, RuntimeStats};
 
 #[derive(Debug, Clone)]
 pub struct HttpProxyTestResult {
@@ -158,6 +158,35 @@ pub async fn proxy_http_no_ready_session_sequence_for_test(
     Ok(results)
 }
 
+pub async fn proxy_http_runtime_stats_for_test() -> Result<RuntimeSnapshot, String> {
+    let upstream = spawn_http_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let stats = RuntimeStats::default();
+    let addr = spawn_test_proxy_with_stats(
+        pool.clone(),
+        stats.clone(),
+        move |_account_name, _host, _port| async move { TcpStream::connect(upstream).await },
+    )
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"GET http://intranet.zju.edu.cn/health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    Ok(stats.snapshot(pool.snapshot().await))
+}
+
 pub async fn serve_http(
     listen: String,
     pool: SessionPool,
@@ -195,6 +224,30 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
+    spawn_test_proxy_internal(pool, None, connector).await
+}
+
+async fn spawn_test_proxy_with_stats<F, Fut>(
+    pool: SessionPool,
+    stats: RuntimeStats,
+    connector: F,
+) -> Result<SocketAddr, String>
+where
+    F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
+{
+    spawn_test_proxy_internal(pool, Some(stats), connector).await
+}
+
+async fn spawn_test_proxy_internal<F, Fut>(
+    pool: SessionPool,
+    stats: Option<RuntimeStats>,
+    connector: F,
+) -> Result<SocketAddr, String>
+where
+    F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
+{
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|err| err.to_string())?;
@@ -205,9 +258,10 @@ where
                 break;
             };
             let pool = pool.clone();
+            let stats = stats.clone();
             let connector = connector.clone();
             tokio::spawn(async move {
-                let _ = handle_client(stream, pool, connector).await;
+                let _ = handle_client(stream, pool, stats, connector).await;
             });
         }
     });
@@ -242,6 +296,7 @@ async fn request_no_ready_session(addr: SocketAddr) -> Result<NoReadySessionResu
 async fn handle_client<F, Fut>(
     mut client: TcpStream,
     pool: SessionPool,
+    stats: Option<RuntimeStats>,
     connector: F,
 ) -> Result<(), String>
 where
@@ -286,7 +341,15 @@ where
             account = %account_name,
             "request accepted"
         );
-        return handle_connect(account_name, connector, client, target, leftover).await;
+        return handle_connect(
+            account_name,
+            connector,
+            client,
+            target,
+            leftover,
+            stats.as_ref(),
+        )
+        .await;
     }
 
     tracing::info!(
@@ -300,6 +363,7 @@ where
         account_name,
         connector,
         client,
+        stats.as_ref(),
         ForwardRequest {
             method,
             target,
@@ -371,14 +435,13 @@ async fn handle_live_client(
                 .write_all(&leftover)
                 .await
                 .map_err(|err| err.to_string())?;
-            connection.add_client_to_upstream_bytes(leftover.len() as u64);
+            record_client_to_upstream(Some(&connection), leftover.len());
         }
         let (client_to_upstream, upstream_to_client) =
             copy_bidirectional(&mut client, &mut upstream)
                 .await
                 .map_err(|err| err.to_string())?;
-        connection.add_client_to_upstream_bytes(client_to_upstream);
-        connection.add_upstream_to_client_bytes(upstream_to_client);
+        record_tunnel_transfer(Some(&connection), client_to_upstream, upstream_to_client);
         return Ok(());
     }
 
@@ -410,18 +473,18 @@ async fn handle_live_client(
         .write_all(upstream_request.as_bytes())
         .await
         .map_err(|err| err.to_string())?;
-    connection.add_client_to_upstream_bytes(upstream_request.len() as u64);
+    record_client_to_upstream(Some(&connection), upstream_request.len());
     if !leftover.is_empty() {
         upstream
             .write_all(&leftover)
             .await
             .map_err(|err| err.to_string())?;
-        connection.add_client_to_upstream_bytes(leftover.len() as u64);
+        record_client_to_upstream(Some(&connection), leftover.len());
     }
     let upstream_to_client = tokio::io::copy(&mut upstream, &mut client)
         .await
         .map_err(|err| err.to_string())?;
-    connection.add_upstream_to_client_bytes(upstream_to_client);
+    record_upstream_to_client(Some(&connection), upstream_to_client);
     Ok(())
 }
 
@@ -431,6 +494,7 @@ async fn handle_connect<F, Fut>(
     mut client: TcpStream,
     target: &str,
     leftover: Vec<u8>,
+    stats: Option<&RuntimeStats>,
 ) -> Result<(), String>
 where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
@@ -440,26 +504,15 @@ where
     let mut upstream = connector(account_name, host.to_string(), port)
         .await
         .map_err(|err| err.to_string())?;
-    client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await
-        .map_err(|err| err.to_string())?;
-    if !leftover.is_empty() {
-        upstream
-            .write_all(&leftover)
-            .await
-            .map_err(|err| err.to_string())?;
-    }
-    let _ = copy_bidirectional(&mut client, &mut upstream)
-        .await
-        .map_err(|err| err.to_string())?;
-    Ok(())
+    let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
+    relay_connect_tunnel(&mut client, &mut upstream, &leftover, connection.as_ref()).await
 }
 
 async fn handle_forward<F, Fut>(
     account_name: String,
     connector: F,
     mut client: TcpStream,
+    stats: Option<&RuntimeStats>,
     request: ForwardRequest<'_>,
 ) -> Result<(), String>
 where
@@ -470,6 +523,7 @@ where
     let mut upstream = connector(account_name, host.clone(), port)
         .await
         .map_err(|err| err.to_string())?;
+    let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
 
     let mut upstream_request = format!("{} {path} {}\r\n", request.method, request.version);
     for header in request.headers {
@@ -481,20 +535,87 @@ where
     }
     upstream_request.push_str("\r\n");
 
+    relay_forward_stream(
+        &mut client,
+        &mut upstream,
+        &upstream_request,
+        &request.leftover,
+        connection.as_ref(),
+    )
+    .await
+}
+
+async fn relay_connect_tunnel(
+    client: &mut TcpStream,
+    upstream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    leftover: &[u8],
+    connection: Option<&ConnectionGuard>,
+) -> Result<(), String> {
+    client
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .await
+        .map_err(|err| err.to_string())?;
+    if !leftover.is_empty() {
+        upstream
+            .write_all(leftover)
+            .await
+            .map_err(|err| err.to_string())?;
+        record_client_to_upstream(connection, leftover.len());
+    }
+    let (client_to_upstream, upstream_to_client) = copy_bidirectional(client, upstream)
+        .await
+        .map_err(|err| err.to_string())?;
+    record_tunnel_transfer(connection, client_to_upstream, upstream_to_client);
+    Ok(())
+}
+
+async fn relay_forward_stream(
+    client: &mut TcpStream,
+    upstream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    upstream_request: &str,
+    leftover: &[u8],
+    connection: Option<&ConnectionGuard>,
+) -> Result<(), String> {
     upstream
         .write_all(upstream_request.as_bytes())
         .await
         .map_err(|err| err.to_string())?;
-    if !request.leftover.is_empty() {
+    record_client_to_upstream(connection, upstream_request.len());
+    if !leftover.is_empty() {
         upstream
-            .write_all(&request.leftover)
+            .write_all(leftover)
             .await
             .map_err(|err| err.to_string())?;
+        record_client_to_upstream(connection, leftover.len());
     }
-    tokio::io::copy(&mut upstream, &mut client)
+    let upstream_to_client = tokio::io::copy(upstream, client)
         .await
         .map_err(|err| err.to_string())?;
+    record_upstream_to_client(connection, upstream_to_client);
     Ok(())
+}
+
+fn record_client_to_upstream(connection: Option<&ConnectionGuard>, bytes: usize) {
+    if let Some(connection) = connection {
+        connection.add_client_to_upstream_bytes(bytes as u64);
+    }
+}
+
+fn record_upstream_to_client(connection: Option<&ConnectionGuard>, bytes: u64) {
+    if let Some(connection) = connection {
+        connection.add_upstream_to_client_bytes(bytes);
+    }
+}
+
+fn record_tunnel_transfer(
+    connection: Option<&ConnectionGuard>,
+    client_to_upstream: u64,
+    upstream_to_client: u64,
+) {
+    if let Some(connection) = connection {
+        connection.add_client_to_upstream_bytes(client_to_upstream);
+        connection.add_upstream_to_client_bytes(upstream_to_client);
+    }
 }
 
 async fn read_headers(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> io::Result<usize> {
