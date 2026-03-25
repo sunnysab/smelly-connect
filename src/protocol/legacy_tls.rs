@@ -5,12 +5,15 @@ use std::sync::OnceLock;
 use foreign_types::{ForeignType, ForeignTypeRef};
 use openssl::error::ErrorStack;
 use openssl::provider::Provider;
-use openssl::ssl::{ExtensionContext, SslConnector, SslConnectorBuilder, SslMethod, SslRef, SslSession, SslVerifyMode, SslVersion};
+use openssl::ssl::{SslConnector, SslConnectorBuilder, SslMethod, SslRef, SslSession, SslVerifyMode, SslVersion};
 use openssl_sys as ffi;
 
 pub const HEARTBEAT_EXT_TYPE: u16 = 0x000f;
+pub const PROBE_EXT_TYPE: u16 = 0xffa5;
 pub const EASYCONNECT_SESSION_ID: &[u8; 32] = b"L3IP\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 static LEGACY_PROVIDER: OnceLock<Option<Provider>> = OnceLock::new();
+static PROBE_EXT_BYTES: [u8; 1] = [0x42];
+static HEARTBEAT_EXT_BYTES: [u8; 1] = [0x01];
 
 unsafe extern "C" {
     fn SSL_SESSION_new() -> *mut ffi::SSL_SESSION;
@@ -20,6 +23,40 @@ unsafe extern "C" {
     fn SSL_SESSION_set_timeout(s: *mut ffi::SSL_SESSION, t: c_long) -> c_long;
     fn SSL_SESSION_set_cipher(s: *mut ffi::SSL_SESSION, cipher: *const ffi::SSL_CIPHER) -> c_int;
     fn SSL_CIPHER_find(ssl: *mut ffi::SSL, ptr: *const u8) -> *const ffi::SSL_CIPHER;
+    fn SSL_CTX_add_client_custom_ext(
+        ctx: *mut ffi::SSL_CTX,
+        ext_type: u32,
+        add_cb: Option<
+            unsafe extern "C" fn(
+                s: *mut ffi::SSL,
+                ext_type: u32,
+                out: *mut *const u8,
+                outlen: *mut usize,
+                al: *mut c_int,
+                add_arg: *mut std::ffi::c_void,
+            ) -> c_int,
+        >,
+        free_cb: Option<
+            unsafe extern "C" fn(
+                s: *mut ffi::SSL,
+                ext_type: u32,
+                out: *const u8,
+                add_arg: *mut std::ffi::c_void,
+            ),
+        >,
+        add_arg: *mut std::ffi::c_void,
+        parse_cb: Option<
+            unsafe extern "C" fn(
+                s: *mut ffi::SSL,
+                ext_type: u32,
+                input: *const u8,
+                inlen: usize,
+                al: *mut c_int,
+                parse_arg: *mut std::ffi::c_void,
+            ) -> c_int,
+        >,
+        parse_arg: *mut std::ffi::c_void,
+    ) -> c_int;
 }
 
 pub fn build_easyconnect_connector() -> Result<SslConnector, ErrorStack> {
@@ -30,12 +67,32 @@ pub fn build_easyconnect_connector() -> Result<SslConnector, ErrorStack> {
 
 pub fn configure_easyconnect_context(builder: &mut SslConnectorBuilder) -> Result<(), ErrorStack> {
     builder.set_verify(SslVerifyMode::NONE);
-    builder.add_custom_ext(
-        HEARTBEAT_EXT_TYPE,
-        ExtensionContext::CLIENT_HELLO,
-        |_ssl, _context, _cert| Ok(Some([0x01_u8])),
-        |_ssl, _context, _data, _cert| Ok(()),
-    )?;
+    unsafe {
+        if SSL_CTX_add_client_custom_ext(
+            builder.as_ptr(),
+            PROBE_EXT_TYPE as u32,
+            Some(add_probe_ext),
+            Some(free_custom_ext),
+            std::ptr::null_mut(),
+            Some(parse_custom_ext),
+            std::ptr::null_mut(),
+        ) != 1
+        {
+            return Err(ErrorStack::get());
+        }
+        if SSL_CTX_add_client_custom_ext(
+            builder.as_ptr(),
+            HEARTBEAT_EXT_TYPE as u32,
+            Some(add_heartbeat_ext),
+            Some(free_custom_ext),
+            std::ptr::null_mut(),
+            Some(parse_custom_ext),
+            std::ptr::null_mut(),
+        ) != 1
+        {
+            return Err(ErrorStack::get());
+        }
+    }
     Ok(())
 }
 
@@ -82,4 +139,53 @@ fn attach_easyconnect_session_id(ssl: &mut SslRef) -> Result<(), ErrorStack> {
         ssl.set_session(&session)?;
     }
     Ok(())
+}
+
+unsafe extern "C" fn add_probe_ext(
+    _ssl: *mut ffi::SSL,
+    _ext_type: u32,
+    out: *mut *const u8,
+    outlen: *mut usize,
+    _al: *mut c_int,
+    _add_arg: *mut std::ffi::c_void,
+) -> c_int {
+    unsafe {
+        *out = PROBE_EXT_BYTES.as_ptr();
+        *outlen = PROBE_EXT_BYTES.len();
+    }
+    1
+}
+
+unsafe extern "C" fn add_heartbeat_ext(
+    _ssl: *mut ffi::SSL,
+    _ext_type: u32,
+    out: *mut *const u8,
+    outlen: *mut usize,
+    _al: *mut c_int,
+    _add_arg: *mut std::ffi::c_void,
+) -> c_int {
+    unsafe {
+        *out = HEARTBEAT_EXT_BYTES.as_ptr();
+        *outlen = HEARTBEAT_EXT_BYTES.len();
+    }
+    1
+}
+
+unsafe extern "C" fn free_custom_ext(
+    _ssl: *mut ffi::SSL,
+    _ext_type: u32,
+    _out: *const u8,
+    _add_arg: *mut std::ffi::c_void,
+) {
+}
+
+unsafe extern "C" fn parse_custom_ext(
+    _ssl: *mut ffi::SSL,
+    _ext_type: u32,
+    _input: *const u8,
+    _inlen: usize,
+    _al: *mut c_int,
+    _parse_arg: *mut std::ffi::c_void,
+) -> c_int {
+    1
 }

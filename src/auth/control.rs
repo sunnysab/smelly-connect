@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::io::{Read, Write};
+
+use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use reqwest::header::{CONTENT_TYPE, COOKIE, USER_AGENT};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -17,6 +20,7 @@ use super::{encrypt_password, parse_login_auth};
 pub struct ControlPlaneState {
     pub authorized_twfid: String,
     pub resources: ResourceSet,
+    pub token: Option<crate::protocol::DerivedToken>,
 }
 
 pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlaneState, Error> {
@@ -115,7 +119,39 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
     Ok(ControlPlaneState {
         authorized_twfid,
         resources,
+        token: None,
     })
+}
+
+pub fn request_token(server: &str, twfid: &str) -> Result<crate::protocol::DerivedToken, Error> {
+    let mut builder = SslConnector::builder(SslMethod::tls_client())
+        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+    builder.set_verify(SslVerifyMode::NONE);
+    let connector = builder.build();
+
+    let tcp = std::net::TcpStream::connect(server)
+        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+    let domain = server.split(':').next().unwrap_or(server);
+    let mut stream = connector
+        .connect(domain, tcp)
+        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+
+    let request = format!(
+        "GET /por/conf.csp HTTP/1.1\r\nHost: {server}\r\nCookie: TWFID={twfid}\r\n\r\nGET /por/rclist.csp HTTP/1.1\r\nHost: {server}\r\nCookie: TWFID={twfid}\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+    let mut probe = [0_u8; 8];
+    let _ = stream
+        .read(&mut probe)
+        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
+    let session = stream
+        .ssl()
+        .session()
+        .ok_or_else(|| Error::Bootstrap(BootstrapError::AuthFlowFailed("missing SSL session".to_string())))?;
+    crate::protocol::derive_token(&hex::encode(session.id()), twfid)
+        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(format!("{err:?}"))))
 }
 
 pub mod tests {
