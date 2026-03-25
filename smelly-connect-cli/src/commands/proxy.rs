@@ -6,7 +6,7 @@ pub async fn run_proxy(
     command: &ProxyCommand,
 ) -> Result<(), String> {
     let config = crate::config::merge_proxy_command(config_path, command)?;
-    let pool = crate::pool::SessionPool::from_config(&config)
+    let pool = crate::pool::SessionPool::from_config_allow_empty(&config)
         .await
         .map_err(|err| err.to_string())?;
     let ready = pool.ready_count().await;

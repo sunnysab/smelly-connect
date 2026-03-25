@@ -103,32 +103,23 @@ pub async fn proxy_socks5_no_ready_session_for_test() -> Result<Socks5FailureRes
     })
     .await?;
 
-    let mut client = TcpStream::connect(addr)
-        .await
-        .map_err(|err| err.to_string())?;
-    client
-        .write_all(&[0x05, 0x01, 0x00])
-        .await
-        .map_err(|err| err.to_string())?;
-    let mut method_reply = [0_u8; 2];
-    client
-        .read_exact(&mut method_reply)
-        .await
-        .map_err(|err| err.to_string())?;
+    request_no_ready_session(addr).await
+}
 
-    let request = [0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x01, 0xbb];
-    client
-        .write_all(&request)
-        .await
-        .map_err(|err| err.to_string())?;
-    let mut reply = [0_u8; 10];
-    client
-        .read_exact(&mut reply)
-        .await
-        .map_err(|err| err.to_string())?;
-    Ok(Socks5FailureResult {
-        reply_code: reply[1],
+pub async fn proxy_socks5_no_ready_session_sequence_for_test(
+    count: usize,
+) -> Result<Vec<Socks5FailureResult>, String> {
+    let pool = SessionPool::from_failed_accounts(1).await;
+    let addr = spawn_test_socks5(pool, |_account_name, _host, _port| async move {
+        Err(io::Error::other("unexpected connector use"))
     })
+    .await?;
+
+    let mut results = Vec::with_capacity(count);
+    for _ in 0..count {
+        results.push(request_no_ready_session(addr).await?);
+    }
+    Ok(results)
 }
 
 pub async fn serve_socks5(listen: String, pool: SessionPool) -> Result<(), String> {
@@ -172,6 +163,35 @@ where
         }
     });
     Ok(addr)
+}
+
+async fn request_no_ready_session(addr: SocketAddr) -> Result<Socks5FailureResult, String> {
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut method_reply = [0_u8; 2];
+    client
+        .read_exact(&mut method_reply)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let request = [0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x01, 0xbb];
+    client
+        .write_all(&request)
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut reply = [0_u8; 10];
+    client
+        .read_exact(&mut reply)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(Socks5FailureResult {
+        reply_code: reply[1],
+    })
 }
 
 async fn handle_client<F, Fut>(

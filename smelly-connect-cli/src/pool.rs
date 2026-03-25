@@ -81,6 +81,12 @@ pub struct PoolError {
     message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolStartupMode {
+    RequireReady,
+    AllowEmpty,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeRaceResult {
     pub successes: usize,
@@ -104,6 +110,10 @@ impl Display for PoolError {
 impl std::error::Error for PoolError {}
 
 impl SessionPool {
+    pub async fn from_config_allow_empty(cfg: &AppConfig) -> Result<Self, PoolError> {
+        Self::from_config_with_startup_mode(cfg, PoolStartupMode::AllowEmpty).await
+    }
+
     pub async fn from_test_accounts(total: usize, prewarm: usize) -> Self {
         let mut nodes = Vec::new();
         for idx in 0..total {
@@ -304,6 +314,13 @@ impl SessionPool {
     }
 
     pub async fn from_config(cfg: &AppConfig) -> Result<Self, PoolError> {
+        Self::from_config_with_startup_mode(cfg, PoolStartupMode::RequireReady).await
+    }
+
+    async fn from_config_with_startup_mode(
+        cfg: &AppConfig,
+        startup_mode: PoolStartupMode,
+    ) -> Result<Self, PoolError> {
         tracing::info!(
             accounts = cfg.accounts.len(),
             prewarm = cfg.pool.prewarm,
@@ -340,8 +357,15 @@ impl SessionPool {
             "pool startup summary"
         );
         if ready == 0 {
-            tracing::error!("no ready session after prewarm");
-            return Err(PoolError::new("no ready session after prewarm"));
+            match startup_mode {
+                PoolStartupMode::RequireReady => {
+                    tracing::error!("no ready session after prewarm");
+                    return Err(PoolError::new("no ready session after prewarm"));
+                }
+                PoolStartupMode::AllowEmpty => {
+                    tracing::warn!("starting with no ready session after prewarm");
+                }
+            }
         }
         Ok(pool)
     }

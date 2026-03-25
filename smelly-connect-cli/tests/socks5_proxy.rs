@@ -15,3 +15,13 @@ async fn socks5_proxy_returns_failure_when_no_ready_session_exists() {
         .unwrap();
     assert_eq!(result.reply_code, 0x03);
 }
+
+#[tokio::test]
+async fn socks5_proxy_listener_stays_bound_during_total_pool_outage() {
+    let results =
+        smelly_connect_cli::proxy::socks5::proxy_socks5_no_ready_session_sequence_for_test(2)
+            .await
+            .unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|result| result.reply_code == 0x03));
+}

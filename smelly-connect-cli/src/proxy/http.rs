@@ -138,28 +138,23 @@ pub async fn proxy_http_no_ready_session_for_test() -> Result<NoReadySessionResu
     })
     .await?;
 
-    let mut client = TcpStream::connect(addr)
-        .await
-        .map_err(|err| err.to_string())?;
-    client
-        .write_all(
-            b"GET http://intranet.zju.edu.cn/health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    let mut response = Vec::new();
-    client
-        .read_to_end(&mut response)
-        .await
-        .map_err(|err| err.to_string())?;
-    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
-    let status_line = response.lines().next().unwrap_or_default().to_string();
-    let status_code = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
-    Ok(NoReadySessionResult { status_code })
+    request_no_ready_session(addr).await
+}
+
+pub async fn proxy_http_no_ready_session_sequence_for_test(
+    count: usize,
+) -> Result<Vec<NoReadySessionResult>, String> {
+    let pool = SessionPool::from_failed_accounts(1).await;
+    let addr = spawn_test_proxy(pool, |_account_name, _host, _port| async move {
+        Err(io::Error::other("unexpected connector use"))
+    })
+    .await?;
+
+    let mut results = Vec::with_capacity(count);
+    for _ in 0..count {
+        results.push(request_no_ready_session(addr).await?);
+    }
+    Ok(results)
 }
 
 pub async fn serve_http(listen: String, pool: SessionPool) -> Result<(), String> {
@@ -211,6 +206,31 @@ where
         }
     });
     Ok(addr)
+}
+
+async fn request_no_ready_session(addr: SocketAddr) -> Result<NoReadySessionResult, String> {
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"GET http://intranet.zju.edu.cn/health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let status_line = response.lines().next().unwrap_or_default().to_string();
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+    Ok(NoReadySessionResult { status_code })
 }
 
 async fn handle_client<F, Fut>(
