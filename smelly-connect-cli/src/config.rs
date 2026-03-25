@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub pool: PoolConfig,
     pub accounts: Vec<AccountConfig>,
     pub proxy: ProxyConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,6 +45,80 @@ pub struct ProxyConfig {
 pub struct ListenerConfig {
     pub enabled: bool,
     pub listen: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct LoggingConfig {
+    pub mode: LoggingMode,
+    pub level: LoggingLevel,
+    pub file: String,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            mode: LoggingMode::Stdout,
+            level: LoggingLevel::Info,
+            file: "smelly-connect.log".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoggingMode {
+    #[serde(rename = "stdout")]
+    Stdout,
+    #[serde(rename = "file")]
+    File,
+    #[serde(rename = "stdout+file")]
+    StdoutAndFile,
+    #[serde(rename = "off")]
+    Off,
+}
+
+impl LoggingMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::File => "file",
+            Self::StdoutAndFile => "stdout+file",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl Default for LoggingMode {
+    fn default() -> Self {
+        Self::Stdout
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LoggingLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+impl LoggingLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+        }
+    }
+}
+
+impl Default for LoggingLevel {
+    fn default() -> Self {
+        Self::Info
+    }
 }
 
 pub fn load(path: impl AsRef<Path>) -> Result<AppConfig, String> {

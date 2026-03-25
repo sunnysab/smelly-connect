@@ -1,0 +1,26 @@
+[vpn]
+server = "vpn1.sit.edu.cn"
+
+[pool]
+prewarm = 1
+connect_timeout_secs = 20
+healthcheck_interval_secs = 60
+selection = "round_robin"
+
+[[accounts]]
+name = "acct-01"
+username = "user1"
+password = "pass1"
+
+[proxy.http]
+enabled = true
+listen = "127.0.0.1:8080"
+
+[proxy.socks5]
+enabled = false
+listen = "127.0.0.1:1080"
+
+[logging]
+mode = "file"
+level = "warn"
+file = "smelly-connect.log"
