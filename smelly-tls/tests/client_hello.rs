@@ -23,6 +23,16 @@ fn client_hello_record_matches_easyconnect_shape() {
 }
 
 #[test]
+fn client_hello_record_allows_alternate_legacy_cipher() {
+    let config = ClientHelloConfig::new([0x66; 32], EXPECTED_SESSION_ID)
+        .with_cipher_suite(smelly_tls::TLS_RSA_WITH_AES_128_CBC_SHA);
+    let record = build_client_hello_record(&config);
+    let parsed = parse_client_hello(&record).unwrap();
+
+    assert_eq!(parsed.cipher_suites, vec![0x002f, 0x00ff]);
+}
+
+#[test]
 fn connect_probe_writes_hello_bytes_to_tcp_stream() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();

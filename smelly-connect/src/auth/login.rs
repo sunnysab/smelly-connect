@@ -4,6 +4,7 @@ pub struct LoginAuthResponse {
     pub rsa_key_hex: String,
     pub rsa_exp: u32,
     pub csrf_rand_code: Option<String>,
+    pub legacy_cipher_hint: Option<String>,
     pub requires_captcha: bool,
 }
 
@@ -16,6 +17,7 @@ pub fn parse_login_auth(body: &str) -> Result<LoginAuthResponse, ParseLoginAuthE
         .parse()
         .map_err(|_| ParseLoginAuthError::InvalidRsaExponent)?;
     let csrf_rand_code = extract_tag(body, "CSRF_RAND_CODE").map(ToOwned::to_owned);
+    let legacy_cipher_hint = extract_nested_tag(body, "SSLCipherSuite", "EC").map(ToOwned::to_owned);
     let requires_captcha = extract_tag(body, "RndImg") == Some("1");
 
     Ok(LoginAuthResponse {
@@ -23,6 +25,7 @@ pub fn parse_login_auth(body: &str) -> Result<LoginAuthResponse, ParseLoginAuthE
         rsa_key_hex: rsa_key_hex.to_owned(),
         rsa_exp,
         csrf_rand_code,
+        legacy_cipher_hint,
         requires_captcha,
     })
 }
@@ -57,6 +60,11 @@ fn extract_tag<'a>(body: &'a str, tag: &str) -> Option<&'a str> {
     let start = body.find(&start_tag)? + start_tag.len();
     let end = body[start..].find(&end_tag)? + start;
     Some(body[start..end].trim())
+}
+
+fn extract_nested_tag<'a>(body: &'a str, parent: &str, child: &str) -> Option<&'a str> {
+    let parent_body = extract_tag(body, parent)?;
+    extract_tag(parent_body, child)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

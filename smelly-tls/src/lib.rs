@@ -14,6 +14,7 @@ use x509_cert::Certificate;
 
 pub const TLS11: u16 = 0x0302;
 pub const TLS_RSA_WITH_RC4_128_SHA: u16 = 0x0005;
+pub const TLS_RSA_WITH_AES_128_CBC_SHA: u16 = 0x002f;
 pub const TLS_EMPTY_RENEGOTIATION_INFO_SCSV: u16 = 0x00ff;
 pub const HEARTBEAT_EXTENSION: u16 = 0x000f;
 
@@ -21,11 +22,21 @@ pub const HEARTBEAT_EXTENSION: u16 = 0x000f;
 pub struct ClientHelloConfig {
     pub random: [u8; 32],
     pub session_id: [u8; 32],
+    pub cipher_suite: u16,
 }
 
 impl ClientHelloConfig {
     pub fn new(random: [u8; 32], session_id: [u8; 32]) -> Self {
-        Self { random, session_id }
+        Self {
+            random,
+            session_id,
+            cipher_suite: TLS_RSA_WITH_RC4_128_SHA,
+        }
+    }
+
+    pub fn with_cipher_suite(mut self, cipher_suite: u16) -> Self {
+        self.cipher_suite = cipher_suite;
+        self
     }
 }
 
@@ -36,7 +47,7 @@ pub fn build_client_hello_record(config: &ClientHelloConfig) -> Vec<u8> {
     body.push(config.session_id.len() as u8);
     body.extend_from_slice(&config.session_id);
 
-    let cipher_suites = [TLS_RSA_WITH_RC4_128_SHA, TLS_EMPTY_RENEGOTIATION_INFO_SCSV];
+    let cipher_suites = [config.cipher_suite, TLS_EMPTY_RENEGOTIATION_INFO_SCSV];
     body.extend_from_slice(&((cipher_suites.len() * 2) as u16).to_be_bytes());
     for suite in cipher_suites {
         body.extend_from_slice(&suite.to_be_bytes());

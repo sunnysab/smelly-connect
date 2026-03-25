@@ -12,6 +12,7 @@ async fn login_auth_parses_captcha_requirement() {
     let parsed = smelly_connect::auth::parse_login_auth(body).unwrap();
     assert!(parsed.requires_captcha);
     assert_eq!(parsed.twfid, "dummy-twfid");
+    assert_eq!(parsed.legacy_cipher_hint.as_deref(), Some("RC4-SHA"));
 }
 
 #[tokio::test]
