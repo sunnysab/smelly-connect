@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use smelly_connect::{CaptchaError, CaptchaHandler, EasyConnectClient, Session};
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use crate::config::{AccountConfig, AppConfig};
 
@@ -54,6 +55,10 @@ struct AccountNode {
     flaky_retry: bool,
     consecutive_failures: u32,
     failure_threshold: u32,
+    current_backoff: Duration,
+    backoff_base: Duration,
+    backoff_max: Duration,
+    open_until: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -116,6 +121,10 @@ impl SessionPool {
                 flaky_retry: false,
                 consecutive_failures: 0,
                 failure_threshold: 3,
+                current_backoff: Duration::from_secs(30),
+                backoff_base: Duration::from_secs(30),
+                backoff_max: Duration::from_secs(600),
+                open_until: None,
             });
         }
         Self {
@@ -140,6 +149,10 @@ impl SessionPool {
                 flaky_retry: false,
                 consecutive_failures: 0,
                 failure_threshold: 3,
+                current_backoff: Duration::from_secs(30),
+                backoff_base: Duration::from_secs(30),
+                backoff_max: Duration::from_secs(600),
+                open_until: None,
             })
             .collect();
         Self {
@@ -187,6 +200,10 @@ impl SessionPool {
                 flaky_retry: false,
                 consecutive_failures: 0,
                 failure_threshold: 3,
+                current_backoff: Duration::from_secs(30),
+                backoff_base: Duration::from_secs(30),
+                backoff_max: Duration::from_secs(600),
+                open_until: None,
             });
         }
         Self {
@@ -207,6 +224,10 @@ impl SessionPool {
                 flaky_retry: false,
                 consecutive_failures: 0,
                 failure_threshold: 3,
+                current_backoff: Duration::from_secs(30),
+                backoff_base: Duration::from_secs(30),
+                backoff_max: Duration::from_secs(600),
+                open_until: None,
             });
         }
         Self {
@@ -231,6 +252,10 @@ impl SessionPool {
                     flaky_retry: true,
                     consecutive_failures: 0,
                     failure_threshold: 3,
+                    current_backoff: Duration::from_secs(30),
+                    backoff_base: Duration::from_secs(30),
+                    backoff_max: Duration::from_secs(600),
+                    open_until: None,
                 }],
                 cursor: 0,
             })),
@@ -253,6 +278,10 @@ impl SessionPool {
                 flaky_retry: false,
                 consecutive_failures: 0,
                 failure_threshold: cfg.pool.failure_threshold,
+                current_backoff: Duration::from_secs(cfg.pool.backoff_base_secs),
+                backoff_base: Duration::from_secs(cfg.pool.backoff_base_secs),
+                backoff_max: Duration::from_secs(cfg.pool.backoff_max_secs),
+                open_until: None,
             });
         }
 
@@ -277,6 +306,7 @@ impl SessionPool {
     }
 
     pub async fn ready_count(&self) -> usize {
+        self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
         state
             .nodes
@@ -286,6 +316,7 @@ impl SessionPool {
     }
 
     pub async fn state_summary_for_test(&self) -> String {
+        self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
         state
             .nodes
@@ -306,6 +337,7 @@ impl SessionPool {
     }
 
     pub async fn has_selectable_nodes_for_test(&self) -> bool {
+        self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
         state
             .nodes
@@ -329,6 +361,10 @@ impl SessionPool {
                         flaky_retry: false,
                         consecutive_failures: 0,
                         failure_threshold: 3,
+                        current_backoff: Duration::from_secs(30),
+                        backoff_base: Duration::from_secs(30),
+                        backoff_max: Duration::from_secs(600),
+                        open_until: None,
                     },
                     AccountNode {
                         name: "suspect-01".to_string(),
@@ -342,6 +378,10 @@ impl SessionPool {
                         flaky_retry: false,
                         consecutive_failures: 1,
                         failure_threshold: 3,
+                        current_backoff: Duration::from_secs(30),
+                        backoff_base: Duration::from_secs(30),
+                        backoff_max: Duration::from_secs(600),
+                        open_until: None,
                     },
                     AccountNode {
                         name: "open-01".to_string(),
@@ -351,6 +391,10 @@ impl SessionPool {
                         flaky_retry: false,
                         consecutive_failures: 3,
                         failure_threshold: 3,
+                        current_backoff: Duration::from_secs(30),
+                        backoff_base: Duration::from_secs(30),
+                        backoff_max: Duration::from_secs(600),
+                        open_until: Some(Instant::now() + Duration::from_secs(30)),
                     },
                     AccountNode {
                         name: "half-open-01".to_string(),
@@ -362,6 +406,10 @@ impl SessionPool {
                         flaky_retry: false,
                         consecutive_failures: 3,
                         failure_threshold: 3,
+                        current_backoff: Duration::from_secs(30),
+                        backoff_base: Duration::from_secs(30),
+                        backoff_max: Duration::from_secs(600),
+                        open_until: None,
                     },
                 ],
                 cursor: 0,
@@ -382,11 +430,48 @@ impl SessionPool {
         out
     }
 
+    pub async fn current_backoff_for_test(&self) -> Duration {
+        let state = self.inner.lock().await;
+        state
+            .nodes
+            .first()
+            .map(|node| node.current_backoff)
+            .unwrap_or_default()
+    }
+
+    pub async fn force_probe_failure_for_test(&self) {
+        let mut state = self.inner.lock().await;
+        if let Some(node) = state.nodes.first_mut() {
+            node.current_backoff = next_backoff(node.current_backoff, node.backoff_base, node.backoff_max);
+            node.open_until = Some(Instant::now() + node.current_backoff);
+            node.state = AccountState::Open(AccountFailure {
+                message: "forced probe failure".to_string(),
+            });
+            let name = node.name.clone();
+            let backoff = node.current_backoff;
+            let account = AccountConfig {
+                name: node.name.clone(),
+                username: node.name.clone(),
+                password: "pass".to_string(),
+            };
+            let inner = Arc::clone(&self.inner);
+            drop(state);
+            tokio::spawn(async move {
+                tokio::time::sleep(backoff).await;
+                let mut state = inner.lock().await;
+                if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
+                    node.state = AccountState::HalfOpen(account);
+                }
+            });
+        }
+    }
+
     pub async fn next_account_name(&self) -> Result<String, PoolError> {
         Ok(self.next_session().await?.account_name().to_string())
     }
 
     pub async fn next_session(&self) -> Result<PooledSession, PoolError> {
+        self.refresh_time_based_states().await;
         let mut state = self.inner.lock().await;
         let ready: Vec<_> = state
             .nodes
@@ -458,6 +543,7 @@ impl SessionPool {
                     };
 
                     if node.consecutive_failures >= node.failure_threshold {
+                        node.open_until = Some(Instant::now() + node.current_backoff);
                         tracing::warn!(
                             account = %name,
                             failures = node.consecutive_failures,
@@ -487,15 +573,11 @@ impl SessionPool {
                     tokio::time::sleep(retry_delay).await;
                     let mut state = inner.lock().await;
                     if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
-                        node.state = AccountState::Ready(
-                            PooledSession {
-                                account_name: node.name.clone(),
-                                session: None,
-                            }
-                            .into(),
-                        );
-                        node.consecutive_failures = 0;
-                        tracing::info!(account = %node.name, "account ready");
+                        node.state = AccountState::HalfOpen(AccountConfig {
+                            name: node.name.clone(),
+                            username: node.name.clone(),
+                            password: "pass".to_string(),
+                        });
                     }
                 });
             }
@@ -503,6 +585,7 @@ impl SessionPool {
     }
 
     pub async fn next_live_session(&self) -> Result<(String, Session), PoolError> {
+        self.refresh_time_based_states().await;
         if let Some(ready) = self.next_ready_with_session().await? {
             return Ok(ready);
         }
@@ -523,6 +606,7 @@ impl SessionPool {
     }
 
     async fn next_ready_with_session(&self) -> Result<Option<(String, Session)>, PoolError> {
+        self.refresh_time_based_states().await;
         let mut state = self.inner.lock().await;
         let ready: Vec<_> = state
             .nodes
@@ -598,6 +682,23 @@ impl SessionPool {
             }
         }
     }
+
+    async fn refresh_time_based_states(&self) {
+        let mut state = self.inner.lock().await;
+        let now = Instant::now();
+        for node in &mut state.nodes {
+            if let (AccountState::Open(_), Some(open_until)) = (&node.state, node.open_until)
+                && now >= open_until
+            {
+                node.state = AccountState::HalfOpen(AccountConfig {
+                    name: node.name.clone(),
+                    username: node.name.clone(),
+                    password: "pass".to_string(),
+                });
+                node.open_until = None;
+            }
+        }
+    }
 }
 
 async fn connect_account(
@@ -619,4 +720,15 @@ async fn connect_account(
         .await
         .map_err(|_| PoolError::new("session connect timeout"))?
         .map_err(|err| PoolError::new(format!("{err:?}")))
+}
+
+fn next_backoff(current: Duration, base: Duration, max: Duration) -> Duration {
+    let doubled = current.saturating_mul(2);
+    if doubled < base {
+        base
+    } else if doubled > max {
+        max
+    } else {
+        doubled
+    }
 }

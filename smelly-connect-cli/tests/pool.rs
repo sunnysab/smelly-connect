@@ -107,3 +107,22 @@ async fn normal_selection_uses_ready_and_suspect_but_excludes_open_and_half_open
             .all(|name| name == "ready-01" || name == "suspect-01")
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn backoff_grows_exponentially_and_respects_maximum() {
+    let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
+    pool.force_failures_for_test(3).await;
+    let first = pool.current_backoff_for_test().await;
+    pool.force_probe_failure_for_test().await;
+    let second = pool.current_backoff_for_test().await;
+    assert!(second > first);
+    assert!(second <= std::time::Duration::from_secs(600));
+}
+
+#[tokio::test(start_paused = true)]
+async fn open_node_reenters_via_timer_into_half_open_after_backoff_expiry() {
+    let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
+    pool.force_failures_for_test(3).await;
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    assert!(pool.state_summary_for_test().await.contains("HalfOpen"));
+}
