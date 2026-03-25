@@ -1,0 +1,6 @@
+<Resource>
+  <Rcs>
+    <Rc type="1" proto="-1" host="10.0.0.1~10.0.0.10;https://zju.edu.cn/" port="1~65535;443~443" />
+  </Rcs>
+  <Dns data="1:libdb.zju.edu.cn:10.0.0.8" dnsserver="10.10.0.21" />
+</Resource>

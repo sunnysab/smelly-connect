@@ -1,0 +1,10 @@
+[package]
+name = "smelly-tls"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "smelly_tls"
+path = "src/lib.rs"
+
+[dependencies]
