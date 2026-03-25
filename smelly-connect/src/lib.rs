@@ -22,4 +22,6 @@ pub use facade::client::EasyConnectClient;
 pub use auth::captcha::CaptchaHandler;
 pub use config::EasyConnectConfig;
 pub use error::{CaptchaError, Error};
+pub use proxy::http::ProxyHandle;
+pub use runtime::tasks::keepalive::KeepaliveHandle;
 pub use target::TargetAddr;

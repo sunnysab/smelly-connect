@@ -7,28 +7,30 @@ use tokio::sync::oneshot;
 
 use crate::session::EasyConnectSession;
 
-pub struct HttpProxyHandle {
+pub struct ProxyHandle {
     local_addr: SocketAddr,
     shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
-impl HttpProxyHandle {
+pub type HttpProxyHandle = ProxyHandle;
+
+impl ProxyHandle {
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
-    #[allow(dead_code)]
-    pub async fn shutdown(mut self) {
+    pub async fn shutdown(mut self) -> io::Result<()> {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
+        Ok(())
     }
 }
 
 pub async fn start_http_proxy(
     session: EasyConnectSession,
     bind: SocketAddr,
-) -> io::Result<HttpProxyHandle> {
+) -> io::Result<ProxyHandle> {
     let listener = TcpListener::bind(bind).await?;
     let local_addr = listener.local_addr()?;
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
@@ -48,7 +50,7 @@ pub async fn start_http_proxy(
         }
     });
 
-    Ok(HttpProxyHandle {
+    Ok(ProxyHandle {
         local_addr,
         shutdown_tx: Some(shutdown_tx),
     })

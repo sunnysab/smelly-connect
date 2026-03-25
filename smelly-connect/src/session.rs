@@ -8,8 +8,9 @@ use tokio::io::duplex;
 
 use crate::config::EasyConnectConfig;
 use crate::error::{Error, IntegrationError, ProxyError, RouteError, TransportError};
-use crate::proxy::http::HttpProxyHandle;
+use crate::proxy::http::ProxyHandle;
 use crate::resolver::SessionResolver;
+use crate::runtime::tasks::keepalive::KeepaliveHandle;
 use crate::resource::{DomainRule, IpRule, ResourceSet};
 use crate::target::TargetAddr;
 use crate::transport::device::PacketDevice;
@@ -117,10 +118,37 @@ impl EasyConnectSession {
         }
     }
 
-    pub async fn start_http_proxy(&self, bind: SocketAddr) -> Result<HttpProxyHandle, Error> {
+    pub async fn start_http_proxy(&self, bind: SocketAddr) -> Result<ProxyHandle, Error> {
         crate::proxy::http::start_http_proxy(self.clone(), bind)
             .await
             .map_err(|err| Error::Proxy(ProxyError::BindFailed(err.to_string())))
+    }
+
+    pub fn start_icmp_keepalive<T>(&self, target: T, interval: Duration) -> KeepaliveHandle
+    where
+        T: Into<IcmpKeepAliveTarget>,
+    {
+        let target = target.into();
+        let transport = self.transport.clone();
+        let resolver = self.resolver.clone();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    _ = async {
+                        if let Ok(ip) = resolve_keepalive_target(&resolver, &target).await {
+                            let _ = transport.icmp_ping(ip).await;
+                        }
+                        tokio::time::sleep(interval).await;
+                    } => {}
+                }
+            }
+        });
+        KeepaliveHandle {
+            shutdown_tx: Some(shutdown_tx),
+            task,
+        }
     }
 
     pub async fn reqwest_client(&self) -> Result<reqwest::Client, Error> {
