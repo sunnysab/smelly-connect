@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use foreign_types::{ForeignType, ForeignTypeRef};
 use openssl::error::ErrorStack;
 use openssl::provider::Provider;
-use openssl::ssl::{SslConnector, SslConnectorBuilder, SslMethod, SslRef, SslSession, SslVerifyMode, SslVersion};
+use openssl::ssl::{Ssl, SslConnector, SslContextBuilder, SslMethod, SslRef, SslSession, SslVerifyMode, SslVersion};
 use openssl_sys as ffi;
 
 pub const HEARTBEAT_EXT_TYPE: u16 = 0x000f;
@@ -68,7 +68,16 @@ pub fn build_easyconnect_connector() -> Result<SslConnector, ErrorStack> {
     Ok(builder.build())
 }
 
-pub fn configure_easyconnect_context(builder: &mut SslConnectorBuilder) -> Result<(), ErrorStack> {
+pub fn build_easyconnect_probe_ssl() -> Result<Ssl, ErrorStack> {
+    let mut builder = SslContextBuilder::new(SslMethod::tls_client())?;
+    configure_easyconnect_context(&mut builder)?;
+    let context = builder.build();
+    let mut ssl = Ssl::new(&context)?;
+    configure_easyconnect_ssl_probe(&mut ssl)?;
+    Ok(ssl)
+}
+
+pub fn configure_easyconnect_context(builder: &mut SslContextBuilder) -> Result<(), ErrorStack> {
     builder.set_verify(SslVerifyMode::NONE);
     unsafe {
         if SSL_CTX_add_client_custom_ext(

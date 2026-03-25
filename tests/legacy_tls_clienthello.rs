@@ -14,7 +14,7 @@ use openssl::x509::{X509, X509NameBuilder};
 use openssl_sys as ffi;
 use smelly_connect::protocol::legacy_tls::{
     EASYCONNECT_SESSION_ID, HEARTBEAT_EXT_TYPE, PROBE_EXT_TYPE, build_easyconnect_connector,
-    configure_easyconnect_ssl, configure_easyconnect_ssl_probe,
+    build_easyconnect_probe_ssl, configure_easyconnect_ssl,
 };
 
 #[derive(Debug)]
@@ -56,10 +56,7 @@ fn easyconnect_clienthello_probe_sets_tls11_and_session_id() {
         let _ = acceptor.accept(stream);
     });
 
-    let connector = build_easyconnect_connector().unwrap();
-    let config = connector.configure().unwrap();
-    let mut ssl = config.into_ssl("localhost").unwrap();
-    configure_easyconnect_ssl_probe(&mut ssl).unwrap();
+    let ssl = build_easyconnect_probe_ssl().unwrap();
     let stream = TcpStream::connect(addr).unwrap();
     let _ = ssl.connect(stream);
 
@@ -88,10 +85,7 @@ fn easyconnect_clienthello_probe_is_visible_on_wire() {
         tx.send(hello).unwrap();
     });
 
-    let connector = build_easyconnect_connector().unwrap();
-    let config = connector.configure().unwrap();
-    let mut ssl = config.into_ssl("localhost").unwrap();
-    configure_easyconnect_ssl_probe(&mut ssl).unwrap();
+    let ssl = build_easyconnect_probe_ssl().unwrap();
     let stream = TcpStream::connect(addr).unwrap();
     let _ = ssl.connect(stream);
 
@@ -101,7 +95,11 @@ fn easyconnect_clienthello_probe_is_visible_on_wire() {
 
     assert_eq!(parsed.legacy_version, 0x0302);
     assert_eq!(parsed.session_id, EASYCONNECT_SESSION_ID);
-    assert!(!parsed.compression_methods.is_empty());
+    // Go reference capture against the same raw TCP server produced:
+    // cipher_suites=[0x0005, 0x00ff], compression_methods=[1, 0], extensions=[0x000f].
+    // On this OpenSSL 3.6.1 host, the probe can match TLS1.1/session-id/custom-ext-on-wire
+    // but still only emits compression_methods=[0].
+    assert_eq!(parsed.compression_methods, vec![0]);
     assert!(parsed.extension_ids.contains(&PROBE_EXT_TYPE));
     assert!(parsed.extension_ids.contains(&HEARTBEAT_EXT_TYPE));
 }
@@ -126,10 +124,7 @@ fn easyconnect_clienthello_probe_does_not_offer_rc4_on_this_host() {
         tx.send(hello).unwrap();
     });
 
-    let connector = build_easyconnect_connector().unwrap();
-    let config = connector.configure().unwrap();
-    let mut ssl = config.into_ssl("localhost").unwrap();
-    configure_easyconnect_ssl_probe(&mut ssl).unwrap();
+    let ssl = build_easyconnect_probe_ssl().unwrap();
     let stream = TcpStream::connect(addr).unwrap();
     let _ = ssl.connect(stream);
 
