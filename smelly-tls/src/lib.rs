@@ -67,3 +67,69 @@ pub async fn connect_hello_probe(addr: SocketAddr, config: &ClientHelloConfig) -
     let record = build_client_hello_record(config);
     tokio::io::AsyncWriteExt::write_all(&mut stream, &record).await
 }
+
+#[cfg(feature = "tokio")]
+pub struct ServerHelloResult {
+    pub server_session_id: [u8; 32],
+    pub derived_token: [u8; 48],
+}
+
+#[cfg(feature = "tokio")]
+pub async fn connect_and_read_server_hello(
+    addr: SocketAddr,
+    config: &ClientHelloConfig,
+    twfid: &str,
+) -> io::Result<ServerHelloResult> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await?;
+    let hello = build_client_hello_record(config);
+    stream.write_all(&hello).await?;
+
+    let mut header = [0_u8; 5];
+    stream.read_exact(&mut header).await?;
+    let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+    let mut body = vec![0_u8; len];
+    stream.read_exact(&mut body).await?;
+    let record = [header.to_vec(), body].concat();
+
+    let server_session_id = parse_server_hello_session_id(&record)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid server hello"))?;
+    let derived_token = derive_easyconnect_token(&server_session_id, twfid)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid token shape"))?;
+
+    Ok(ServerHelloResult {
+        server_session_id,
+        derived_token,
+    })
+}
+
+pub fn parse_server_hello_session_id(record: &[u8]) -> Option<[u8; 32]> {
+    if record.len() < 9 || record[0] != 22 || record[5] != 2 {
+        return None;
+    }
+
+    let mut idx = 9;
+    idx += 2;
+    idx += 32;
+    let sid_len = *record.get(idx)? as usize;
+    idx += 1;
+    if sid_len != 32 {
+        return None;
+    }
+    let mut session_id = [0_u8; 32];
+    session_id.copy_from_slice(record.get(idx..idx + sid_len)?);
+    Some(session_id)
+}
+
+pub fn derive_easyconnect_token(session_id: &[u8; 32], twfid: &str) -> Option<[u8; 48]> {
+    let session_hex = hex::encode(session_id);
+    let token = format!("{}\0{twfid}", &session_hex[..31]);
+    let bytes = token.as_bytes();
+    if bytes.len() != 48 {
+        return None;
+    }
+    let mut out = [0_u8; 48];
+    out.copy_from_slice(bytes);
+    Some(out)
+}

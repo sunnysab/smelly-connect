@@ -75,6 +75,43 @@ async fn async_connect_probe_writes_hello_bytes_to_tcp_stream() {
     assert_eq!(parsed.cipher_suites, vec![0x0005, 0x00ff]);
 }
 
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_read_server_hello_extracts_session_id_and_derives_token() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_session_id = *b"0123456789abcdef0123456789abcdef";
+
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut header = [0_u8; 5];
+        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut header)
+            .await
+            .unwrap();
+        let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        let mut body = vec![0_u8; len];
+        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut body)
+            .await
+            .unwrap();
+        let server_hello = build_server_hello_record(server_session_id);
+        tokio::io::AsyncWriteExt::write_all(&mut stream, &server_hello)
+            .await
+            .unwrap();
+    });
+
+    let config = ClientHelloConfig::new([0x44; 32], EXPECTED_SESSION_ID);
+    let result = smelly_tls::connect_and_read_server_hello(addr, &config, "abcdefghijklmnop")
+        .await
+        .unwrap();
+
+    server.await.unwrap();
+    assert_eq!(result.server_session_id, server_session_id);
+    assert_eq!(
+        std::str::from_utf8(&result.derived_token).unwrap(),
+        "3031323334353637383961626364656\0abcdefghijklmnop"
+    );
+}
+
 struct ParsedClientHello {
     legacy_version: u16,
     session_id: [u8; 32],
@@ -131,4 +168,29 @@ fn parse_client_hello(record: &[u8]) -> Option<ParsedClientHello> {
         compression_methods,
         extension_ids,
     })
+}
+
+#[cfg(feature = "tokio")]
+fn build_server_hello_record(session_id: [u8; 32]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&0x0302_u16.to_be_bytes());
+    body.extend_from_slice(&[0x55; 32]);
+    body.push(session_id.len() as u8);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&0x0005_u16.to_be_bytes());
+    body.push(0);
+    body.extend_from_slice(&0_u16.to_be_bytes());
+
+    let mut handshake = Vec::new();
+    handshake.push(2);
+    let body_len = body.len() as u32;
+    handshake.extend_from_slice(&body_len.to_be_bytes()[1..4]);
+    handshake.extend_from_slice(&body);
+
+    let mut record = Vec::new();
+    record.push(22);
+    record.extend_from_slice(&0x0302_u16.to_be_bytes());
+    record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+    record.extend_from_slice(&handshake);
+    record
 }
