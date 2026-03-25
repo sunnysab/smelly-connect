@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::duplex;
 
@@ -17,6 +18,12 @@ use crate::transport::{TransportStack, VpnStream};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoutePlan {
     VpnResolved(SocketAddr),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IcmpKeepAliveTarget {
+    Ip(Ipv4Addr),
+    Host(String),
 }
 
 #[derive(Clone)]
@@ -67,6 +74,33 @@ impl EasyConnectSession {
 
     pub fn client_ip(&self) -> Ipv4Addr {
         self.client_ip
+    }
+
+    pub fn spawn_icmp_keepalive_task(
+        &self,
+        target: IcmpKeepAliveTarget,
+        interval: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let transport = self.transport.clone();
+        let resolver = self.resolver.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok(ip) = resolve_keepalive_target(&resolver, &target).await {
+                    let _ = transport.icmp_ping(ip).await;
+                }
+                tokio::time::sleep(interval).await;
+            }
+        })
+    }
+
+    pub async fn icmp_ping(&self, target: IcmpKeepAliveTarget) -> Result<(), Error> {
+        let ip = resolve_keepalive_target(&self.resolver, &target)
+            .await
+            .map_err(Error::Resolve)?;
+        self.transport
+            .icmp_ping(ip)
+            .await
+            .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string())))
     }
 
     pub async fn connect_tcp<T>(&self, target: T) -> Result<VpnStream, Error>
@@ -162,8 +196,22 @@ impl EasyConnectSession {
     }
 }
 
+async fn resolve_keepalive_target(
+    resolver: &SessionResolver,
+    target: &IcmpKeepAliveTarget,
+) -> Result<Ipv4Addr, crate::error::ResolveError> {
+    match target {
+        IcmpKeepAliveTarget::Ip(ip) => Ok(*ip),
+        IcmpKeepAliveTarget::Host(host) => match resolver.resolve_for_vpn(host).await? {
+            IpAddr::V4(ip) => Ok(ip),
+            IpAddr::V6(_) => Err(crate::error::ResolveError::NoRecordFound),
+        },
+    }
+}
+
 pub mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub fn fake_session_without_match() -> EasyConnectSession {
         EasyConnectSession::new(
@@ -183,15 +231,9 @@ pub mod tests {
         pub fn config(&self) -> EasyConnectConfig {
             let host = Arc::clone(&self.host);
             let ip = self.ip;
-            EasyConnectConfig {
-                server: "rvpn.example.com".to_string(),
-                username: "user".to_string(),
-                password: "pass".to_string(),
-                base_url: None,
-                captcha_handler: None,
-                session_factory: Some(Arc::new(move || Ok(ready_session(host.as_ref(), ip)))),
-                session_bootstrap: None,
-            }
+            let mut config = EasyConnectConfig::new("rvpn.example.com", "user", "pass");
+            config.session_factory = Some(Arc::new(move || Ok(ready_session(host.as_ref(), ip))));
+            config
         }
 
         pub async fn ready_session(&self) -> EasyConnectSession {
@@ -209,6 +251,23 @@ pub mod tests {
     #[allow(dead_code)]
     pub fn session_with_domain_match(host: &str, ip: Ipv4Addr) -> EasyConnectSession {
         ready_session(host, ip)
+    }
+
+    pub fn session_with_icmp_ping(counter: Arc<AtomicUsize>) -> EasyConnectSession {
+        let transport = ready_transport().with_icmp_pinger(move |_| {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        });
+
+        EasyConnectSession::new(
+            Ipv4Addr::new(10, 0, 0, 8),
+            ResourceSet::default(),
+            SessionResolver::new(HashMap::new(), None, HashMap::new()),
+            transport,
+        )
     }
 
     fn ready_session(host: &str, ip: Ipv4Addr) -> EasyConnectSession {
@@ -247,4 +306,25 @@ pub mod tests {
         })
     }
 
+}
+
+impl From<Ipv4Addr> for IcmpKeepAliveTarget {
+    fn from(value: Ipv4Addr) -> Self {
+        Self::Ip(value)
+    }
+}
+
+impl From<String> for IcmpKeepAliveTarget {
+    fn from(value: String) -> Self {
+        match value.parse() {
+            Ok(ip) => Self::Ip(ip),
+            Err(_) => Self::Host(value),
+        }
+    }
+}
+
+impl From<&str> for IcmpKeepAliveTarget {
+    fn from(value: &str) -> Self {
+        value.to_string().into()
+    }
 }

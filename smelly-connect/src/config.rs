@@ -1,14 +1,21 @@
-use std::sync::Arc;
 use std::future::pending;
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::auth::{CaptchaHandler, ControlPlaneState, run_control_plane};
 use crate::error::Error;
-use crate::session::EasyConnectSession;
+use crate::session::{EasyConnectSession, IcmpKeepAliveTarget};
 use crate::resolver::SessionResolver;
 
 type SessionFactory = dyn Fn() -> Result<EasyConnectSession, Error> + Send + Sync + 'static;
 type SessionBootstrap =
     dyn Fn(ControlPlaneState) -> Result<EasyConnectSession, Error> + Send + Sync + 'static;
+
+#[derive(Clone)]
+struct IcmpKeepAliveConfig {
+    target: IcmpKeepAliveTarget,
+    interval: Duration,
+}
 
 pub struct EasyConnectConfig {
     pub server: String,
@@ -18,6 +25,7 @@ pub struct EasyConnectConfig {
     pub(crate) captcha_handler: Option<CaptchaHandler>,
     pub(crate) session_factory: Option<Arc<SessionFactory>>,
     pub(crate) session_bootstrap: Option<Arc<SessionBootstrap>>,
+    icmp_keepalive: Option<IcmpKeepAliveConfig>,
 }
 
 impl EasyConnectConfig {
@@ -34,6 +42,7 @@ impl EasyConnectConfig {
             captcha_handler: None,
             session_factory: None,
             session_bootstrap: None,
+            icmp_keepalive: None,
         }
     }
 
@@ -52,6 +61,26 @@ impl EasyConnectConfig {
         F: Fn(ControlPlaneState) -> Result<EasyConnectSession, Error> + Send + Sync + 'static,
     {
         self.session_bootstrap = Some(Arc::new(bootstrap));
+        self
+    }
+
+    pub fn with_icmp_keepalive(mut self, target: impl Into<String>) -> Self {
+        let target = target.into();
+        let target = match target.parse() {
+            Ok(ip) => IcmpKeepAliveTarget::Ip(ip),
+            Err(_) => IcmpKeepAliveTarget::Host(target),
+        };
+        self.icmp_keepalive = Some(IcmpKeepAliveConfig {
+            target,
+            interval: Duration::from_secs(60),
+        });
+        self
+    }
+
+    pub fn with_icmp_keepalive_interval(mut self, interval: Duration) -> Self {
+        if let Some(keepalive) = self.icmp_keepalive.as_mut() {
+            keepalive.interval = interval;
+        }
         self
     }
 
@@ -104,12 +133,18 @@ impl EasyConnectConfig {
                 .map_err(|err| {
                     Error::Transport(crate::error::TransportError::ConnectFailed(err.to_string()))
                 })?;
-        Ok(EasyConnectSession::new(
+        let session = EasyConnectSession::new(
             client_ip,
             state.resources,
             SessionResolver::new(std::collections::HashMap::new(), None, system_dns),
             transport,
         )
-        .with_legacy_data_plane(server_addr, token, state.legacy_cipher_hint))
+        .with_legacy_data_plane(server_addr, token, state.legacy_cipher_hint);
+        if let Some(keepalive) = &self.icmp_keepalive {
+            std::mem::drop(
+                session.spawn_icmp_keepalive_task(keepalive.target.clone(), keepalive.interval),
+            );
+        }
+        Ok(session)
     }
 }

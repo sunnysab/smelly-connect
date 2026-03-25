@@ -7,10 +7,11 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::socket::icmp::{self, PacketBuffer as IcmpPacketBuffer, PacketMetadata as IcmpPacketMetadata};
 use smoltcp::socket::tcp::{self, SocketBuffer};
 use smoltcp::time::{Duration as SmolDuration, Instant};
-use smoltcp::wire::{HardwareAddress, IpCidr, Ipv4Cidr};
+use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, Ipv4Cidr};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Notify, mpsc};
 
@@ -21,6 +22,9 @@ use crate::transport::{TransportStack, VpnStream};
 const TCP_BUFFER_SIZE: usize = 64 * 1024;
 const TCP_KEEPALIVE_SECS: u64 = 30;
 const TCP_TIMEOUT_SECS: u64 = 120;
+const ICMP_BUFFER_SIZE: usize = 256;
+const ICMP_KEEPALIVE_IDENT: u16 = 0x534d;
+const ICMP_PING_TIMEOUT_MILLIS: u64 = 5_000;
 
 #[derive(Clone)]
 struct SmolStack {
@@ -38,6 +42,7 @@ struct NetstackState {
     sockets: SocketSet<'static>,
     active_handles: std::collections::HashSet<SocketHandle>,
     next_port: u16,
+    next_icmp_seq: u16,
 }
 
 struct QueueDevice {
@@ -68,6 +73,7 @@ pub fn build_transport_from_packet_device(
         .ok_or_else(|| io::Error::other("missing inbound rx"))?;
     let outbound_tx = device.outbound_sender();
     let stack = SmolStack::new(local_ip, inbound_rx, outbound_tx);
+    let ping_stack = stack.clone();
 
     Ok(TransportStack::new(move |target: TargetAddr| {
         let stack = stack.clone();
@@ -75,6 +81,10 @@ pub fn build_transport_from_packet_device(
             let addr = socket_addr_from_target(target)?;
             stack.connect(addr).await
         }
+    })
+    .with_icmp_pinger(move |target| {
+        let stack = ping_stack.clone();
+        async move { stack.ping(target).await }
     }))
 }
 
@@ -106,6 +116,7 @@ impl SmolStack {
                 sockets: SocketSet::new(vec![]),
                 active_handles: std::collections::HashSet::new(),
                 next_port: 10000,
+                next_icmp_seq: 1,
             }),
             wake: Notify::new(),
         });
@@ -154,6 +165,82 @@ impl SmolStack {
             stack: Arc::clone(&self.inner),
             handle,
         }))
+    }
+
+    async fn ping(&self, target: Ipv4Addr) -> io::Result<()> {
+        let (handle, seq_no) = {
+            let mut state = self.inner.state.lock().expect("netstack mutex poisoned");
+            let socket = icmp_socket();
+            let handle = state.sockets.add(socket);
+            state.active_handles.insert(handle);
+            let seq_no = state.next_icmp_seq();
+            let mut packet = [0_u8; 8];
+            let repr = Icmpv4Repr::EchoRequest {
+                ident: ICMP_KEEPALIVE_IDENT,
+                seq_no,
+                data: &[],
+            };
+            repr.emit(
+                &mut Icmpv4Packet::new_unchecked(&mut packet),
+                &ChecksumCapabilities::default(),
+            );
+            state
+                .sockets
+                .get_mut::<icmp::Socket<'static>>(handle)
+                .bind(icmp::Endpoint::Ident(ICMP_KEEPALIVE_IDENT))
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            state
+                .sockets
+                .get_mut::<icmp::Socket<'static>>(handle)
+                .send_slice(&packet, IpAddress::Ipv4(target.into()))
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            (handle, seq_no)
+        };
+
+        self.inner.wake.notify_one();
+
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(ICMP_PING_TIMEOUT_MILLIS);
+        let result = loop {
+            let maybe_reply = {
+                let mut state = self.inner.state.lock().expect("netstack mutex poisoned");
+                let socket = state.sockets.get_mut::<icmp::Socket<'static>>(handle);
+                if socket.can_recv() {
+                    let mut buffer = [0_u8; ICMP_BUFFER_SIZE];
+                    let (n, _) = socket
+                        .recv_slice(&mut buffer)
+                        .map_err(|err| io::Error::other(err.to_string()))?;
+                    let packet = Icmpv4Packet::new_checked(&buffer[..n])
+                        .map_err(|err| io::Error::other(err.to_string()))?;
+                    match Icmpv4Repr::parse(&packet, &ChecksumCapabilities::default())
+                        .map_err(|err| io::Error::other(err.to_string()))?
+                    {
+                        Icmpv4Repr::EchoReply { ident, seq_no, .. } => Some((ident, seq_no)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if let Some((ident, reply_seq)) = maybe_reply {
+                if ident == ICMP_KEEPALIVE_IDENT && reply_seq == seq_no {
+                    break Ok(());
+                }
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                break Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "icmp ping timed out",
+                ));
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+
+        self.inner.remove_socket(handle);
+        result
     }
 }
 
@@ -261,6 +348,12 @@ impl NetstackState {
             self.next_port + 1
         };
         self.next_port
+    }
+
+    fn next_icmp_seq(&mut self) -> u16 {
+        let seq = self.next_icmp_seq;
+        self.next_icmp_seq = self.next_icmp_seq.wrapping_add(1);
+        seq
     }
 }
 
@@ -456,4 +549,10 @@ fn tcp_socket() -> tcp::Socket<'static> {
     socket.set_keep_alive(Some(SmolDuration::from_secs(TCP_KEEPALIVE_SECS)));
     socket.set_timeout(Some(SmolDuration::from_secs(TCP_TIMEOUT_SECS)));
     socket
+}
+
+fn icmp_socket() -> icmp::Socket<'static> {
+    let rx = IcmpPacketBuffer::new(vec![IcmpPacketMetadata::EMPTY], vec![0; ICMP_BUFFER_SIZE]);
+    let tx = IcmpPacketBuffer::new(vec![IcmpPacketMetadata::EMPTY], vec![0; ICMP_BUFFER_SIZE]);
+    icmp::Socket::new(rx, tx)
 }

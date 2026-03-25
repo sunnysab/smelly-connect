@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::io;
+use std::net::Ipv4Addr;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -7,11 +8,14 @@ use crate::TargetAddr;
 use crate::transport::stream::VpnStream;
 
 type ConnectFuture = Pin<Box<dyn Future<Output = io::Result<VpnStream>> + Send + 'static>>;
+type PingFuture = Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'static>>;
 type Connector = dyn Fn(TargetAddr) -> ConnectFuture + Send + Sync + 'static;
+type Pinger = dyn Fn(Ipv4Addr) -> PingFuture + Send + Sync + 'static;
 
 #[derive(Clone)]
 pub struct TransportStack {
     connector: Arc<Connector>,
+    pinger: Option<Arc<Pinger>>,
 }
 
 impl TransportStack {
@@ -22,7 +26,17 @@ impl TransportStack {
     {
         Self {
             connector: Arc::new(move |target| Box::pin(connector(target))),
+            pinger: None,
         }
+    }
+
+    pub fn with_icmp_pinger<F, Fut>(mut self, pinger: F) -> Self
+    where
+        F: Fn(Ipv4Addr) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = io::Result<()>> + Send + 'static,
+    {
+        self.pinger = Some(Arc::new(move |target| Box::pin(pinger(target))));
+        self
     }
 
     pub async fn connect<T>(&self, target: T) -> io::Result<VpnStream>
@@ -30,5 +44,12 @@ impl TransportStack {
         T: Into<TargetAddr>,
     {
         (self.connector)(target.into()).await
+    }
+
+    pub async fn icmp_ping(&self, target: Ipv4Addr) -> io::Result<()> {
+        match &self.pinger {
+            Some(pinger) => pinger(target).await,
+            None => Err(io::Error::other("icmp ping unsupported")),
+        }
     }
 }

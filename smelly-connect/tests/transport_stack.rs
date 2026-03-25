@@ -35,3 +35,19 @@ async fn session_connect_tcp_returns_async_stream() {
     let session = harness.ready_session().await;
     let _stream = session.connect_tcp(("10.0.0.8", 443)).await.unwrap();
 }
+
+#[tokio::test]
+async fn session_keepalive_task_invokes_transport_icmp_ping() {
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let session = smelly_connect::session::tests::session_with_icmp_ping(counter.clone());
+    let handle = session.spawn_icmp_keepalive_task(
+        smelly_connect::session::IcmpKeepAliveTarget::Ip("10.0.0.8".parse().unwrap()),
+        std::time::Duration::from_millis(20),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+    handle.abort();
+    assert!(
+        counter.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "expected at least two icmp keepalive attempts"
+    );
+}

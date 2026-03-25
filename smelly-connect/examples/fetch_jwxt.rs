@@ -22,18 +22,31 @@ async fn main() {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0);
+    let idle_mode = std::env::var("IDLE_MODE")
+        .ok()
+        .map(|value| value == "1")
+        .unwrap_or(false);
     let smoke_tcp = std::env::var("SMOKE_TCP")
         .ok()
         .map(|value| value == "1")
         .unwrap_or(false);
+    let smoke_icmp = std::env::var("SMOKE_ICMP")
+        .ok()
+        .map(|value| value == "1")
+        .unwrap_or(false);
 
-    let config = EasyConnectConfig::new(server, username, password).with_captcha_handler(
+    let mut config = EasyConnectConfig::new(server, username, password).with_captcha_handler(
         CaptchaHandler::from_async(|_, _| async move {
             Err(CaptchaError::new(
                 "captcha callback not expected for this server",
             ))
         }),
     );
+    if let Ok(target) = std::env::var("KEEPALIVE_ICMP_TARGET") {
+        config = config
+            .with_icmp_keepalive(target)
+            .with_icmp_keepalive_interval(Duration::from_secs(60));
+    }
 
     let session = config.connect().await.expect("vpn connect");
     println!("client ip: {}", session.client_ip());
@@ -50,6 +63,17 @@ async fn main() {
         return;
     }
 
+    if smoke_icmp {
+        let url = reqwest::Url::parse(&target).expect("parse target url");
+        let host = url.host_str().expect("target host");
+        session
+            .icmp_ping(host.into())
+            .await
+            .expect("icmp ping");
+        println!("icmp ping ok: {host}");
+        return;
+    }
+
     let client = session.reqwest_client().await.expect("reqwest client");
 
     let first = fetch_once(&client, &target).await;
@@ -63,8 +87,15 @@ async fn main() {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(hold_seconds) {
         tokio::time::sleep(Duration::from_secs(30)).await;
+        if !idle_mode {
+            let attempt = fetch_once(&client, &target).await;
+            println!("hold fetch: {}", attempt);
+        }
+    }
+
+    if idle_mode {
         let attempt = fetch_once(&client, &target).await;
-        println!("hold fetch: {}", attempt);
+        println!("idle fetch: {}", attempt);
     }
 
     println!("hold complete: {}s", hold_seconds);
