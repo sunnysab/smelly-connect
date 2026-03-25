@@ -100,6 +100,10 @@ prewarm = 2
 connect_timeout_secs = 20
 healthcheck_interval_secs = 60
 selection = "round_robin"
+failure_threshold = 3
+backoff_base_secs = 30
+backoff_max_secs = 600
+allow_request_triggered_probe = true
 
 [[accounts]]
 name = "acct-01"
@@ -159,6 +163,16 @@ smelly-connect-cli --config ./config.toml test http http://intranet.zju.edu.cn/h
   关闭 tracing 运营日志；致命错误仍可能直接输出到 `stderr`
 
 第一版只支持文本日志，不做轮转；文件写入采用追加模式。
+
+连接池韧性行为：
+
+- 正常轮询只使用 `Ready` 和 `Suspect` 节点
+- 连续失败达到 `failure_threshold` 后，节点进入摘除状态
+- 摘除节点按指数退避回到恢复窗口，最大等待时间由 `backoff_max_secs` 控制
+- 当所有 upstream 都暂时不可用时，`proxy` 模式仍保持监听
+- HTTP 空 upstream 立即返回 `503 Service Unavailable`
+- SOCKS5 空 upstream 返回 `network unreachable` (`0x03`)
+- `allow_request_triggered_probe = true` 时，首个到来的请求允许提前触发一次恢复探测
 
 ## 环境变量
 

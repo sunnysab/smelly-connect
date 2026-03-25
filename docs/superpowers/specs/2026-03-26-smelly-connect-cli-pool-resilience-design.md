@@ -1,7 +1,7 @@
 # smelly-connect-cli Pool Resilience Design
 
 - Date: 2026-03-26
-- Status: Reviewed draft
+- Status: Implemented
 - Scope: Add resilient pool behavior to `smelly-connect-cli`, including failure thresholds, circuit-breaker-style node states, exponential backoff, and protocol-specific fast-fail behavior when there is no usable upstream
 - Applies To: `smelly-connect-cli` only
 
