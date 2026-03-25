@@ -4,6 +4,21 @@ use std::fmt::{Display, Formatter};
 pub enum Error {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthError {
+    MissingSuccessMarker,
+    MissingTwfId,
+    InvalidModulusHex,
+    InvalidPublicExponent,
+    EncryptFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtocolError {
+    UnexpectedReplyType(u8),
+    ReplyTooShort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptchaError {
     message: String,
 }
