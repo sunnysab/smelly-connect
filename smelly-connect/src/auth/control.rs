@@ -133,7 +133,12 @@ pub fn request_token(server: &str, twfid: &str) -> Result<crate::protocol::Deriv
     builder.set_verify(SslVerifyMode::NONE);
     let connector = builder.build();
 
-    let tcp = std::net::TcpStream::connect(server)
+    let tcp_target = if server.contains(':') {
+        server.to_string()
+    } else {
+        format!("{server}:443")
+    };
+    let tcp = std::net::TcpStream::connect(&tcp_target)
         .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
     let domain = server.split(':').next().unwrap_or(server);
     let mut stream = connector
@@ -163,6 +168,15 @@ pub async fn request_ip_via_tunnel(
     token: &crate::protocol::DerivedToken,
     legacy_cipher_hint: Option<&str>,
 ) -> Result<Ipv4Addr, Error> {
+    let (ip, _conn) = request_ip_via_tunnel_with_conn(addr, token, legacy_cipher_hint).await?;
+    Ok(ip)
+}
+
+pub async fn request_ip_via_tunnel_with_conn(
+    addr: SocketAddr,
+    token: &crate::protocol::DerivedToken,
+    legacy_cipher_hint: Option<&str>,
+) -> Result<(Ipv4Addr, TunnelConnection), Error> {
     let request_ip = crate::protocol::build_request_ip_message(token);
     let mut conn = connect_legacy_tunnel(addr, legacy_cipher_hint).await?;
     conn.send_application_data(&request_ip)
@@ -172,8 +186,9 @@ pub async fn request_ip_via_tunnel(
         .read_application_data()
         .await
         .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(err.to_string())))?;
-    crate::protocol::parse_assigned_ip_reply(&reply)
-        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(format!("{err:?}"))))
+    let ip = crate::protocol::parse_assigned_ip_reply(&reply)
+        .map_err(|err| Error::Bootstrap(BootstrapError::AuthFlowFailed(format!("{err:?}"))))?;
+    Ok((ip, conn))
 }
 
 pub async fn request_ip_for_server(

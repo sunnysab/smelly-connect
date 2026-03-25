@@ -143,10 +143,6 @@ impl EasyConnectSession {
             .await
             .map_err(Error::Resolve)?;
 
-        if !self.resources.matches_ip(ip, port) {
-            return Err(Error::Route(RouteError::TargetNotAllowed));
-        }
-
         Ok(RoutePlan::VpnResolved(SocketAddr::new(ip, port)))
     }
 

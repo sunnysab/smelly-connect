@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::future::pending;
 
 use crate::auth::{CaptchaHandler, ControlPlaneState, run_control_plane};
 use crate::error::Error;
@@ -74,8 +75,9 @@ impl EasyConnectConfig {
 
     async fn default_bootstrap(self, state: ControlPlaneState) -> Result<EasyConnectSession, Error> {
         let token = crate::auth::control::request_token(&self.server, &state.authorized_twfid)?;
-        let client_ip = crate::auth::control::request_ip_for_server(
-            &self.server,
+        let server_addr = crate::auth::control::resolve_server_addr(&self.server)?;
+        let (client_ip, request_ip_tunnel) = crate::auth::control::request_ip_via_tunnel_with_conn(
+            server_addr,
             &token,
             state.legacy_cipher_hint.as_deref(),
         )
@@ -86,7 +88,6 @@ impl EasyConnectConfig {
             system_dns.insert(host.clone(), *resolved);
         }
 
-        let server_addr = crate::auth::control::resolve_server_addr(&self.server)?;
         let device = crate::auth::control::spawn_legacy_packet_device(
             server_addr,
             &token,
@@ -94,6 +95,10 @@ impl EasyConnectConfig {
             state.legacy_cipher_hint.as_deref(),
         )
         .await?;
+        tokio::spawn(async move {
+            let _request_ip_tunnel = request_ip_tunnel;
+            pending::<()>().await;
+        });
         let transport =
             crate::transport::netstack::build_transport_from_packet_device(device, client_ip)
                 .map_err(|err| {

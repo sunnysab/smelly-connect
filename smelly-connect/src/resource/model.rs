@@ -30,7 +30,11 @@ impl ResourceSet {
         self.domain_rules.iter().any(|(domain, rule)| {
             port >= rule.port_min
                 && port <= rule.port_max
-                && (host == domain || host.ends_with(&format!(".{domain}")))
+                && if domain.starts_with('.') {
+                    host.ends_with(domain)
+                } else {
+                    host == domain || host.ends_with(&format!(".{domain}"))
+                }
         })
     }
 

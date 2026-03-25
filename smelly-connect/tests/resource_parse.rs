@@ -13,3 +13,18 @@ fn parses_domain_and_ip_resources() {
         "10.0.0.8"
     );
 }
+
+#[test]
+fn wildcard_domain_rules_match_subdomains() {
+    let body = r#"
+<Resource>
+  <Rcs>
+    <Rc type="1" proto="-1" host="*.sit.edu.cn" port="443~443" />
+  </Rcs>
+  <Dns data="" dnsserver="10.10.0.21" />
+</Resource>
+"#;
+    let parsed = smelly_connect::resource::parse_resources(body).unwrap();
+    assert!(parsed.domain_rules.contains_key(".sit.edu.cn"));
+    assert!(parsed.matches_domain("jwxt.sit.edu.cn", 443));
+}
