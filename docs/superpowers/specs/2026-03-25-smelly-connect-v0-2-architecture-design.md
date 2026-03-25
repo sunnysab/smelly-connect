@@ -143,6 +143,12 @@ It should include:
 
 `Session` should only expose stable capabilities and read-only session information. It must not directly expose derived tokens, tunnel bootstrap materials, raw packet devices, or legacy tunnel handles.
 
+Canonical ownership rule:
+
+- `domain` defines the canonical `Session`, `SessionInfo`, `ConnectTarget`, and related capability-oriented public types.
+- `facade` re-exports those types and adds the top-level construction entrypoints such as `EasyConnectClient` and `EasyConnectClientBuilder`.
+- `integration` depends on `domain` capability types directly, not on `facade`.
+
 ### `integration`
 
 `integration` adapts `Session` capabilities into higher-level libraries and local tooling.
@@ -152,7 +158,7 @@ It should include:
 - `reqwest` integration
 - local HTTP proxy support
 
-It must depend on `Session`-level capabilities rather than bypassing the facade into runtime internals.
+It must depend on `domain`-defined `Session` capabilities rather than bypassing the facade into runtime internals.
 
 ### `facade`
 
@@ -186,6 +192,52 @@ let proxy = session.start_http_proxy("127.0.0.1:8080".parse()?).await?;
 let keepalive = session.start_keepalive("jwxt.sit.edu.cn").await?;
 let info = session.info();
 ```
+
+The stable byte-stream return type should remain a library-owned wrapper such as `VpnStream`.
+
+`VpnStream` requirements:
+
+- implements `tokio::io::AsyncRead`
+- implements `tokio::io::AsyncWrite`
+- is `Send + Unpin + 'static`
+- does not expose raw socket or file-descriptor semantics as part of the stable contract
+
+Key facade/domain capability signatures should converge toward a shape like this:
+
+```rust
+pub struct Session;
+pub struct SessionInfo;
+pub struct VpnStream;
+pub struct ProxyHandle;
+pub struct KeepaliveHandle;
+
+impl Session {
+    pub fn info(&self) -> &SessionInfo;
+    pub async fn connect<T>(&self, target: T) -> Result<VpnStream, Error>
+    where
+        T: Into<ConnectTarget>;
+
+    pub async fn start_http_proxy(&self, bind: std::net::SocketAddr) -> Result<ProxyHandle, Error>;
+    pub async fn start_keepalive<T>(&self, target: T) -> Result<KeepaliveHandle, Error>
+    where
+        T: Into<ConnectTarget>;
+}
+
+impl ProxyHandle {
+    pub fn local_addr(&self) -> std::net::SocketAddr;
+    pub async fn shutdown(self) -> Result<(), Error>;
+}
+
+impl KeepaliveHandle {
+    pub async fn shutdown(self) -> Result<(), Error>;
+}
+```
+
+Shutdown semantics:
+
+- `shutdown(self).await` is the explicit graceful-stop path for long-lived services.
+- dropping a handle may trigger best-effort cancellation, but graceful stop is only guaranteed through `shutdown`.
+- starting a proxy or keepalive loop must never rely on `mem::forget` or detached keepalive tasks for correctness.
 
 The following current concepts should not remain part of the stable public API:
 
