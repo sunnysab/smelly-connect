@@ -7,6 +7,11 @@ edition = "2024"
 name = "smelly_tls"
 path = "src/lib.rs"
 
+[[example]]
+name = "probe"
+path = "examples/probe.rs"
+required-features = ["tokio"]
+
 [dependencies]
 der = "0.7"
 hmac = "0.12"
@@ -15,7 +20,7 @@ md-5 = "0.10"
 rc4 = "0.1"
 rsa = "0.9"
 sha1 = "0.10"
-tokio = { version = "1", features = ["net", "io-util", "macros", "rt"], optional = true }
+tokio = { version = "1", features = ["net", "io-util", "macros", "rt", "time"], optional = true }
 x509-cert = "0.2"
 
 [features]

@@ -19,6 +19,7 @@ use super::{encrypt_password, parse_login_auth};
 #[derive(Clone)]
 pub struct ControlPlaneState {
     pub authorized_twfid: String,
+    pub legacy_cipher_hint: Option<String>,
     pub resources: ResourceSet,
     pub token: Option<crate::protocol::DerivedToken>,
 }
@@ -118,6 +119,7 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
 
     Ok(ControlPlaneState {
         authorized_twfid,
+        legacy_cipher_hint: parsed.legacy_cipher_hint,
         resources,
         token: None,
     })

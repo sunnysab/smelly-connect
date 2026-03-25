@@ -23,6 +23,7 @@ pub struct ClientHelloConfig {
     pub random: [u8; 32],
     pub session_id: [u8; 32],
     pub cipher_suite: u16,
+    pub compression_methods: Vec<u8>,
 }
 
 impl ClientHelloConfig {
@@ -31,12 +32,26 @@ impl ClientHelloConfig {
             random,
             session_id,
             cipher_suite: TLS_RSA_WITH_RC4_128_SHA,
+            compression_methods: vec![0],
         }
     }
 
     pub fn with_cipher_suite(mut self, cipher_suite: u16) -> Self {
         self.cipher_suite = cipher_suite;
         self
+    }
+
+    pub fn with_compression_methods(mut self, compression_methods: Vec<u8>) -> Self {
+        self.compression_methods = compression_methods;
+        self
+    }
+}
+
+pub fn legacy_cipher_suite_from_hint(hint: &str) -> Option<u16> {
+    match hint.trim().to_ascii_uppercase().as_str() {
+        "RC4-SHA" | "TLS_RSA_WITH_RC4_128_SHA" => Some(TLS_RSA_WITH_RC4_128_SHA),
+        "AES128-SHA" | "TLS_RSA_WITH_AES_128_CBC_SHA" => Some(TLS_RSA_WITH_AES_128_CBC_SHA),
+        _ => None,
     }
 }
 
@@ -53,8 +68,8 @@ pub fn build_client_hello_record(config: &ClientHelloConfig) -> Vec<u8> {
         body.extend_from_slice(&suite.to_be_bytes());
     }
 
-    body.push(1);
-    body.push(0);
+    body.push(config.compression_methods.len() as u8);
+    body.extend_from_slice(&config.compression_methods);
 
     let mut extensions = Vec::with_capacity(8);
     extensions.extend_from_slice(&HEARTBEAT_EXTENSION.to_be_bytes());
@@ -118,10 +133,20 @@ pub struct ServerFlight {
     pub server_hello: ParsedServerHello,
     pub certificate_chain: Vec<Vec<u8>>,
     pub server_hello_done: bool,
+    pub handshake_types: Vec<u8>,
 }
 
 #[cfg(feature = "tokio")]
 pub struct MinimalHandshakeResult {
+    pub server_hello: ParsedServerHello,
+    pub master_secret: [u8; 48],
+}
+
+#[cfg(feature = "tokio")]
+pub struct TunnelConnection {
+    stream: tokio::net::TcpStream,
+    encryptor: Rc4Sha1Encryptor,
+    decryptor: Rc4Sha1Decryptor,
     pub server_hello: ParsedServerHello,
     pub master_secret: [u8; 48],
 }
@@ -161,21 +186,14 @@ pub async fn connect_and_read_server_flight(
     addr: SocketAddr,
     config: &ClientHelloConfig,
 ) -> io::Result<ServerFlight> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     let mut stream = tokio::net::TcpStream::connect(addr).await?;
     let hello = build_client_hello_record(config);
     stream.write_all(&hello).await?;
 
-    let mut header = [0_u8; 5];
-    stream.read_exact(&mut header).await?;
-    let len = u16::from_be_bytes([header[3], header[4]]) as usize;
-    let mut body = vec![0_u8; len];
-    stream.read_exact(&mut body).await?;
-    let record = [header.to_vec(), body].concat();
-
-    parse_server_flight(&record)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid server flight"))
+    let (_, flight) = read_server_flight(&mut stream).await?;
+    Ok(flight)
 }
 
 #[cfg(feature = "tokio")]
@@ -183,16 +201,40 @@ pub async fn complete_minimal_handshake(
     addr: SocketAddr,
     config: &ClientHelloConfig,
 ) -> io::Result<MinimalHandshakeResult> {
+    let conn = connect_tunnel(addr, config).await?;
+    Ok(MinimalHandshakeResult {
+        server_hello: conn.server_hello.clone(),
+        master_secret: conn.master_secret,
+    })
+}
+
+#[cfg(feature = "tokio")]
+pub async fn connect_tunnel(
+    addr: SocketAddr,
+    config: &ClientHelloConfig,
+) -> io::Result<TunnelConnection> {
     use tokio::io::AsyncWriteExt;
 
     let mut stream = tokio::net::TcpStream::connect(addr).await?;
     let client_hello_record = build_client_hello_record(config);
     stream.write_all(&client_hello_record).await?;
 
-    let server_flight_record = read_record(&mut stream).await?;
-    let server_flight = parse_server_flight(&server_flight_record)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid server flight"))?;
-    let public_key_der = server_public_key_der(&server_flight.certificate_chain[0])?;
+    let (server_flight_record, server_flight) = read_server_flight(&mut stream).await?;
+    let cert = server_flight
+        .certificate_chain
+        .first()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "missing server certificate; types={:?} cipher=0x{:04x} done={}",
+                    server_flight.handshake_types,
+                    server_flight.server_hello.cipher_suite,
+                    server_flight.server_hello_done
+                ),
+            )
+        })?;
+    let public_key_der = server_public_key_der(cert)?;
 
     let premaster = build_premaster_secret([0x33; 46]);
     let client_key_exchange = build_client_key_exchange(&public_key_der, &premaster)?;
@@ -210,8 +252,8 @@ pub async fn complete_minimal_handshake(
     let server_key: [u8; 16] = key_block[56..72].try_into().unwrap();
 
     let mut transcript = Vec::new();
-    transcript.extend_from_slice(handshake_payload(&client_hello_record));
-    transcript.extend_from_slice(handshake_payload(&server_flight_record));
+    transcript.extend_from_slice(&handshake_messages(&client_hello_record));
+    transcript.extend_from_slice(&handshake_messages(&server_flight_record));
     transcript.extend_from_slice(&client_key_exchange);
     let client_verify = derive_finished_verify_data(&master_secret, true, &transcript);
     let client_finished = build_finished_handshake(client_verify);
@@ -221,7 +263,10 @@ pub async fn complete_minimal_handshake(
 
     let server_ccs = read_record(&mut stream).await?;
     if server_ccs != build_change_cipher_spec_record() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid server ccs"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid server ccs: {}", hex::encode(server_ccs)),
+        ));
     }
 
     transcript.extend_from_slice(&client_finished);
@@ -234,10 +279,123 @@ pub async fn complete_minimal_handshake(
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid server finished"));
     }
 
-    Ok(MinimalHandshakeResult {
+    Ok(TunnelConnection {
+        stream,
+        encryptor,
+        decryptor,
         server_hello: server_flight.server_hello,
         master_secret,
     })
+}
+
+#[cfg(feature = "tokio")]
+impl TunnelConnection {
+    pub async fn send_application_data(&mut self, plaintext: &[u8]) -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let payload = self.encryptor.encrypt(23, plaintext)?;
+        let record = record_with_payload(23, &payload);
+        self.stream.write_all(&record).await
+    }
+
+    pub async fn read_application_data(&mut self) -> io::Result<Vec<u8>> {
+        let record = read_record(&mut self.stream).await?;
+        if record.first().copied() != Some(23) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unexpected record type {}", record.first().copied().unwrap_or_default()),
+            ));
+        }
+        self.decryptor.decrypt(23, record_payload(&record))
+    }
+}
+
+#[cfg(feature = "tokio")]
+pub async fn probe_handshake_steps(
+    addr: SocketAddr,
+    config: &ClientHelloConfig,
+) -> io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    use tokio::time::{Duration, timeout};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await?;
+    let client_hello_record = build_client_hello_record(config);
+    stream.write_all(&client_hello_record).await?;
+    let (server_flight_record, server_flight) = read_server_flight(&mut stream).await?;
+    println!(
+        "step: server flight types={:?} cipher=0x{:04x} certs={}",
+        server_flight.handshake_types,
+        server_flight.server_hello.cipher_suite,
+        server_flight.certificate_chain.len()
+    );
+
+    let cert = server_flight
+        .certificate_chain
+        .first()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing server certificate"))?;
+    let public_key_der = server_public_key_der(cert)?;
+    let premaster = build_premaster_secret([0x33; 46]);
+    let client_key_exchange = build_client_key_exchange(&public_key_der, &premaster)?;
+    let client_key_exchange_record = record_with_payload(22, &client_key_exchange);
+    stream.write_all(&client_key_exchange_record).await?;
+    match timeout(Duration::from_millis(200), read_record(&mut stream)).await {
+        Ok(Ok(record)) => {
+            println!(
+                "step: reply after cke type=0x{:02x} hex={}",
+                record[0],
+                hex::encode(&record)
+            );
+            return Ok(());
+        }
+        Ok(Err(err)) => {
+            println!("step: read after cke errored: {err}");
+        }
+        Err(_) => {
+            println!("step: no immediate reply after cke");
+        }
+    }
+
+    let master_secret =
+        derive_tls10_master_secret(&premaster, &config.random, &server_flight.server_hello.random);
+    let key_block =
+        derive_tls10_key_block(&master_secret, &config.random, &server_flight.server_hello.random, 72);
+    let client_mac: [u8; 20] = key_block[0..20].try_into().unwrap();
+    let client_key: [u8; 16] = key_block[40..56].try_into().unwrap();
+    let mut transcript = Vec::new();
+    transcript.extend_from_slice(handshake_payload(&client_hello_record));
+    transcript.extend_from_slice(handshake_payload(&server_flight_record));
+    transcript.extend_from_slice(&client_key_exchange);
+    let client_verify = derive_finished_verify_data(&master_secret, true, &transcript);
+    let client_finished = build_finished_handshake(client_verify);
+    let mut encryptor = Rc4Sha1Encryptor::new(client_mac, client_key);
+
+    stream.write_all(&build_change_cipher_spec_record()).await?;
+    match timeout(Duration::from_millis(200), read_record(&mut stream)).await {
+        Ok(Ok(record)) => {
+            println!(
+                "step: reply after ccs type=0x{:02x} hex={}",
+                record[0],
+                hex::encode(&record)
+            );
+            return Ok(());
+        }
+        Ok(Err(err)) => {
+            println!("step: read after ccs errored: {err}");
+        }
+        Err(_) => {
+            println!("step: no immediate reply after ccs");
+        }
+    }
+    let client_finished_record = record_with_payload(22, &encryptor.encrypt(22, &client_finished)?);
+    stream.write_all(&client_finished_record).await?;
+
+    let server_reply = read_record(&mut stream).await?;
+    println!(
+        "step: first post-finished record type=0x{:02x} hex={}",
+        server_reply[0],
+        hex::encode(&server_reply)
+    );
+    Ok(())
 }
 
 #[cfg(feature = "tokio")]
@@ -250,6 +408,89 @@ async fn read_record(stream: &mut tokio::net::TcpStream) -> io::Result<Vec<u8>> 
     let mut body = vec![0_u8; len];
     stream.read_exact(&mut body).await?;
     Ok([header.to_vec(), body].concat())
+}
+
+#[cfg(feature = "tokio")]
+async fn read_server_flight(
+    stream: &mut tokio::net::TcpStream,
+) -> io::Result<(Vec<u8>, ServerFlight)> {
+    let mut combined = Vec::new();
+    for _ in 0..8 {
+        let record = read_record(stream).await?;
+        let content_type = record[0];
+        if content_type != 22 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unexpected record type {content_type}"),
+            ));
+        }
+        combined.extend_from_slice(&record[..5]);
+        combined.extend_from_slice(&record[5..]);
+
+        if let Some(flight) = parse_server_flight_records(&combined)
+            && !flight.certificate_chain.is_empty()
+            && flight.server_hello_done
+        {
+            return Ok((combined, flight));
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "incomplete server flight",
+    ))
+}
+
+#[cfg(feature = "tokio")]
+fn parse_server_flight_records(records: &[u8]) -> Option<ServerFlight> {
+    let mut idx = 0;
+    let mut server_hello = None;
+    let mut certificate_chain = Vec::new();
+    let mut server_hello_done = false;
+    let mut handshake_types = Vec::new();
+
+    while idx + 5 <= records.len() {
+        let content_type = records[idx];
+        let len = u16::from_be_bytes([records[idx + 3], records[idx + 4]]) as usize;
+        let start = idx + 5;
+        let end = start + len;
+        let payload = records.get(start..end)?;
+        idx = end;
+
+        if content_type != 22 {
+            continue;
+        }
+
+        let mut hs = 0;
+        while hs + 4 <= payload.len() {
+            let handshake_type = payload[hs];
+            let length = u32::from_be_bytes([0, payload[hs + 1], payload[hs + 2], payload[hs + 3]])
+                as usize;
+            hs += 4;
+            let body = payload.get(hs..hs + length)?;
+            hs += length;
+            handshake_types.push(handshake_type);
+
+            match handshake_type {
+                2 => server_hello = Some(parse_server_hello_body(body)?),
+                11 => certificate_chain = parse_certificate_body(body)?,
+                14 => {
+                    if !body.is_empty() {
+                        return None;
+                    }
+                    server_hello_done = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Some(ServerFlight {
+        server_hello: server_hello?,
+        certificate_chain,
+        server_hello_done,
+        handshake_types,
+    })
 }
 
 pub fn parse_client_hello(record: &[u8]) -> Option<ParsedClientHello> {
@@ -333,6 +574,25 @@ pub fn handshake_payload(record: &[u8]) -> &[u8] {
     &record[5..]
 }
 
+pub fn handshake_messages(records: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut idx = 0;
+    while idx + 5 <= records.len() {
+        let content_type = records[idx];
+        let len = u16::from_be_bytes([records[idx + 3], records[idx + 4]]) as usize;
+        let start = idx + 5;
+        let end = start + len;
+        if end > records.len() {
+            break;
+        }
+        if content_type == 22 {
+            out.extend_from_slice(&records[start..end]);
+        }
+        idx = end;
+    }
+    out
+}
+
 pub fn record_payload(record: &[u8]) -> &[u8] {
     &record[5..]
 }
@@ -355,6 +615,7 @@ pub fn parse_server_flight(record: &[u8]) -> Option<ServerFlight> {
     let mut server_hello = None;
     let mut certificate_chain = Vec::new();
     let mut server_hello_done = false;
+    let mut handshake_types = Vec::new();
 
     while idx + 4 <= record.len() {
         let handshake_type = record[idx];
@@ -363,6 +624,7 @@ pub fn parse_server_flight(record: &[u8]) -> Option<ServerFlight> {
         idx += 4;
         let body = record.get(idx..idx + length)?;
         idx += length;
+        handshake_types.push(handshake_type);
 
         match handshake_type {
             2 => {
@@ -385,7 +647,28 @@ pub fn parse_server_flight(record: &[u8]) -> Option<ServerFlight> {
         server_hello: server_hello?,
         certificate_chain,
         server_hello_done,
+        handshake_types,
     })
+}
+
+pub fn handshake_types(record: &[u8]) -> Vec<u8> {
+    if record.len() < 9 || record[0] != 22 {
+        return Vec::new();
+    }
+
+    let mut idx = 5;
+    let mut out = Vec::new();
+    while idx + 4 <= record.len() {
+        let handshake_type = record[idx];
+        let length =
+            u32::from_be_bytes([0, record[idx + 1], record[idx + 2], record[idx + 3]]) as usize;
+        out.push(handshake_type);
+        idx += 4 + length;
+        if idx > record.len() {
+            break;
+        }
+    }
+    out
 }
 
 fn parse_server_hello_body(body: &[u8]) -> Option<ParsedServerHello> {

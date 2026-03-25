@@ -33,6 +33,16 @@ fn client_hello_record_allows_alternate_legacy_cipher() {
 }
 
 #[test]
+fn client_hello_record_allows_custom_compression_advertisement() {
+    let config = ClientHelloConfig::new([0x67; 32], EXPECTED_SESSION_ID)
+        .with_compression_methods(vec![1, 0]);
+    let record = build_client_hello_record(&config);
+    let parsed = parse_client_hello(&record).unwrap();
+
+    assert_eq!(parsed.compression_methods, vec![1, 0]);
+}
+
+#[test]
 fn connect_probe_writes_hello_bytes_to_tcp_stream() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -140,10 +150,12 @@ async fn async_read_server_flight_parses_certificate_chain_and_hello_done() {
         tokio::io::AsyncReadExt::read_exact(&mut stream, &mut body)
             .await
             .unwrap();
-        let flight = build_server_flight_record(server_session_id, &[b"cert-one", b"cert-two"]);
-        tokio::io::AsyncWriteExt::write_all(&mut stream, &flight)
-            .await
-            .unwrap();
+        let records = build_server_flight_records(server_session_id, &[b"cert-one", b"cert-two"]);
+        for record in records {
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &record)
+                .await
+                .unwrap();
+        }
     });
 
     let config = ClientHelloConfig::new([0x55; 32], EXPECTED_SESSION_ID);
@@ -164,6 +176,52 @@ async fn async_read_server_flight_parses_certificate_chain_and_hello_done() {
         vec![b"cert-one".as_slice(), b"cert-two".as_slice()]
     );
     assert!(flight.server_hello_done);
+    assert_eq!(flight.handshake_types, vec![2, 11, 14]);
+}
+
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_read_server_flight_handles_multi_record_flight() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_session_id = *b"0123456789abcdef0123456789abcdef";
+
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut header = [0_u8; 5];
+        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut header)
+            .await
+            .unwrap();
+        let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        let mut body = vec![0_u8; len];
+        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut body)
+            .await
+            .unwrap();
+        let records = build_server_flight_records(server_session_id, &[b"cert-alpha"]);
+        for record in records {
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &record)
+                .await
+                .unwrap();
+        }
+    });
+
+    let config = ClientHelloConfig::new([0x56; 32], EXPECTED_SESSION_ID);
+    let flight = smelly_tls::connect_and_read_server_flight(addr, &config)
+        .await
+        .unwrap();
+
+    server.await.unwrap();
+    assert_eq!(flight.server_hello.session_id, server_session_id);
+    assert_eq!(
+        flight
+            .certificate_chain
+            .iter()
+            .map(|cert| cert.as_slice())
+            .collect::<Vec<_>>(),
+        vec![b"cert-alpha".as_slice()]
+    );
+    assert!(flight.server_hello_done);
+    assert_eq!(flight.handshake_types, vec![2, 11, 14]);
 }
 
 struct ParsedClientHello {
@@ -250,18 +308,15 @@ fn build_server_hello_record(session_id: [u8; 32]) -> Vec<u8> {
 }
 
 #[cfg(feature = "tokio")]
-fn build_server_flight_record(session_id: [u8; 32], certs: &[&[u8]]) -> Vec<u8> {
+fn build_server_flight_records(session_id: [u8; 32], certs: &[&[u8]]) -> Vec<Vec<u8>> {
     let server_hello = build_server_hello_handshake(session_id);
     let certificate = build_certificate_handshake(certs);
     let server_hello_done = vec![14, 0, 0, 0];
-    let payload = [server_hello, certificate, server_hello_done].concat();
-
-    let mut record = Vec::new();
-    record.push(22);
-    record.extend_from_slice(&0x0302_u16.to_be_bytes());
-    record.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-    record.extend_from_slice(&payload);
-    record
+    vec![
+        handshake_record(server_hello),
+        handshake_record(certificate),
+        handshake_record(server_hello_done),
+    ]
 }
 
 #[cfg(feature = "tokio")]
@@ -303,4 +358,14 @@ fn build_certificate_handshake(certs: &[&[u8]]) -> Vec<u8> {
     handshake.extend_from_slice(&body_len.to_be_bytes()[1..4]);
     handshake.extend_from_slice(&body);
     handshake
+}
+
+#[cfg(feature = "tokio")]
+fn handshake_record(payload: Vec<u8>) -> Vec<u8> {
+    let mut record = Vec::new();
+    record.push(22);
+    record.extend_from_slice(&0x0302_u16.to_be_bytes());
+    record.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    record.extend_from_slice(&payload);
+    record
 }
