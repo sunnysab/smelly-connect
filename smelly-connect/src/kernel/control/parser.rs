@@ -130,8 +130,8 @@ fn parse_port_range(value: &str) -> (u16, u16) {
 }
 
 fn parse_ip_rule(value: &str) -> Option<(IpAddr, IpAddr)> {
-    if let Ok(ip) = value.parse::<Ipv4Addr>() {
-        return Some((IpAddr::V4(ip), IpAddr::V4(ip)));
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        return Some((ip, ip));
     }
 
     let mut parts = value.split('~');

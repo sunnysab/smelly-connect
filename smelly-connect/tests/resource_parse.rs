@@ -62,3 +62,20 @@ fn static_dns_parses_ipv6_targets_without_truncation() {
         "2600:10:20::40"
     );
 }
+
+#[test]
+fn single_ipv6_resource_is_parsed_as_ip_rule_not_domain_rule() {
+    let body = r#"
+<Resource>
+  <Rcs>
+    <Rc type="1" proto="-1" host="2600:1417:9800::45c0:da78" port="443~443" />
+  </Rcs>
+  <Dns data="" dnsserver="10.10.0.21" />
+</Resource>
+"#;
+    let parsed = smelly_connect::resource::parse_resources(body).unwrap();
+    assert!(parsed.domain_rules.is_empty());
+    assert_eq!(parsed.ip_rules.len(), 1);
+    assert_eq!(parsed.ip_rules[0].ip_min.to_string(), "2600:1417:9800::45c0:da78");
+    assert_eq!(parsed.ip_rules[0].ip_max.to_string(), "2600:1417:9800::45c0:da78");
+}
