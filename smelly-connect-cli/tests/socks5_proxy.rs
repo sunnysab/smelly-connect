@@ -44,3 +44,19 @@ async fn socks5_proxy_enforces_connect_timeout() {
         .unwrap();
     assert!(result.elapsed < std::time::Duration::from_millis(150));
 }
+
+#[tokio::test]
+async fn socks5_proxy_returns_failure_reply_on_upstream_connect_error() {
+    let result = smelly_connect_cli::proxy::socks5::proxy_socks5_connect_failure_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.reply_code, 0x03);
+}
+
+#[tokio::test]
+async fn socks5_proxy_returns_failure_reply_on_upstream_timeout() {
+    let result = smelly_connect_cli::proxy::socks5::proxy_socks5_timeout_reply_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.reply_code, 0x03);
+}

@@ -265,6 +265,33 @@ pub async fn proxy_socks5_connect_timeout_for_test() -> Result<TimeoutTestResult
     })
 }
 
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_connect_failure_for_test() -> Result<Socks5FailureResult, String> {
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_socks5_with_timeout(
+        pool,
+        Duration::from_millis(20),
+        |_account_name, _host, _port| async move { Err(io::Error::other("upstream failed")) },
+    )
+    .await?;
+    request_connect_failure(addr).await
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_timeout_reply_for_test() -> Result<Socks5FailureResult, String> {
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_socks5_with_timeout(
+        pool,
+        Duration::from_millis(20),
+        |_account_name, _host, _port| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Err(io::Error::new(io::ErrorKind::TimedOut, "slow upstream"))
+        },
+    )
+    .await?;
+    request_connect_failure(addr).await
+}
+
 pub async fn serve_socks5(
     listen: String,
     pool: SessionPool,
@@ -429,6 +456,38 @@ async fn request_no_ready_session(addr: SocketAddr) -> Result<Socks5FailureResul
 }
 
 #[cfg(any(test, debug_assertions))]
+async fn request_connect_failure(addr: SocketAddr) -> Result<Socks5FailureResult, String> {
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut method_reply = [0_u8; 2];
+    client
+        .read_exact(&mut method_reply)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    client
+        .write_all(&[
+            0x05, 0x01, 0x00, 0x03, 0x10, b'l', b'i', b'b', b'd', b'b', b'.', b'z', b'j', b'u',
+            b'.', b'e', b'd', b'u', b'.', b'c', b'n', 0x01, 0xbb,
+        ])
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut reply = [0_u8; 10];
+    client
+        .read_exact(&mut reply)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(Socks5FailureResult {
+        reply_code: reply[1],
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
 async fn handle_client<F, Fut>(
     mut client: TcpStream,
     pool: SessionPool,
@@ -527,9 +586,15 @@ where
     );
 
     let upstream = connector(account_name, host, port);
-    let mut upstream = connect_with_timeout(connect_timeout, upstream)
-        .await
-        .map_err(|err| err.label())?;
+    let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            write_socks5_failure_reply(&mut client, &err)
+                .await
+                .map_err(|reply_err| reply_err.to_string())?;
+            return Ok(());
+        }
+    };
     let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Socks5));
     relay_tunnel(&mut client, &mut upstream, connection.as_ref()).await
 }
@@ -638,7 +703,10 @@ async fn handle_live_client(
                 pool.report_live_session_failure(&account_name, err.label())
                     .await;
             }
-            return Err(format!("{account_name}: {}", err.label()));
+            write_socks5_failure_reply(&mut client, &err)
+                .await
+                .map_err(|reply_err| reply_err.to_string())?;
+            return Ok(());
         }
     };
     stats.record_connect_success();
@@ -663,6 +731,26 @@ async fn relay_tunnel(
         connection.add_upstream_to_client_bytes(upstream_to_client);
     }
     Ok(())
+}
+
+async fn write_socks5_failure_reply(
+    client: &mut TcpStream,
+    _err: &UpstreamConnectError,
+) -> io::Result<()> {
+    client
+        .write_all(&[
+            0x05,
+            SOCKS5_NETWORK_UNREACHABLE,
+            0x00,
+            0x01,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ])
+        .await
 }
 
 async fn connect_with_timeout<T, E, Fut>(
