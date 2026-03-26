@@ -45,3 +45,20 @@ fn domain_rules_strip_port_and_query_suffixes() {
     assert!(!parsed.domain_rules.contains_key("app1.sit.edu.cn:81"));
     assert!(!parsed.domain_rules.contains_key("myportal.sit.edu.cn?rnd=1"));
 }
+
+#[test]
+fn static_dns_parses_ipv6_targets_without_truncation() {
+    let body = r#"
+<Resource>
+  <Rcs>
+    <Rc type="1" proto="-1" host="jwxt.sit.edu.cn" port="443~443" />
+  </Rcs>
+  <Dns data="1:ipv6.example.edu:2600:10:20::40" dnsserver="10.10.0.21" />
+</Resource>
+"#;
+    let parsed = smelly_connect::resource::parse_resources(body).unwrap();
+    assert_eq!(
+        parsed.static_dns.get("ipv6.example.edu").unwrap().to_string(),
+        "2600:10:20::40"
+    );
+}

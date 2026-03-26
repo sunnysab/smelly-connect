@@ -94,7 +94,7 @@ pub fn parse_resource_document(body: &str) -> Result<ResourceDocument, roxmltree
             resources.remote_dns_server = Some(remote.to_string());
         }
         for entry in dns.attribute("data").unwrap_or_default().split(';') {
-            let mut parts = entry.split(':');
+            let mut parts = entry.splitn(3, ':');
             let _ = parts.next();
             let host = parts.next();
             let ip = parts.next();
