@@ -76,3 +76,11 @@ async fn socks5_proxy_rejects_unsupported_commands_with_reply() {
         .unwrap();
     assert_eq!(result.reply_code, 0x07);
 }
+
+#[tokio::test]
+async fn socks5_proxy_rejects_unsupported_address_types_with_reply() {
+    let result = smelly_connect_cli::proxy::socks5::proxy_socks5_rejects_unsupported_atyp_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.reply_code, 0x08);
+}

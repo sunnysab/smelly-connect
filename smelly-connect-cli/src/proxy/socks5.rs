@@ -23,6 +23,7 @@ use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 
 const SOCKS5_NETWORK_UNREACHABLE: u8 = 0x03;
 const SOCKS5_COMMAND_NOT_SUPPORTED: u8 = 0x07;
+const SOCKS5_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 0x08;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
@@ -354,6 +355,41 @@ pub async fn proxy_socks5_rejects_unsupported_command_for_test(
     })
 }
 
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_rejects_unsupported_atyp_for_test(
+) -> Result<Socks5FailureResult, String> {
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_socks5(pool, |_account_name, _host, _port| async move {
+        Err(io::Error::other("unexpected connector use"))
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut method_reply = [0_u8; 2];
+    client
+        .read_exact(&mut method_reply)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(&[0x05, 0x01, 0x00, 0x04])
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut reply = [0_u8; 10];
+    client
+        .read_exact(&mut reply)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(Socks5FailureResult {
+        reply_code: reply[1],
+    })
+}
+
 pub async fn serve_socks5(
     listen: String,
     pool: SessionPool,
@@ -596,6 +632,12 @@ where
         return Ok(());
     }
     let atyp = header[3];
+    if atyp != 0x01 && atyp != 0x03 {
+        write_socks5_failure_reply_with_code(&mut client, SOCKS5_ADDRESS_TYPE_NOT_SUPPORTED)
+            .await
+            .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
     let host = match atyp {
         0x01 => {
             let mut ip = [0_u8; 4];
@@ -715,6 +757,12 @@ async fn handle_live_client(
         return Ok(());
     }
     let atyp = header[3];
+    if atyp != 0x01 && atyp != 0x03 {
+        write_socks5_failure_reply_with_code(&mut client, SOCKS5_ADDRESS_TYPE_NOT_SUPPORTED)
+            .await
+            .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
     let host = match atyp {
         0x01 => {
             let mut ip = [0_u8; 4];
