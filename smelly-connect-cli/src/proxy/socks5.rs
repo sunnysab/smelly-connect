@@ -292,6 +292,32 @@ pub async fn proxy_socks5_timeout_reply_for_test() -> Result<Socks5FailureResult
     request_connect_failure(addr).await
 }
 
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_rejects_unsupported_methods_for_test(
+) -> Result<Socks5FailureResult, String> {
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_socks5(pool, |_account_name, _host, _port| async move {
+        Err(io::Error::other("unexpected connector use"))
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(&[0x05, 0x01, 0x02])
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut reply = [0_u8; 2];
+    client
+        .read_exact(&mut reply)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(Socks5FailureResult {
+        reply_code: reply[1],
+    })
+}
+
 pub async fn serve_socks5(
     listen: String,
     pool: SessionPool,
@@ -510,6 +536,13 @@ where
         .read_exact(&mut methods)
         .await
         .map_err(|err| err.to_string())?;
+    if !methods.contains(&0x00) {
+        client
+            .write_all(&[0x05, 0xff])
+            .await
+            .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
     client
         .write_all(&[0x05, 0x00])
         .await
@@ -616,6 +649,13 @@ async fn handle_live_client(
         .read_exact(&mut methods)
         .await
         .map_err(|err| err.to_string())?;
+    if !methods.contains(&0x00) {
+        client
+            .write_all(&[0x05, 0xff])
+            .await
+            .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
     client
         .write_all(&[0x05, 0x00])
         .await

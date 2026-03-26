@@ -60,3 +60,11 @@ async fn socks5_proxy_returns_failure_reply_on_upstream_timeout() {
         .unwrap();
     assert_eq!(result.reply_code, 0x03);
 }
+
+#[tokio::test]
+async fn socks5_proxy_rejects_unsupported_auth_methods() {
+    let result = smelly_connect_cli::proxy::socks5::proxy_socks5_rejects_unsupported_methods_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.reply_code, 0xff);
+}
