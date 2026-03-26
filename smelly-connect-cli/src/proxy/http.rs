@@ -31,6 +31,12 @@ pub struct HttpProxyTestResult {
 
 #[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
+pub struct HttpBodyTestResult {
+    pub body: String,
+}
+
+#[cfg(any(test, debug_assertions))]
+#[derive(Debug, Clone)]
 pub struct ConnectProxyTestResult {
     pub account_name: String,
     pub echoed_bytes: Vec<u8>,
@@ -123,6 +129,46 @@ pub async fn proxy_http_for_test() -> Result<HttpProxyTestResult, String> {
         account_name,
         used_pool_selection: true,
     })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_body_completes_for_keep_alive_upstream_for_test(
+) -> Result<HttpBodyTestResult, String> {
+    let upstream = spawn_keep_alive_http_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
+        TcpStream::connect(upstream).await
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"GET http://intranet.zju.edu.cn/index.html HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: keep-alive\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok::<Vec<u8>, String>(response)
+    })
+    .await
+    .map_err(|_| "proxy response timed out".to_string())??;
+
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    Ok(HttpBodyTestResult { body })
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -836,12 +882,17 @@ async fn handle_live_client(
 
     let mut upstream_request = format!("{method} {path} {version}\r\n");
     for header in lines {
-        if header.to_ascii_lowercase().starts_with("proxy-connection:") {
+        let lower = header.to_ascii_lowercase();
+        if lower.starts_with("proxy-connection:")
+            || lower.starts_with("connection:")
+            || lower.starts_with("keep-alive:")
+        {
             continue;
         }
         upstream_request.push_str(header);
         upstream_request.push_str("\r\n");
     }
+    upstream_request.push_str("Connection: close\r\n");
     upstream_request.push_str("\r\n");
 
     upstream
@@ -916,12 +967,17 @@ where
 
     let mut upstream_request = format!("{} {path} {}\r\n", request.method, request.version);
     for header in request.headers {
-        if header.to_ascii_lowercase().starts_with("proxy-connection:") {
+        let lower = header.to_ascii_lowercase();
+        if lower.starts_with("proxy-connection:")
+            || lower.starts_with("connection:")
+            || lower.starts_with("keep-alive:")
+        {
             continue;
         }
         upstream_request.push_str(header);
         upstream_request.push_str("\r\n");
     }
+    upstream_request.push_str("Connection: close\r\n");
     upstream_request.push_str("\r\n");
 
     relay_forward_stream(
@@ -1123,6 +1179,29 @@ async fn spawn_http_upstream() -> SocketAddr {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
             .await
             .unwrap();
+    });
+    addr
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_keep_alive_http_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0_u8; 2048];
+        let n = socket.read(&mut buf).await.unwrap();
+        let request = String::from_utf8_lossy(&buf[..n]);
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello",
+            )
+            .await
+            .unwrap();
+        if request.to_ascii_lowercase().contains("connection: close") {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     });
     addr
 }
