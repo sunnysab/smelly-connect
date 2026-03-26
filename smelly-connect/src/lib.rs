@@ -25,4 +25,5 @@ pub use error::{CaptchaError, Error};
 pub use facade::client::{EasyConnectClient, EasyConnectClientBuilder};
 pub use proxy::http::ProxyHandle;
 pub use runtime::tasks::keepalive::KeepaliveHandle;
+pub use session::LocalRouteOverrides;
 pub use target::TargetAddr;

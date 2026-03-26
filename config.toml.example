@@ -41,6 +41,21 @@ listen = "127.0.0.1:8080"
 enabled = true
 listen = "127.0.0.1:1080"
 
+[routing]
+
+[[routing.domain_rules]]
+domain = "*.foo.edu.cn"
+port_min = 443
+port_max = 443
+protocol = "tcp"
+
+[[routing.ip_rules]]
+ip_min = "42.62.107.1"
+ip_max = "42.62.107.254"
+port_min = 1
+port_max = 65535
+protocol = "all"
+
 [management]
 enabled = false
 listen = "127.0.0.1:9090"

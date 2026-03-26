@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use smelly_connect::{CaptchaError, CaptchaHandler, EasyConnectClient, Session};
+use smelly_connect::{CaptchaError, CaptchaHandler, EasyConnectClient, LocalRouteOverrides, Session};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
@@ -75,6 +77,7 @@ pub struct SessionPool {
     inner: Arc<Mutex<PoolState>>,
     retry_delay: Duration,
     connect_timeout: Duration,
+    local_route_overrides: LocalRouteOverrides,
     server: Option<String>,
     allow_request_triggered_probe: bool,
 }
@@ -167,6 +170,7 @@ pub struct AccountRoutesSnapshot {
     pub name: String,
     pub state: String,
     pub routes: Option<RouteSetSnapshot>,
+    pub local_routes: Option<RouteSetSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +241,7 @@ impl SessionPool {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
+            local_route_overrides: LocalRouteOverrides::default(),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -273,6 +278,7 @@ impl SessionPool {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
+            local_route_overrides: LocalRouteOverrides::default(),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -313,6 +319,7 @@ impl SessionPool {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
+            local_route_overrides: LocalRouteOverrides::default(),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -349,6 +356,7 @@ impl SessionPool {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
+            local_route_overrides: LocalRouteOverrides::default(),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -408,6 +416,7 @@ impl SessionPool {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
+            local_route_overrides: LocalRouteOverrides::default(),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -441,6 +450,7 @@ impl SessionPool {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
+            local_route_overrides: LocalRouteOverrides::default(),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -476,6 +486,7 @@ impl SessionPool {
             })),
             retry_delay: Duration::from_millis(100),
             connect_timeout: Duration::from_secs(20),
+            local_route_overrides: LocalRouteOverrides::default(),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -514,6 +525,7 @@ impl SessionPool {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
             connect_timeout: Duration::from_secs(cfg.pool.connect_timeout_secs.max(1)),
+            local_route_overrides: build_local_route_overrides(&cfg.routing)?,
             server: Some(cfg.vpn.server.clone()),
             allow_request_triggered_probe: cfg.pool.allow_request_triggered_probe,
         };
@@ -600,10 +612,22 @@ impl SessionPool {
                 }
                 _ => None,
             };
+            let local_routes = match &node.state {
+                AccountState::Ready(session) | AccountState::Suspect(session) => session
+                    .session()
+                    .map(build_local_route_set_snapshot)
+                    .filter(|routes| {
+                        !routes.domain_rules.is_empty()
+                            || !routes.ip_rules.is_empty()
+                            || !routes.static_dns.is_empty()
+                    }),
+                _ => None,
+            };
             nodes.push(AccountRoutesSnapshot {
                 name: node.name.clone(),
                 state: state_label(&node.state).to_ascii_lowercase(),
                 routes,
+                local_routes,
             });
         }
 
@@ -733,6 +757,7 @@ impl SessionPool {
             })),
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
+            local_route_overrides: LocalRouteOverrides::default(),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -765,6 +790,7 @@ impl SessionPool {
             })),
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
+            local_route_overrides: LocalRouteOverrides::default(),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -1067,7 +1093,14 @@ impl SessionPool {
             (name, account, server)
         };
 
-        match connect_account(&server, &account, self.connect_timeout).await {
+        match connect_account(
+            &server,
+            &account,
+            self.connect_timeout,
+            &self.local_route_overrides,
+        )
+        .await
+        {
             Ok(session) => {
                 let mut state = self.inner.lock().await;
                 if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
@@ -1146,7 +1179,14 @@ impl SessionPool {
             .as_deref()
             .ok_or_else(|| PoolError::new("real server configuration unavailable"))?;
 
-        match connect_account(server, &account, self.connect_timeout).await {
+        match connect_account(
+            server,
+            &account,
+            self.connect_timeout,
+            &self.local_route_overrides,
+        )
+        .await
+        {
             Ok(session) => {
                 self.complete_probe_success(
                     &name,
@@ -1217,6 +1257,7 @@ async fn connect_account(
     server: &str,
     account: &AccountConfig,
     timeout: Duration,
+    local_route_overrides: &LocalRouteOverrides,
 ) -> Result<Session, PoolError> {
     let client = EasyConnectClient::builder(server.to_string())
         .credentials(account.username.clone(), account.password.clone())
@@ -1228,10 +1269,11 @@ async fn connect_account(
         .build()
         .map_err(|err| PoolError::new(format!("{err:?}")))?;
 
-    tokio::time::timeout(timeout, client.connect())
+    let session = tokio::time::timeout(timeout, client.connect())
         .await
         .map_err(|_| PoolError::new("session connect timeout"))?
-        .map_err(|err| PoolError::new(format!("{err:?}")))
+        .map_err(|err| PoolError::new(format!("{err:?}")))?;
+    Ok(session.with_local_route_overrides(local_route_overrides.clone()))
 }
 
 fn next_backoff(current: Duration, base: Duration, max: Duration) -> Duration {
@@ -1306,6 +1348,106 @@ fn build_route_set_snapshot(session: &Session) -> RouteSetSnapshot {
         domain_rules,
         ip_rules,
         static_dns,
+    }
+}
+
+fn build_local_route_set_snapshot(session: &Session) -> RouteSetSnapshot {
+    let local = session.local_route_overrides();
+
+    let mut domain_rules = local
+        .domain_rules()
+        .iter()
+        .map(|(domain, rule)| DomainRouteSnapshot {
+            domain: domain.clone(),
+            port_min: rule.port_min,
+            port_max: rule.port_max,
+            protocol: rule.protocol.clone(),
+        })
+        .collect::<Vec<_>>();
+    domain_rules.sort_by(|a, b| a.domain.cmp(&b.domain));
+
+    let mut ip_rules = local
+        .ip_rules()
+        .iter()
+        .map(|rule| IpRouteSnapshot {
+            ip_min: rule.ip_min.to_string(),
+            ip_max: rule.ip_max.to_string(),
+            port_min: rule.port_min,
+            port_max: rule.port_max,
+            protocol: rule.protocol.clone(),
+        })
+        .collect::<Vec<_>>();
+    ip_rules.sort_by(|a, b| {
+        (&a.ip_min, &a.ip_max, a.port_min, a.port_max, &a.protocol).cmp(&(
+            &b.ip_min,
+            &b.ip_max,
+            b.port_min,
+            b.port_max,
+            &b.protocol,
+        ))
+    });
+
+    RouteSetSnapshot {
+        domain_rules,
+        ip_rules,
+        static_dns: vec![],
+    }
+}
+
+fn build_local_route_overrides(
+    config: &crate::config::RoutingConfig,
+) -> Result<LocalRouteOverrides, PoolError> {
+    let mut domain_rules = HashMap::new();
+    for rule in &config.domain_rules {
+        let domain = normalize_override_domain(&rule.domain);
+        if domain.is_empty() {
+            return Err(PoolError::new("routing.domain_rules contains empty domain"));
+        }
+        domain_rules.insert(
+            domain,
+            smelly_connect::resource::DomainRule {
+                port_min: rule.port_min,
+                port_max: rule.port_max,
+                protocol: rule.protocol.clone(),
+            },
+        );
+    }
+
+    let mut ip_rules = Vec::with_capacity(config.ip_rules.len());
+    for rule in &config.ip_rules {
+        let ip_min = rule
+            .ip_min
+            .parse::<IpAddr>()
+            .map_err(|_| PoolError::new(format!("invalid routing ip_min: {}", rule.ip_min)))?;
+        let ip_max = rule
+            .ip_max
+            .as_deref()
+            .unwrap_or(&rule.ip_min)
+            .parse::<IpAddr>()
+            .map_err(|_| {
+                PoolError::new(format!(
+                    "invalid routing ip_max: {}",
+                    rule.ip_max.as_deref().unwrap_or(&rule.ip_min)
+                ))
+            })?;
+        ip_rules.push(smelly_connect::resource::IpRule {
+            ip_min,
+            ip_max,
+            port_min: rule.port_min,
+            port_max: rule.port_max,
+            protocol: rule.protocol.clone(),
+        });
+    }
+
+    Ok(LocalRouteOverrides::new(domain_rules, ip_rules))
+}
+
+fn normalize_override_domain(value: &str) -> String {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed.strip_prefix("*.") {
+        format!(".{rest}")
+    } else {
+        trimmed.to_string()
     }
 }
 

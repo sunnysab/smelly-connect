@@ -15,6 +15,55 @@ fn parses_sample_config() {
 }
 
 #[test]
+fn parses_local_routing_overrides_from_config() {
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+
+        [pool]
+        prewarm = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+        selection = "round_robin"
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+
+        [[routing.domain_rules]]
+        domain = "*.foo.edu.cn"
+        port_min = 443
+        port_max = 443
+        protocol = "tcp"
+
+        [[routing.ip_rules]]
+        ip_min = "42.62.107.1"
+        ip_max = "42.62.107.254"
+        port_min = 1
+        port_max = 65535
+        protocol = "all"
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(cfg.routing.domain_rules.len(), 1);
+    assert_eq!(cfg.routing.domain_rules[0].domain, "*.foo.edu.cn");
+    assert_eq!(cfg.routing.ip_rules.len(), 1);
+    assert_eq!(cfg.routing.ip_rules[0].ip_min, "42.62.107.1");
+    assert_eq!(cfg.routing.ip_rules[0].ip_max.as_deref(), Some("42.62.107.254"));
+}
+
+#[test]
 fn proxy_command_accepts_config_and_listener_overrides() {
     let cli = smelly_connect_cli::cli::Cli::parse_from([
         "smelly-connect-cli",

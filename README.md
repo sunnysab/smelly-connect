@@ -129,6 +129,21 @@ listen = "127.0.0.1:8080"
 enabled = true
 listen = "127.0.0.1:1080"
 
+[routing]
+
+[[routing.domain_rules]]
+domain = "*.foo.edu.cn"
+port_min = 443
+port_max = 443
+protocol = "tcp"
+
+[[routing.ip_rules]]
+ip_min = "42.62.107.1"
+ip_max = "42.62.107.254"
+port_min = 1
+port_max = 65535
+protocol = "all"
+
 [management]
 enabled = false
 listen = "127.0.0.1:9090"
@@ -156,6 +171,13 @@ smelly-connect-cli --config ./config.toml test http http://intranet.zju.edu.cn/h
 
 - CLI 显式参数覆盖 `config.toml`
 - `config.toml` 覆盖内建默认值
+
+本地补充路由：
+
+- `[routing]` 用于追加本地域名/IP 放行规则，与服务端下发规则做并集
+- `[[routing.domain_rules]]` 支持精确域名和 `*.example.com` 泛域名
+- `[[routing.ip_rules]]` 支持单 IP 和 `ip_min` 到 `ip_max` 的 IPv4 / IPv6 范围
+- 本地规则支持 `port_min` / `port_max` / `protocol`
 
 当前实现说明：
 

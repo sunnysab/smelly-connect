@@ -87,3 +87,56 @@ async fn routing_allows_direct_single_ip_resources() {
             if addr == "210.35.66.210:443".parse().unwrap()
     ));
 }
+
+#[tokio::test]
+async fn local_route_overrides_allow_domain_and_ip_targets() {
+    let mut system_dns = std::collections::HashMap::new();
+    system_dns.insert(
+        "portal.foo.edu.cn".to_string(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 8)),
+    );
+    let session = smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        smelly_connect::resource::ResourceSet::default(),
+        smelly_connect::resolver::SessionResolver::new(
+            std::collections::HashMap::new(),
+            None,
+            system_dns,
+        ),
+        smelly_connect::session::EasyConnectSession::failing_transport("unused"),
+    )
+    .with_local_route_overrides(smelly_connect::session::LocalRouteOverrides::new(
+        [(
+            "*.foo.edu.cn".to_string(),
+            smelly_connect::resource::DomainRule {
+                port_min: 443,
+                port_max: 443,
+                protocol: "tcp".to_string(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        vec![smelly_connect::resource::IpRule {
+            ip_min: "42.62.107.1".parse().unwrap(),
+            ip_max: "42.62.107.254".parse().unwrap(),
+            port_min: 1,
+            port_max: 65535,
+            protocol: "all".to_string(),
+        }],
+    ));
+
+    let domain_route = session
+        .plan_tcp_connect(("portal.foo.edu.cn", 443))
+        .await
+        .unwrap();
+    assert!(matches!(
+        domain_route,
+        smelly_connect::session::RoutePlan::VpnResolved(_)
+    ));
+
+    let ip_route = session.plan_tcp_connect(("42.62.107.8", 443)).await.unwrap();
+    assert!(matches!(
+        ip_route,
+        smelly_connect::session::RoutePlan::VpnResolved(_)
+    ));
+}

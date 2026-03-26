@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub accounts: Vec<AccountConfig>,
     pub proxy: ProxyConfig,
     #[serde(default)]
+    pub routing: RoutingConfig,
+    #[serde(default)]
     pub management: ManagementConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -70,6 +72,36 @@ pub struct ListenerConfig {
     pub listen: String,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RoutingConfig {
+    pub domain_rules: Vec<LocalDomainRuleConfig>,
+    pub ip_rules: Vec<LocalIpRuleConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LocalDomainRuleConfig {
+    pub domain: String,
+    #[serde(default = "default_port_min")]
+    pub port_min: u16,
+    #[serde(default = "default_port_max")]
+    pub port_max: u16,
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LocalIpRuleConfig {
+    pub ip_min: String,
+    pub ip_max: Option<String>,
+    #[serde(default = "default_port_min")]
+    pub port_min: u16,
+    #[serde(default = "default_port_max")]
+    pub port_max: u16,
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ManagementConfig {
@@ -102,6 +134,18 @@ impl Default for LoggingConfig {
             file: "smelly-connect.log".to_string(),
         }
     }
+}
+
+fn default_port_min() -> u16 {
+    1
+}
+
+fn default_port_max() -> u16 {
+    65535
+}
+
+fn default_protocol() -> String {
+    "all".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

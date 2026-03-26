@@ -116,21 +116,35 @@ fn format_routes(listen: &str, routes: RoutesSnapshot) -> String {
             Some(route_set) => {
                 for rule in route_set.domain_rules {
                     lines.push(format!(
-                        "domain {} ports={}-{} protocol={}",
+                        "remote domain {} ports={}-{} protocol={}",
                         rule.domain, rule.port_min, rule.port_max, rule.protocol
                     ));
                 }
                 for rule in route_set.ip_rules {
                     lines.push(format!(
-                        "ip {}-{} ports={}-{} protocol={}",
+                        "remote ip {}-{} ports={}-{} protocol={}",
                         rule.ip_min, rule.ip_max, rule.port_min, rule.port_max, rule.protocol
                     ));
                 }
                 for dns in route_set.static_dns {
-                    lines.push(format!("dns {}={}", dns.host, dns.ip));
+                    lines.push(format!("remote dns {}={}", dns.host, dns.ip));
                 }
             }
             None => lines.push("routes unavailable".to_string()),
+        }
+        if let Some(route_set) = node.local_routes {
+            for rule in route_set.domain_rules {
+                lines.push(format!(
+                    "local domain {} ports={}-{} protocol={}",
+                    rule.domain, rule.port_min, rule.port_max, rule.protocol
+                ));
+            }
+            for rule in route_set.ip_rules {
+                lines.push(format!(
+                    "local ip {}-{} ports={}-{} protocol={}",
+                    rule.ip_min, rule.ip_max, rule.port_min, rule.port_max, rule.protocol
+                ));
+            }
         }
     }
     lines.join("\n")

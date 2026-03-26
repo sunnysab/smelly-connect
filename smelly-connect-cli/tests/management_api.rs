@@ -98,3 +98,46 @@ async fn management_routes_endpoint_reports_route_tables() {
         "10.0.0.8"
     );
 }
+
+#[tokio::test]
+async fn management_routes_endpoint_reports_local_overrides_separately() {
+    let session = smelly_connect::session::tests::session_with_domain_match(
+        "jwxt.sit.edu.cn",
+        std::net::Ipv4Addr::new(10, 0, 0, 8),
+    )
+    .with_local_route_overrides(smelly_connect::session::LocalRouteOverrides::new(
+        [(
+            "*.foo.edu.cn".to_string(),
+            smelly_connect::resource::DomainRule {
+                port_min: 443,
+                port_max: 443,
+                protocol: "tcp".to_string(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        vec![smelly_connect::resource::IpRule {
+            ip_min: "42.62.107.1".parse().unwrap(),
+            ip_max: "42.62.107.254".parse().unwrap(),
+            port_min: 1,
+            port_max: 65535,
+            protocol: "all".to_string(),
+        }],
+    ));
+    let pool =
+        smelly_connect_cli::pool::SessionPool::from_live_sessions_for_test(vec![("acct-01", session)])
+            .await;
+    let stats = smelly_connect_cli::runtime::RuntimeStats::default();
+    let body = smelly_connect_cli::management::fetch_json_for_test(pool, stats, "/routes")
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["nodes"][0]["local_routes"]["domain_rules"][0]["domain"],
+        ".foo.edu.cn"
+    );
+    assert_eq!(
+        json["nodes"][0]["local_routes"]["ip_rules"][0]["ip_min"],
+        "42.62.107.1"
+    );
+}

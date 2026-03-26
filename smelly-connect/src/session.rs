@@ -27,10 +27,75 @@ pub enum IcmpKeepAliveTarget {
     Host(String),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalRouteOverrides {
+    domain_rules: HashMap<String, DomainRule>,
+    ip_rules: Vec<IpRule>,
+}
+
+impl LocalRouteOverrides {
+    pub fn new(domain_rules: HashMap<String, DomainRule>, ip_rules: Vec<IpRule>) -> Self {
+        let domain_rules = domain_rules
+            .into_iter()
+            .map(|(domain, rule)| (normalize_override_domain(&domain), rule))
+            .collect();
+        Self {
+            domain_rules,
+            ip_rules,
+        }
+    }
+
+    pub fn domain_rules(&self) -> &HashMap<String, DomainRule> {
+        &self.domain_rules
+    }
+
+    pub fn ip_rules(&self) -> &[IpRule] {
+        &self.ip_rules
+    }
+
+    fn matches_domain(&self, host: &str, port: u16) -> bool {
+        self.domain_rules.iter().any(|(domain, rule)| {
+            port >= rule.port_min
+                && port <= rule.port_max
+                && if domain.starts_with('.') {
+                    host.ends_with(domain)
+                } else {
+                    host == domain || host.ends_with(&format!(".{domain}"))
+                }
+        })
+    }
+
+    fn matches_ip(&self, ip: IpAddr, port: u16) -> bool {
+        self.ip_rules.iter().any(|rule| {
+            port >= rule.port_min
+                && port <= rule.port_max
+                && match (rule.ip_min, rule.ip_max, ip) {
+                    (IpAddr::V4(min), IpAddr::V4(max), IpAddr::V4(current)) => {
+                        current >= min && current <= max
+                    }
+                    (IpAddr::V6(min), IpAddr::V6(max), IpAddr::V6(current)) => {
+                        current >= min && current <= max
+                    }
+                    _ => false,
+                }
+        })
+    }
+}
+
+fn normalize_override_domain(value: &str) -> String {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed.strip_prefix("*.") {
+        format!(".{rest}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[derive(Clone)]
 pub struct EasyConnectSession {
     client_ip: Ipv4Addr,
     resources: ResourceSet,
+    local_route_overrides: LocalRouteOverrides,
     resolver: SessionResolver,
     transport: TransportStack,
     legacy_data_plane: Option<LegacyDataPlaneConfig>,
@@ -54,6 +119,7 @@ impl EasyConnectSession {
         Self {
             client_ip,
             resources,
+            local_route_overrides: LocalRouteOverrides::default(),
             resolver,
             transport,
             legacy_data_plane: None,
@@ -80,6 +146,15 @@ impl EasyConnectSession {
 
     pub fn resources(&self) -> &ResourceSet {
         &self.resources
+    }
+
+    pub fn local_route_overrides(&self) -> &LocalRouteOverrides {
+        &self.local_route_overrides
+    }
+
+    pub fn with_local_route_overrides(mut self, overrides: LocalRouteOverrides) -> Self {
+        self.local_route_overrides = overrides;
+        self
     }
 
     pub fn spawn_icmp_keepalive_task(
@@ -188,7 +263,9 @@ impl EasyConnectSession {
             return self.plan_ip(ip, port);
         }
 
-        if !self.resources.matches_domain(&host, port) {
+        if !self.resources.matches_domain(&host, port)
+            && !self.local_route_overrides.matches_domain(&host, port)
+        {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
 
@@ -202,7 +279,9 @@ impl EasyConnectSession {
     }
 
     fn plan_ip(&self, ip: Ipv4Addr, port: u16) -> Result<RoutePlan, Error> {
-        if !self.resources.matches_ip(IpAddr::V4(ip), port) {
+        if !self.resources.matches_ip(IpAddr::V4(ip), port)
+            && !self.local_route_overrides.matches_ip(IpAddr::V4(ip), port)
+        {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
 
