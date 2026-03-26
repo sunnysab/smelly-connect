@@ -15,3 +15,12 @@ async fn proxy_supports_https_connect() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn proxy_streams_split_http_request_body() {
+    let harness = smelly_connect::proxy::tests::http_proxy_harness_with_body_echo().await;
+    let body = harness
+        .post_split_body_via_proxy("http://intranet.zju.edu.cn/upload", "hello", " world")
+        .await;
+    assert_eq!(body, "hello world");
+}

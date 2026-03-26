@@ -3,6 +3,7 @@ pub mod http;
 pub mod tests {
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::Duration;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -49,10 +50,46 @@ pub mod tests {
             assert_eq!(&echoed, b"ping");
             Ok(())
         }
+
+        pub async fn post_split_body_via_proxy(
+            &self,
+            url: &str,
+            first: &str,
+            second: &str,
+        ) -> String {
+            let mut client = TcpStream::connect(self.proxy_addr).await.unwrap();
+            let request = format!(
+                "POST {url} HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{first}",
+                first.len() + second.len()
+            );
+            client.write_all(request.as_bytes()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            client.write_all(second.as_bytes()).await.unwrap();
+            client.shutdown().await.unwrap();
+
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).await.unwrap();
+            let response = String::from_utf8(response).unwrap();
+            response.split("\r\n\r\n").nth(1).unwrap().to_string()
+        }
     }
 
     pub async fn http_proxy_harness() -> HttpProxyHarness {
         let http_upstream = spawn_http_upstream().await;
+        let tunnel_upstream = spawn_echo_upstream().await;
+        let session = proxy_ready_session(http_upstream, tunnel_upstream);
+        let handle = session
+            .start_http_proxy("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        HttpProxyHarness {
+            proxy_addr: handle.local_addr(),
+            handle,
+        }
+    }
+
+    pub async fn http_proxy_harness_with_body_echo() -> HttpProxyHarness {
+        let http_upstream = spawn_body_echo_http_upstream().await;
         let tunnel_upstream = spawn_echo_upstream().await;
         let session = proxy_ready_session(http_upstream, tunnel_upstream);
         let handle = session
@@ -93,6 +130,68 @@ pub mod tests {
                 }
                 socket.write_all(&buf[..n]).await.unwrap();
             }
+        });
+        addr
+    }
+
+    async fn spawn_body_echo_http_upstream() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            let mut content_length = None::<usize>;
+            let mut header_end = None::<usize>;
+            let mut body_complete = false;
+
+            loop {
+                let n = match tokio::time::timeout(Duration::from_millis(200), socket.read(&mut chunk))
+                    .await
+                {
+                    Ok(Ok(n)) => n,
+                    Ok(Err(err)) => panic!("upstream read failed: {err}"),
+                    Err(_) => break,
+                };
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..n]);
+                if header_end.is_none() {
+                    header_end = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .map(|idx| idx + 4);
+                    if let Some(end) = header_end {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        content_length = headers.lines().find_map(|line| {
+                            let lower = line.to_ascii_lowercase();
+                            lower
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        });
+                    }
+                }
+                if let (Some(end), Some(length)) = (header_end, content_length)
+                    && request.len() >= end + length
+                {
+                    body_complete = true;
+                    break;
+                }
+            }
+
+            let body = if let (Some(end), Some(length)) = (header_end, content_length) {
+                let available = request.len().saturating_sub(end).min(length);
+                String::from_utf8_lossy(&request[end..end + available]).to_string()
+            } else {
+                String::new()
+            };
+            let status = if body_complete { "200 OK" } else { "400 Bad Request" };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
         });
         addr
     }

@@ -70,6 +70,8 @@ async fn handle_client(session: EasyConnectSession, mut client: TcpStream) -> io
     let method = parts.next().unwrap_or_default();
     let target = parts.next().unwrap_or_default();
     let version = parts.next().unwrap_or("HTTP/1.1");
+    let headers: Vec<&str> = lines.collect();
+    let content_length = parse_content_length(&headers);
 
     if method.eq_ignore_ascii_case("CONNECT") {
         return handle_connect(session, client, target, leftover).await;
@@ -81,8 +83,9 @@ async fn handle_client(session: EasyConnectSession, mut client: TcpStream) -> io
         method,
         target,
         version,
-        lines.collect(),
+        headers,
         leftover,
+        content_length,
     )
     .await
 }
@@ -113,6 +116,7 @@ async fn handle_forward(
     version: &str,
     headers: Vec<&str>,
     leftover: Vec<u8>,
+    content_length: Option<usize>,
 ) -> io::Result<()> {
     let (host, port, path) = parse_absolute_target(target)?;
     let mut upstream = session
@@ -134,7 +138,39 @@ async fn handle_forward(
     if !leftover.is_empty() {
         upstream.write_all(&leftover).await?;
     }
+    stream_remaining_request_body(&mut client, &mut upstream, leftover.len(), content_length)
+        .await?;
     tokio::io::copy(&mut upstream, &mut client).await?;
+    Ok(())
+}
+
+async fn stream_remaining_request_body(
+    client: &mut TcpStream,
+    upstream: &mut crate::transport::VpnStream,
+    already_buffered: usize,
+    content_length: Option<usize>,
+) -> io::Result<()> {
+    let Some(content_length) = content_length else {
+        return Ok(());
+    };
+    if already_buffered >= content_length {
+        return Ok(());
+    }
+
+    let mut remaining = content_length - already_buffered;
+    let mut chunk = [0_u8; 8192];
+    while remaining > 0 {
+        let limit = remaining.min(chunk.len());
+        let n = client.read(&mut chunk[..limit]).await?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed before request body completed",
+            ));
+        }
+        upstream.write_all(&chunk[..n]).await?;
+        remaining -= n;
+    }
     Ok(())
 }
 
@@ -160,6 +196,16 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .map(|idx| idx + 4)
+}
+
+fn parse_content_length(headers: &[&str]) -> Option<usize> {
+    headers.iter().find_map(|header| {
+        header.split_once(':').and_then(|(name, value)| {
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+    })
 }
 
 fn parse_absolute_target(target: &str) -> io::Result<(String, u16, String)> {
