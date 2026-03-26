@@ -34,6 +34,14 @@ async fn http_proxy_streams_split_chunked_request_body_to_upstream() {
 }
 
 #[tokio::test]
+async fn http_proxy_handles_expect_100_continue_requests() {
+    let result = smelly_connect_cli::proxy::http::proxy_http_expect_continue_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.body, "hello world");
+}
+
+#[tokio::test]
 async fn http_connect_proxy_tunnels_bytes_through_selected_session() {
     let result = smelly_connect_cli::proxy::http::proxy_connect_for_test()
         .await

@@ -270,6 +270,62 @@ pub async fn proxy_http_streams_chunked_request_body_for_test(
 }
 
 #[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_expect_continue_for_test() -> Result<HttpBodyTestResult, String> {
+    let upstream = spawn_request_body_echo_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
+        TcpStream::connect(upstream).await
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"POST http://intranet.zju.edu.cn/upload HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nContent-Length: 11\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let interim = tokio::time::timeout(Duration::from_millis(300), async {
+        let mut buf = [0_u8; 128];
+        let n = client.read(&mut buf).await.map_err(|err| err.to_string())?;
+        Ok::<String, String>(String::from_utf8_lossy(&buf[..n]).to_string())
+    })
+    .await
+    .map_err(|_| "proxy did not send 100 Continue".to_string())??;
+    if !interim.starts_with("HTTP/1.1 100 Continue") {
+        return Err(format!("unexpected interim response: {interim}"));
+    }
+
+    client
+        .write_all(b"hello world")
+        .await
+        .map_err(|err| err.to_string())?;
+    client.shutdown().await.map_err(|err| err.to_string())?;
+
+    let response = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok::<Vec<u8>, String>(response)
+    })
+    .await
+    .map_err(|_| "proxy response timed out".to_string())??;
+
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    Ok(HttpBodyTestResult { body })
+}
+
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_connect_for_test() -> Result<ConnectProxyTestResult, String> {
     let upstream = spawn_echo_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
@@ -661,6 +717,7 @@ struct ForwardRequest<'a> {
     headers: Vec<&'a str>,
     leftover: Vec<u8>,
     body_kind: RequestBodyKind,
+    expect_continue: bool,
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -811,6 +868,7 @@ where
     let version = parts.next().unwrap_or("HTTP/1.1");
     let headers: Vec<&str> = lines.collect();
     let body_kind = parse_request_body_kind(&headers);
+    let expect_continue = has_expect_100_continue(&headers);
 
     let account_name = match pool.next_account_name().await {
         Ok(name) => name,
@@ -866,6 +924,7 @@ where
             headers,
             leftover,
             body_kind,
+            expect_continue,
         },
     )
     .await
@@ -894,6 +953,7 @@ async fn handle_live_client(
     let version = parts.next().unwrap_or("HTTP/1.1");
     let headers: Vec<&str> = lines.collect();
     let body_kind = parse_request_body_kind(&headers);
+    let expect_continue = has_expect_100_continue(&headers);
 
     let (account_name, session) = match pool.next_live_session().await {
         Ok(ready) => ready,
@@ -990,6 +1050,7 @@ async fn handle_live_client(
         if lower.starts_with("proxy-connection:")
             || lower.starts_with("connection:")
             || lower.starts_with("keep-alive:")
+            || lower.starts_with("expect:")
         {
             continue;
         }
@@ -1005,6 +1066,7 @@ async fn handle_live_client(
         &upstream_request,
         &leftover,
         body_kind,
+        expect_continue,
         Some(&connection),
     )
     .await
@@ -1067,6 +1129,7 @@ where
         if lower.starts_with("proxy-connection:")
             || lower.starts_with("connection:")
             || lower.starts_with("keep-alive:")
+            || lower.starts_with("expect:")
         {
             continue;
         }
@@ -1082,6 +1145,7 @@ where
         &upstream_request,
         &request.leftover,
         request.body_kind,
+        request.expect_continue,
         connection.as_ref(),
     )
     .await
@@ -1119,6 +1183,7 @@ async fn relay_forward_stream(
     upstream_request: &str,
     leftover: &[u8],
     body_kind: RequestBodyKind,
+    expect_continue: bool,
     connection: Option<&ConnectionGuard>,
 ) -> Result<(), String> {
     upstream
@@ -1132,6 +1197,12 @@ async fn relay_forward_stream(
             .await
             .map_err(|err| err.to_string())?;
         record_client_to_upstream(connection, leftover.len());
+    }
+    if expect_continue {
+        client
+            .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+            .await
+            .map_err(|err| err.to_string())?;
     }
     stream_remaining_request_body(client, upstream, leftover, body_kind, connection).await?;
     let upstream_to_client = tokio::io::copy(upstream, client)
@@ -1325,6 +1396,17 @@ fn has_chunked_transfer_encoding(headers: &[&str]) -> bool {
                 && value
                     .split(',')
                     .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        })
+    })
+}
+
+fn has_expect_100_continue(headers: &[&str]) -> bool {
+    headers.iter().any(|header| {
+        header.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("expect")
+                && value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("100-continue"))
         })
     })
 }
