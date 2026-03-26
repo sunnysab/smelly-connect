@@ -24,6 +24,21 @@ use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 const SOCKS5_NETWORK_UNREACHABLE: u8 = 0x03;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
+#[derive(Debug, Clone)]
+enum UpstreamConnectError {
+    TimedOut,
+    Failed(String),
+}
+
+impl UpstreamConnectError {
+    fn label(&self) -> String {
+        match self {
+            Self::TimedOut => "connect timed out".to_string(),
+            Self::Failed(message) => message.clone(),
+        }
+    }
+}
+
 #[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
 pub struct Socks5ProxyTestResult {
@@ -510,7 +525,9 @@ where
     );
 
     let upstream = connector(account_name, host, port);
-    let mut upstream = connect_with_timeout(connect_timeout, upstream).await?;
+    let mut upstream = connect_with_timeout(connect_timeout, upstream)
+        .await
+        .map_err(|err| err.label())?;
     let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Socks5));
     relay_tunnel(&mut client, &mut upstream, connection.as_ref()).await
 }
@@ -608,9 +625,13 @@ async fn handle_live_client(
     );
 
     let upstream = session.connect_tcp((host.as_str(), port));
-    let mut upstream = connect_with_timeout(connect_timeout, upstream)
-        .await
-        .map_err(|err| format!("{account_name}: {err}"))?;
+    let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            pool.report_live_session_failure(&account_name, err.label()).await;
+            return Err(format!("{account_name}: {}", err.label()));
+        }
+    };
     let connection = stats.open_connection(ProxyProtocol::Socks5);
     relay_tunnel(&mut client, &mut upstream, Some(&connection)).await
 }
@@ -634,15 +655,18 @@ async fn relay_tunnel(
     Ok(())
 }
 
-async fn connect_with_timeout<T, E, Fut>(timeout: Duration, fut: Fut) -> Result<T, String>
+async fn connect_with_timeout<T, E, Fut>(
+    timeout: Duration,
+    fut: Fut,
+) -> Result<T, UpstreamConnectError>
 where
     E: std::fmt::Debug,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
     match tokio::time::timeout(timeout, fut).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(err)) => Err(format!("{err:?}")),
-        Err(_) => Err(format!("connect timed out after {}ms", timeout.as_millis())),
+        Ok(Err(err)) => Err(UpstreamConnectError::Failed(format!("{err:?}"))),
+        Err(_) => Err(UpstreamConnectError::TimedOut),
     }
 }
 

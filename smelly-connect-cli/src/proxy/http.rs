@@ -48,12 +48,30 @@ pub struct TimeoutTestResult {
     pub elapsed: Duration,
 }
 
+#[cfg(any(test, debug_assertions))]
+#[derive(Debug, Clone)]
+pub struct LiveFailureRecoveryTestResult {
+    pub status_code: u16,
+    pub state_summary: String,
+    pub selectable_after_failure: bool,
+    pub recovered_account: String,
+}
+
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
 enum UpstreamConnectError {
     TimedOut,
     Failed(String),
+}
+
+impl UpstreamConnectError {
+    fn label(&self) -> String {
+        match self {
+            Self::TimedOut => "connect timed out".to_string(),
+            Self::Failed(message) => message.clone(),
+        }
+    }
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -278,6 +296,38 @@ pub async fn proxy_connect_timeout_status_for_test() -> Result<NoReadySessionRes
     )
     .await?;
     request_connect_status(addr).await
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_live_connect_failure_recovery_for_test(
+) -> Result<LiveFailureRecoveryTestResult, String> {
+    let session = smelly_connect::session::tests::session_with_failing_domain_match(
+        "libdb.zju.edu.cn",
+        std::net::Ipv4Addr::new(10, 0, 0, 8),
+    );
+    let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|err| err.to_string())?;
+    let addr = listener.local_addr().map_err(|err| err.to_string())?;
+    let serve_pool = pool.clone();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let _ = handle_live_client(stream, serve_pool, RuntimeStats::default(), DEFAULT_CONNECT_TIMEOUT).await;
+    });
+
+    let status = request_connect_status(addr).await?;
+    let state_summary = pool.state_summary_for_test().await;
+    let selectable_after_failure = pool.has_selectable_nodes_for_test().await;
+    let recovered = pool.try_request_triggered_probe_for_test().await.unwrap();
+    Ok(LiveFailureRecoveryTestResult {
+        status_code: status.status_code,
+        state_summary,
+        selectable_after_failure,
+        recovered_account: recovered.account_name().to_string(),
+    })
 }
 
 pub async fn serve_http(
@@ -611,6 +661,7 @@ async fn handle_live_client(
         let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
             Ok(upstream) => upstream,
             Err(err) => {
+                pool.report_live_session_failure(&account_name, err.label()).await;
                 write_gateway_error_response(&mut client, &err).await?;
                 return Ok(());
             }
@@ -647,6 +698,7 @@ async fn handle_live_client(
     let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
         Err(err) => {
+            pool.report_live_session_failure(&account_name, err.label()).await;
             write_gateway_error_response(&mut client, &err).await?;
             return Ok(());
         }

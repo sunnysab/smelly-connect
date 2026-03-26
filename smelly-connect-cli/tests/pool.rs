@@ -151,3 +151,21 @@ async fn successful_probe_returns_node_to_ready_and_back_into_normal_rotation() 
     let picks = pool.collect_selected_accounts_for_test(1).await;
     assert_eq!(picks, vec!["acct-01".to_string()]);
 }
+
+#[tokio::test]
+async fn live_session_failure_opens_node_and_request_triggered_probe_can_recover() {
+    let session = smelly_connect::session::tests::session_with_domain_match(
+        "jwxt.sit.edu.cn",
+        std::net::Ipv4Addr::new(10, 0, 0, 8),
+    );
+    let pool =
+        smelly_connect_cli::pool::SessionPool::from_live_sessions_for_test(vec![("acct-01", session)])
+            .await;
+    pool.report_live_session_failure("acct-01", "forced live connect failure")
+        .await;
+    assert!(pool.state_summary_for_test().await.contains("Open"));
+    assert!(!pool.has_selectable_nodes_for_test().await);
+
+    let recovered = pool.try_request_triggered_probe_for_test().await.unwrap();
+    assert_eq!(recovered.account_name(), "acct-01");
+}

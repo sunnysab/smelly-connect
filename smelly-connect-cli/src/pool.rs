@@ -315,6 +315,41 @@ impl SessionPool {
     }
 
     #[cfg(any(test, debug_assertions))]
+    pub async fn from_live_sessions_for_test(entries: Vec<(&str, Session)>) -> Self {
+        let nodes = entries
+            .into_iter()
+            .map(|(account_name, session)| AccountNode {
+                name: account_name.to_string(),
+                account: AccountConfig {
+                    name: account_name.to_string(),
+                    username: account_name.to_string(),
+                    password: "pass".to_string(),
+                },
+                state: AccountState::Ready(
+                    PooledSession {
+                        account_name: account_name.to_string(),
+                        session: Some(session),
+                    }
+                    .into(),
+                ),
+                flaky_retry: false,
+                consecutive_failures: 0,
+                failure_threshold: 3,
+                current_backoff: Duration::from_secs(30),
+                backoff_base: Duration::from_secs(30),
+                backoff_max: Duration::from_secs(600),
+                open_until: None,
+            })
+            .collect();
+        Self {
+            inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            retry_delay: Duration::from_secs(1),
+            server: None,
+            allow_request_triggered_probe: true,
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub async fn from_test_outcomes<const N: usize>(
         outcomes: [Result<&str, &str>; N],
         prewarm: usize,
@@ -566,6 +601,22 @@ impl SessionPool {
         RoutesSnapshot {
             total_nodes: nodes.len(),
             nodes,
+        }
+    }
+
+    pub async fn report_live_session_failure(&self, account_name: &str, error: impl Into<String>) {
+        let error = error.into();
+        let mut state = self.inner.lock().await;
+        if let Some(node) = state.nodes.iter_mut().find(|node| node.name == account_name)
+            && matches!(node.state, AccountState::Ready(_) | AccountState::Suspect(_))
+        {
+            node.consecutive_failures = node.failure_threshold;
+            open_node(node, error.clone());
+            tracing::warn!(
+                account = %account_name,
+                error = %error,
+                "live session marked open after proxy failure"
+            );
         }
     }
 

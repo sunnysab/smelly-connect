@@ -274,6 +274,38 @@ pub mod tests {
         ready_session(host, ip)
     }
 
+    pub fn session_with_failing_domain_match(host: &str, ip: Ipv4Addr) -> EasyConnectSession {
+        let mut resources = ResourceSet::default();
+        resources.domain_rules.insert(
+            host.to_string(),
+            DomainRule {
+                port_min: 1,
+                port_max: 65535,
+                protocol: "all".to_string(),
+            },
+        );
+        resources.ip_rules.push(IpRule {
+            ip_min: IpAddr::V4(ip),
+            ip_max: IpAddr::V4(ip),
+            port_min: 1,
+            port_max: 65535,
+            protocol: "all".to_string(),
+        });
+        resources
+            .static_dns
+            .insert(host.to_string(), IpAddr::V4(ip));
+
+        let mut system = HashMap::new();
+        system.insert(host.to_string(), IpAddr::V4(ip));
+
+        EasyConnectSession::new(
+            ip,
+            resources,
+            SessionResolver::new(HashMap::new(), None, system),
+            EasyConnectSession::failing_transport("forced live connect failure"),
+        )
+    }
+
     pub fn session_with_icmp_ping(counter: Arc<AtomicUsize>) -> EasyConnectSession {
         let transport = ready_transport().with_icmp_pinger(move |_| {
             let counter = counter.clone();
