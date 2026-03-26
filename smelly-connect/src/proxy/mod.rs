@@ -21,14 +21,23 @@ pub mod tests {
 
     impl HttpProxyHarness {
         pub async fn get_via_proxy(&self, url: &str) -> String {
+            self.get_via_proxy_with_connection(url, "close").await
+        }
+
+        pub async fn get_via_proxy_with_connection(&self, url: &str, connection: &str) -> String {
             let mut client = TcpStream::connect(self.proxy_addr).await.unwrap();
             let request = format!(
-                "GET {url} HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n"
+                "GET {url} HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: {connection}\r\n\r\n"
             );
             client.write_all(request.as_bytes()).await.unwrap();
 
-            let mut response = Vec::new();
-            client.read_to_end(&mut response).await.unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(1), async {
+                let mut response = Vec::new();
+                client.read_to_end(&mut response).await.unwrap();
+                response
+            })
+            .await
+            .unwrap();
             let response = String::from_utf8(response).unwrap();
             response.split("\r\n\r\n").nth(1).unwrap().to_string()
         }
@@ -90,6 +99,20 @@ pub mod tests {
 
     pub async fn http_proxy_harness_with_body_echo() -> HttpProxyHarness {
         let http_upstream = spawn_body_echo_http_upstream().await;
+        let tunnel_upstream = spawn_echo_upstream().await;
+        let session = proxy_ready_session(http_upstream, tunnel_upstream);
+        let handle = session
+            .start_http_proxy("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        HttpProxyHarness {
+            proxy_addr: handle.local_addr(),
+            handle,
+        }
+    }
+
+    pub async fn http_proxy_harness_with_keep_alive() -> HttpProxyHarness {
+        let http_upstream = spawn_keep_alive_http_upstream().await;
         let tunnel_upstream = spawn_echo_upstream().await;
         let session = proxy_ready_session(http_upstream, tunnel_upstream);
         let handle = session
@@ -192,6 +215,28 @@ pub mod tests {
                 body.len()
             );
             socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        addr
+    }
+
+    async fn spawn_keep_alive_http_upstream() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 2048];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello",
+                )
+                .await
+                .unwrap();
+            if request.to_ascii_lowercase().contains("connection: close") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
         });
         addr
     }

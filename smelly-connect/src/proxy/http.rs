@@ -126,12 +126,17 @@ async fn handle_forward(
 
     let mut request = format!("{method} {path} {version}\r\n");
     for header in headers {
-        if header.to_ascii_lowercase().starts_with("proxy-connection:") {
+        let lower = header.to_ascii_lowercase();
+        if lower.starts_with("proxy-connection:")
+            || lower.starts_with("connection:")
+            || lower.starts_with("keep-alive:")
+        {
             continue;
         }
         request.push_str(header);
         request.push_str("\r\n");
     }
+    request.push_str("Connection: close\r\n");
     request.push_str("\r\n");
 
     upstream.write_all(request.as_bytes()).await?;

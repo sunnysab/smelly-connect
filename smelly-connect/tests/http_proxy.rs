@@ -24,3 +24,12 @@ async fn proxy_streams_split_http_request_body() {
         .await;
     assert_eq!(body, "hello world");
 }
+
+#[tokio::test]
+async fn proxy_completes_body_when_upstream_keeps_connection_alive() {
+    let harness = smelly_connect::proxy::tests::http_proxy_harness_with_keep_alive().await;
+    let body = harness
+        .get_via_proxy_with_connection("http://intranet.zju.edu.cn/index.html", "keep-alive")
+        .await;
+    assert_eq!(body, "hello");
+}
