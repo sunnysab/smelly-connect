@@ -127,6 +127,23 @@ pub mod tests {
             let response = String::from_utf8(response).unwrap();
             response.split("\r\n\r\n").nth(1).unwrap().to_string()
         }
+
+        pub async fn get_with_proxy_authorization_via_proxy(
+            &self,
+            url: &str,
+            credentials: &str,
+        ) -> String {
+            let mut client = TcpStream::connect(self.proxy_addr).await.unwrap();
+            let request = format!(
+                "GET {url} HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nProxy-Authorization: {credentials}\r\nConnection: close\r\n\r\n"
+            );
+            client.write_all(request.as_bytes()).await.unwrap();
+
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).await.unwrap();
+            let response = String::from_utf8(response).unwrap();
+            response.split("\r\n\r\n").nth(1).unwrap().to_string()
+        }
     }
 
     pub async fn http_proxy_harness() -> HttpProxyHarness {
@@ -173,6 +190,20 @@ pub mod tests {
 
     pub async fn http_proxy_harness_with_chunked_body_echo() -> HttpProxyHarness {
         let http_upstream = spawn_chunked_body_echo_http_upstream().await;
+        let tunnel_upstream = spawn_echo_upstream().await;
+        let session = proxy_ready_session(http_upstream, tunnel_upstream);
+        let handle = session
+            .start_http_proxy("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        HttpProxyHarness {
+            proxy_addr: handle.local_addr(),
+            handle,
+        }
+    }
+
+    pub async fn http_proxy_harness_with_proxy_auth_capture() -> HttpProxyHarness {
+        let http_upstream = spawn_proxy_auth_capture_http_upstream().await;
         let tunnel_upstream = spawn_echo_upstream().await;
         let session = proxy_ready_session(http_upstream, tunnel_upstream);
         let handle = session
@@ -327,6 +358,38 @@ pub mod tests {
             }
 
             let body = extract_chunked_request_body(&request).unwrap_or_default();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        addr
+    }
+
+    async fn spawn_proxy_auth_capture_http_upstream() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            let body = if request.contains("proxy-authorization:") {
+                "leaked"
+            } else {
+                "clean"
+            };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()

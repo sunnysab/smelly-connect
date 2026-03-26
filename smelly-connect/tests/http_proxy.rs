@@ -55,3 +55,15 @@ async fn proxy_handles_expect_100_continue_requests() {
         .await;
     assert_eq!(body, "hello world");
 }
+
+#[tokio::test]
+async fn proxy_does_not_forward_proxy_authorization_header() {
+    let harness = smelly_connect::proxy::tests::http_proxy_harness_with_proxy_auth_capture().await;
+    let body = harness
+        .get_with_proxy_authorization_via_proxy(
+            "http://intranet.zju.edu.cn/health",
+            "Basic Zm9vOmJhcg==",
+        )
+        .await;
+    assert_eq!(body, "clean");
+}

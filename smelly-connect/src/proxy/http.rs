@@ -144,6 +144,7 @@ async fn handle_forward(
     for header in headers {
         let lower = header.to_ascii_lowercase();
         if lower.starts_with("proxy-connection:")
+            || lower.starts_with("proxy-authorization:")
             || lower.starts_with("connection:")
             || lower.starts_with("keep-alive:")
             || lower.starts_with("expect:")
