@@ -54,3 +54,36 @@ async fn routing_allows_domain_resources_even_when_resolved_ip_is_not_in_ip_rule
             if addr == "210.35.66.210:443".parse().unwrap()
     ));
 }
+
+#[tokio::test]
+async fn routing_allows_direct_single_ip_resources() {
+    let resources = smelly_connect::resource::parse_resources(
+        r#"
+<Resource>
+  <Rcs>
+    <Rc type="1" proto="-1" host="210.35.66.210" port="443~443" />
+  </Rcs>
+  <Dns data="" dnsserver="10.10.0.21" />
+</Resource>
+"#,
+    )
+    .unwrap();
+
+    let session = smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        resources,
+        smelly_connect::resolver::SessionResolver::new(
+            std::collections::HashMap::new(),
+            None,
+            std::collections::HashMap::new(),
+        ),
+        smelly_connect::session::EasyConnectSession::failing_transport("unused"),
+    );
+
+    let route = session.plan_tcp_connect(("210.35.66.210", 443)).await.unwrap();
+    assert!(matches!(
+        route,
+        smelly_connect::session::RoutePlan::VpnResolved(addr)
+            if addr == "210.35.66.210:443".parse().unwrap()
+    ));
+}

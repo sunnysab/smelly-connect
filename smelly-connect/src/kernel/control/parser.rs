@@ -64,7 +64,7 @@ pub fn parse_resource_document(body: &str) -> Result<ResourceDocument, roxmltree
 
         for (host, port_range) in hosts.zip(ports) {
             let (port_min, port_max) = parse_port_range(port_range);
-            if let Some((ip_min, ip_max)) = parse_ip_range(host) {
+            if let Some((ip_min, ip_max)) = parse_ip_rule(host) {
                 resources.ip_rules.push(IpRule {
                     ip_min,
                     ip_max,
@@ -129,7 +129,11 @@ fn parse_port_range(value: &str) -> (u16, u16) {
     (min, max)
 }
 
-fn parse_ip_range(value: &str) -> Option<(IpAddr, IpAddr)> {
+fn parse_ip_rule(value: &str) -> Option<(IpAddr, IpAddr)> {
+    if let Ok(ip) = value.parse::<Ipv4Addr>() {
+        return Some((IpAddr::V4(ip), IpAddr::V4(ip)));
+    }
+
     let mut parts = value.split('~');
     let start = parts.next()?.parse::<Ipv4Addr>().ok()?;
     let end = parts.next()?.parse::<Ipv4Addr>().ok()?;
