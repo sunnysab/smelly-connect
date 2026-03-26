@@ -128,31 +128,36 @@ async fn open_node_reenters_via_timer_into_half_open_after_backoff_expiry() {
     assert!(pool.state_summary_for_test().await.contains("HalfOpen"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn request_triggered_probe_recovers_one_node_when_pool_is_exhausted() {
     let pool = smelly_connect_cli::pool::SessionPool::from_exhausted_pool_for_test().await;
+    let err = pool.try_request_triggered_probe_for_test().await.unwrap_err();
+    assert!(err.to_string().contains("no ready session"));
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
     let recovered = pool.try_request_triggered_probe_for_test().await.unwrap();
     assert_eq!(recovered.account_name(), "acct-01");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn concurrent_requests_do_not_probe_same_node_twice() {
     let pool = smelly_connect_cli::pool::SessionPool::from_exhausted_pool_for_test().await;
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
     let results = pool.run_concurrent_probe_race_for_test().await;
     assert_eq!(results.successes, 1);
     assert_eq!(results.fast_failures, 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn successful_probe_returns_node_to_ready_and_back_into_normal_rotation() {
     let pool = smelly_connect_cli::pool::SessionPool::from_exhausted_pool_for_test().await;
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
     let _ = pool.try_request_triggered_probe_for_test().await.unwrap();
     assert!(pool.has_selectable_nodes_for_test().await);
     let picks = pool.collect_selected_accounts_for_test(1).await;
     assert_eq!(picks, vec!["acct-01".to_string()]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn live_session_failure_opens_node_and_request_triggered_probe_can_recover() {
     let session = smelly_connect::session::tests::session_with_domain_match(
         "jwxt.sit.edu.cn",
@@ -166,6 +171,7 @@ async fn live_session_failure_opens_node_and_request_triggered_probe_can_recover
     assert!(pool.state_summary_for_test().await.contains("Open"));
     assert!(!pool.has_selectable_nodes_for_test().await);
 
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
     let recovered = pool.try_request_triggered_probe_for_test().await.unwrap();
     assert_eq!(recovered.account_name(), "acct-01");
 }

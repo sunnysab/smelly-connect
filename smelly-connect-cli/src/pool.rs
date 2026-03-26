@@ -1095,7 +1095,7 @@ impl SessionPool {
             return Ok(None);
         }
 
-        let half_open_candidates: Vec<_> = state
+        let probe_candidates: Vec<_> = state
             .nodes
             .iter()
             .enumerate()
@@ -1103,17 +1103,6 @@ impl SessionPool {
                 matches!(node.state, AccountState::HalfOpen(_)).then_some(idx)
             })
             .collect();
-        let open_candidates: Vec<_> = state
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, node)| matches!(node.state, AccountState::Open(_)).then_some(idx))
-            .collect();
-        let probe_candidates = if half_open_candidates.is_empty() {
-            open_candidates
-        } else {
-            half_open_candidates
-        };
         if probe_candidates.is_empty() {
             return Ok(None);
         }
