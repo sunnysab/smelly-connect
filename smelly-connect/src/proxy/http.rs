@@ -14,6 +14,12 @@ enum RequestBodyKind {
     Chunked,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RequestControl {
+    Standard,
+    ExpectContinue,
+}
+
 pub struct ProxyHandle {
     local_addr: SocketAddr,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -79,6 +85,7 @@ async fn handle_client(session: EasyConnectSession, mut client: TcpStream) -> io
     let version = parts.next().unwrap_or("HTTP/1.1");
     let headers: Vec<&str> = lines.collect();
     let body_kind = parse_request_body_kind(&headers);
+    let request_control = parse_request_control(&headers);
 
     if method.eq_ignore_ascii_case("CONNECT") {
         return handle_connect(session, client, target, leftover).await;
@@ -93,6 +100,7 @@ async fn handle_client(session: EasyConnectSession, mut client: TcpStream) -> io
         headers,
         leftover,
         body_kind,
+        request_control,
     )
     .await
 }
@@ -124,6 +132,7 @@ async fn handle_forward(
     headers: Vec<&str>,
     leftover: Vec<u8>,
     body_kind: RequestBodyKind,
+    request_control: RequestControl,
 ) -> io::Result<()> {
     let (host, port, path) = parse_absolute_target(target)?;
     let mut upstream = session
@@ -137,6 +146,7 @@ async fn handle_forward(
         if lower.starts_with("proxy-connection:")
             || lower.starts_with("connection:")
             || lower.starts_with("keep-alive:")
+            || lower.starts_with("expect:")
         {
             continue;
         }
@@ -149,6 +159,9 @@ async fn handle_forward(
     upstream.write_all(request.as_bytes()).await?;
     if !leftover.is_empty() {
         upstream.write_all(&leftover).await?;
+    }
+    if matches!(request_control, RequestControl::ExpectContinue) {
+        client.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
     }
     stream_remaining_request_body(&mut client, &mut upstream, &leftover, body_kind).await?;
     tokio::io::copy(&mut upstream, &mut client).await?;
@@ -260,6 +273,21 @@ fn parse_request_body_kind(headers: &[&str]) -> RequestBodyKind {
         RequestBodyKind::ContentLength(content_length)
     } else {
         RequestBodyKind::None
+    }
+}
+
+fn parse_request_control(headers: &[&str]) -> RequestControl {
+    if headers.iter().any(|header| {
+        header.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("expect")
+                && value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("100-continue"))
+        })
+    }) {
+        RequestControl::ExpectContinue
+    } else {
+        RequestControl::Standard
     }
 }
 

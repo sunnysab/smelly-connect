@@ -102,6 +102,31 @@ pub mod tests {
             let response = String::from_utf8(response).unwrap();
             response.split("\r\n\r\n").nth(1).unwrap().to_string()
         }
+
+        pub async fn post_expect_continue_via_proxy(&self, url: &str, body: &str) -> String {
+            let mut client = TcpStream::connect(self.proxy_addr).await.unwrap();
+            let request = format!(
+                "POST {url} HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            client.write_all(request.as_bytes()).await.unwrap();
+
+            let mut interim = [0_u8; 128];
+            let n = tokio::time::timeout(Duration::from_secs(1), client.read(&mut interim))
+                .await
+                .unwrap()
+                .unwrap();
+            let interim = String::from_utf8_lossy(&interim[..n]);
+            assert!(interim.starts_with("HTTP/1.1 100 Continue"));
+
+            client.write_all(body.as_bytes()).await.unwrap();
+            client.shutdown().await.unwrap();
+
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).await.unwrap();
+            let response = String::from_utf8(response).unwrap();
+            response.split("\r\n\r\n").nth(1).unwrap().to_string()
+        }
     }
 
     pub async fn http_proxy_harness() -> HttpProxyHarness {
