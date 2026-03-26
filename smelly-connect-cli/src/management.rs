@@ -78,9 +78,11 @@ fn router(pool: SessionPool, runtime_stats: RuntimeStats) -> Router {
 }
 
 async fn health(State(state): State<ManagementState>) -> Json<HealthResponse> {
-    let pool = state.pool.summary().await;
+    let mut pool = state.pool.summary().await;
+    let status = state.stats.effective_status(pool.status);
+    pool.status = status;
     Json(HealthResponse {
-        status: pool.status,
+        status,
         pool,
     })
 }

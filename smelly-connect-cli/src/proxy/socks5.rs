@@ -631,12 +631,14 @@ async fn handle_live_client(
         Ok(upstream) => upstream,
         Err(err) => {
             if !matches!(err, UpstreamConnectError::RouteRejected) {
+                stats.record_connect_failure();
                 pool.report_live_session_failure(&account_name, err.label())
                     .await;
             }
             return Err(format!("{account_name}: {}", err.label()));
         }
     };
+    stats.record_connect_success();
     let connection = stats.open_connection(ProxyProtocol::Socks5);
     relay_tunnel(&mut client, &mut upstream, Some(&connection)).await
 }

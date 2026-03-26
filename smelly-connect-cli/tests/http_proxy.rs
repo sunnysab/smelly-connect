@@ -69,7 +69,7 @@ async fn http_connect_returns_gateway_timeout_on_upstream_timeout() {
     assert_eq!(result.status_code, 504);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn http_live_connect_failure_marks_node_open_for_recovery() {
     let result = smelly_connect_cli::proxy::http::proxy_http_live_connect_failure_recovery_for_test()
         .await

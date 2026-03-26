@@ -17,6 +17,7 @@ pub enum ProxyProtocol {
 pub struct RuntimeStats {
     http: ProtocolStats,
     socks5: ProtocolStats,
+    consecutive_connect_failures: Arc<AtomicU64>,
 }
 
 impl RuntimeStats {
@@ -24,7 +25,7 @@ impl RuntimeStats {
         self.protocol_stats(protocol).open_connection()
     }
 
-    pub fn snapshot(&self, pool: PoolSummary) -> RuntimeSnapshot {
+    pub fn snapshot(&self, mut pool: PoolSummary) -> RuntimeSnapshot {
         let http = self.http.snapshot();
         let socks5 = self.socks5.snapshot();
         let total = ProtocolStatsSnapshot {
@@ -35,13 +36,24 @@ impl RuntimeStats {
             upstream_to_client_bytes: http.upstream_to_client_bytes
                 + socks5.upstream_to_client_bytes,
         };
+        let status = self.effective_status(pool.status);
+        pool.status = status;
         RuntimeSnapshot {
-            status: pool.status,
+            status,
             pool,
             total,
             http,
             socks5,
         }
+    }
+
+    pub fn record_connect_success(&self) {
+        self.consecutive_connect_failures.store(0, Ordering::Relaxed);
+    }
+
+    pub fn record_connect_failure(&self) {
+        self.consecutive_connect_failures
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -69,10 +81,30 @@ impl RuntimeStats {
         }
     }
 
+    #[cfg(any(test, debug_assertions))]
+    pub fn record_connect_failure_for_test(&self) {
+        self.record_connect_failure();
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn record_connect_success_for_test(&self) {
+        self.record_connect_success();
+    }
+
     fn protocol_stats(&self, protocol: ProxyProtocol) -> &ProtocolStats {
         match protocol {
             ProxyProtocol::Http => &self.http,
             ProxyProtocol::Socks5 => &self.socks5,
+        }
+    }
+
+    pub fn effective_status(&self, pool_status: crate::pool::PoolHealthStatus) -> crate::pool::PoolHealthStatus {
+        if matches!(pool_status, crate::pool::PoolHealthStatus::Healthy)
+            && self.consecutive_connect_failures.load(Ordering::Relaxed) > 0
+        {
+            crate::pool::PoolHealthStatus::Recovering
+        } else {
+            pool_status
         }
     }
 }

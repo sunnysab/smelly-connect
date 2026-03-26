@@ -323,6 +323,7 @@ pub async fn proxy_http_live_connect_failure_recovery_for_test(
     let status = request_connect_status(addr).await?;
     let state_summary = pool.state_summary_for_test().await;
     let selectable_after_failure = pool.has_selectable_nodes_for_test().await;
+    tokio::time::advance(Duration::from_secs(61)).await;
     let recovered = pool.try_request_triggered_probe_for_test().await.unwrap();
     Ok(LiveFailureRecoveryTestResult {
         status_code: status.status_code,
@@ -719,6 +720,7 @@ async fn handle_live_client(
             Ok(upstream) => upstream,
             Err(err) => {
                 if !matches!(err, UpstreamConnectError::RouteRejected) {
+                    stats.record_connect_failure();
                     pool.report_live_session_failure(&account_name, err.label())
                         .await;
                 }
@@ -726,6 +728,7 @@ async fn handle_live_client(
                 return Ok(());
             }
         };
+        stats.record_connect_success();
         let connection = stats.open_connection(ProxyProtocol::Http);
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -759,6 +762,7 @@ async fn handle_live_client(
         Ok(upstream) => upstream,
         Err(err) => {
             if !matches!(err, UpstreamConnectError::RouteRejected) {
+                stats.record_connect_failure();
                 pool.report_live_session_failure(&account_name, err.label())
                     .await;
             }
@@ -766,6 +770,7 @@ async fn handle_live_client(
             return Ok(());
         }
     };
+    stats.record_connect_success();
     let connection = stats.open_connection(ProxyProtocol::Http);
 
     let mut upstream_request = format!("{method} {path} {version}\r\n");
