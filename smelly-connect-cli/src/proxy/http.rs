@@ -54,6 +54,13 @@ pub struct TimeoutTestResult {
     pub elapsed: Duration,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RequestBodyKind {
+    None,
+    ContentLength(usize),
+    Chunked,
+}
+
 #[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
 pub struct LiveFailureRecoveryTestResult {
@@ -192,6 +199,52 @@ pub async fn proxy_http_streams_request_body_for_test() -> Result<HttpBodyTestRe
     tokio::time::sleep(Duration::from_millis(50)).await;
     client
         .write_all(b" world")
+        .await
+        .map_err(|err| err.to_string())?;
+    client.shutdown().await.map_err(|err| err.to_string())?;
+
+    let response = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok::<Vec<u8>, String>(response)
+    })
+    .await
+    .map_err(|_| "proxy response timed out".to_string())??;
+
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    Ok(HttpBodyTestResult { body })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_streams_chunked_request_body_for_test(
+) -> Result<HttpBodyTestResult, String> {
+    let upstream = spawn_chunked_request_body_echo_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
+        TcpStream::connect(upstream).await
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"POST http://intranet.zju.edu.cn/upload HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    client
+        .write_all(b"6\r\n world\r\n0\r\n\r\n")
         .await
         .map_err(|err| err.to_string())?;
     client.shutdown().await.map_err(|err| err.to_string())?;
@@ -607,7 +660,7 @@ struct ForwardRequest<'a> {
     version: &'a str,
     headers: Vec<&'a str>,
     leftover: Vec<u8>,
-    content_length: Option<usize>,
+    body_kind: RequestBodyKind,
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -757,7 +810,7 @@ where
     let target = parts.next().unwrap_or_default();
     let version = parts.next().unwrap_or("HTTP/1.1");
     let headers: Vec<&str> = lines.collect();
-    let content_length = parse_content_length(&headers);
+    let body_kind = parse_request_body_kind(&headers);
 
     let account_name = match pool.next_account_name().await {
         Ok(name) => name,
@@ -812,7 +865,7 @@ where
             version,
             headers,
             leftover,
-            content_length,
+            body_kind,
         },
     )
     .await
@@ -840,7 +893,7 @@ async fn handle_live_client(
     let target = parts.next().unwrap_or_default();
     let version = parts.next().unwrap_or("HTTP/1.1");
     let headers: Vec<&str> = lines.collect();
-    let content_length = parse_content_length(&headers);
+    let body_kind = parse_request_body_kind(&headers);
 
     let (account_name, session) = match pool.next_live_session().await {
         Ok(ready) => ready,
@@ -951,7 +1004,7 @@ async fn handle_live_client(
         &mut upstream,
         &upstream_request,
         &leftover,
-        content_length,
+        body_kind,
         Some(&connection),
     )
     .await
@@ -1028,7 +1081,7 @@ where
         &mut upstream,
         &upstream_request,
         &request.leftover,
-        request.content_length,
+        request.body_kind,
         connection.as_ref(),
     )
     .await
@@ -1065,7 +1118,7 @@ async fn relay_forward_stream(
     upstream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     upstream_request: &str,
     leftover: &[u8],
-    content_length: Option<usize>,
+    body_kind: RequestBodyKind,
     connection: Option<&ConnectionGuard>,
 ) -> Result<(), String> {
     upstream
@@ -1080,10 +1133,7 @@ async fn relay_forward_stream(
             .map_err(|err| err.to_string())?;
         record_client_to_upstream(connection, leftover.len());
     }
-    if let Some(content_length) = content_length {
-        stream_remaining_request_body(client, upstream, leftover.len(), content_length, connection)
-            .await?;
-    }
+    stream_remaining_request_body(client, upstream, leftover, body_kind, connection).await?;
     let upstream_to_client = tokio::io::copy(upstream, client)
         .await
         .map_err(|err| err.to_string())?;
@@ -1094,33 +1144,63 @@ async fn relay_forward_stream(
 async fn stream_remaining_request_body(
     client: &mut TcpStream,
     upstream: &mut (impl AsyncWrite + Unpin),
-    already_buffered: usize,
-    content_length: usize,
+    leftover: &[u8],
+    body_kind: RequestBodyKind,
     connection: Option<&ConnectionGuard>,
 ) -> Result<(), String> {
-    if already_buffered >= content_length {
-        return Ok(());
-    }
+    match body_kind {
+        RequestBodyKind::None => Ok(()),
+        RequestBodyKind::ContentLength(content_length) => {
+            if leftover.len() >= content_length {
+                return Ok(());
+            }
 
-    let mut remaining = content_length - already_buffered;
-    let mut buffer = [0_u8; 8192];
-    while remaining > 0 {
-        let limit = remaining.min(buffer.len());
-        let n = client
-            .read(&mut buffer[..limit])
-            .await
-            .map_err(|err| err.to_string())?;
-        if n == 0 {
-            return Err("connection closed before request body completed".to_string());
+            let mut remaining = content_length - leftover.len();
+            let mut buffer = [0_u8; 8192];
+            while remaining > 0 {
+                let limit = remaining.min(buffer.len());
+                let n = client
+                    .read(&mut buffer[..limit])
+                    .await
+                    .map_err(|err| err.to_string())?;
+                if n == 0 {
+                    return Err("connection closed before request body completed".to_string());
+                }
+                upstream
+                    .write_all(&buffer[..n])
+                    .await
+                    .map_err(|err| err.to_string())?;
+                record_client_to_upstream(connection, n);
+                remaining -= n;
+            }
+            Ok(())
         }
-        upstream
-            .write_all(&buffer[..n])
-            .await
-            .map_err(|err| err.to_string())?;
-        record_client_to_upstream(connection, n);
-        remaining -= n;
+        RequestBodyKind::Chunked => {
+            let mut tracker = ChunkedBodyTracker::new();
+            if tracker.feed(leftover).map_err(|err| err.to_string())? {
+                return Ok(());
+            }
+
+            let mut buffer = [0_u8; 8192];
+            loop {
+                let n = client
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                if n == 0 {
+                    return Err("connection closed before chunked request body completed".to_string());
+                }
+                upstream
+                    .write_all(&buffer[..n])
+                    .await
+                    .map_err(|err| err.to_string())?;
+                record_client_to_upstream(connection, n);
+                if tracker.feed(&buffer[..n]).map_err(|err| err.to_string())? {
+                    return Ok(());
+                }
+            }
+        }
     }
-    Ok(())
 }
 
 fn record_client_to_upstream(connection: Option<&ConnectionGuard>, bytes: usize) {
@@ -1236,6 +1316,105 @@ fn parse_content_length(headers: &[&str]) -> Option<usize> {
                 .flatten()
         })
     })
+}
+
+fn has_chunked_transfer_encoding(headers: &[&str]) -> bool {
+    headers.iter().any(|header| {
+        header.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("transfer-encoding")
+                && value
+                    .split(',')
+                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        })
+    })
+}
+
+fn parse_request_body_kind(headers: &[&str]) -> RequestBodyKind {
+    if has_chunked_transfer_encoding(headers) {
+        RequestBodyKind::Chunked
+    } else if let Some(content_length) = parse_content_length(headers) {
+        RequestBodyKind::ContentLength(content_length)
+    } else {
+        RequestBodyKind::None
+    }
+}
+
+struct ChunkedBodyTracker {
+    state: ChunkedState,
+}
+
+enum ChunkedState {
+    SizeLine(Vec<u8>),
+    Data(usize),
+    DataCrLf(usize),
+    Trailers(Vec<u8>),
+    Done,
+}
+
+impl ChunkedBodyTracker {
+    fn new() -> Self {
+        Self {
+            state: ChunkedState::SizeLine(Vec::new()),
+        }
+    }
+
+    fn feed(&mut self, input: &[u8]) -> io::Result<bool> {
+        let mut idx = 0usize;
+        while idx < input.len() {
+            match &mut self.state {
+                ChunkedState::SizeLine(buffer) => {
+                    buffer.push(input[idx]);
+                    idx += 1;
+                    if buffer.ends_with(b"\r\n") {
+                        let line = std::str::from_utf8(&buffer[..buffer.len() - 2]).map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size line")
+                        })?;
+                        let size_text = line.split(';').next().unwrap_or_default().trim();
+                        let size = usize::from_str_radix(size_text, 16).map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size")
+                        })?;
+                        self.state = if size == 0 {
+                            ChunkedState::Trailers(Vec::new())
+                        } else {
+                            ChunkedState::Data(size)
+                        };
+                    }
+                }
+                ChunkedState::Data(remaining) => {
+                    let take = (*remaining).min(input.len() - idx);
+                    *remaining -= take;
+                    idx += take;
+                    if *remaining == 0 {
+                        self.state = ChunkedState::DataCrLf(0);
+                    }
+                }
+                ChunkedState::DataCrLf(seen) => {
+                    let expected = if *seen == 0 { b'\r' } else { b'\n' };
+                    if input[idx] != expected {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid chunk delimiter",
+                        ));
+                    }
+                    *seen += 1;
+                    idx += 1;
+                    if *seen == 2 {
+                        self.state = ChunkedState::SizeLine(Vec::new());
+                    }
+                }
+                ChunkedState::Trailers(buffer) => {
+                    buffer.push(input[idx]);
+                    idx += 1;
+                    if buffer == b"\r\n" || buffer.ends_with(b"\r\n\r\n") {
+                        self.state = ChunkedState::Done;
+                        return Ok(true);
+                    }
+                }
+                ChunkedState::Done => return Ok(true),
+            }
+        }
+        Ok(matches!(self.state, ChunkedState::Done))
+    }
 }
 
 fn parse_absolute_target(target: &str) -> Result<(String, u16, String), String> {
@@ -1357,6 +1536,115 @@ async fn spawn_request_body_echo_upstream() -> SocketAddr {
         socket.write_all(response.as_bytes()).await.unwrap();
     });
     addr
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_chunked_request_body_echo_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+
+        loop {
+            let n = match tokio::time::timeout(Duration::from_millis(200), socket.read(&mut chunk))
+                .await
+            {
+                Ok(Ok(n)) => n,
+                Ok(Err(err)) => panic!("upstream read failed: {err}"),
+                Err(_) => break,
+            };
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..n]);
+            if chunked_request_complete(&request) {
+                break;
+            }
+        }
+
+        let body = extract_chunked_request_body(&request).unwrap_or_default();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    addr
+}
+
+#[cfg(any(test, debug_assertions))]
+fn chunked_request_complete(request: &[u8]) -> bool {
+    let Some(header_end) = find_header_end(request) else {
+        return false;
+    };
+    let body = &request[header_end..];
+    chunked_wire_complete(body)
+}
+
+#[cfg(any(test, debug_assertions))]
+fn extract_chunked_request_body(request: &[u8]) -> Option<String> {
+    let header_end = find_header_end(request)?;
+    let body = &request[header_end..];
+    if !chunked_wire_complete(body) {
+        return None;
+    }
+    let mut cursor = 0usize;
+    let mut decoded = Vec::new();
+    loop {
+        let line_end = body[cursor..]
+            .windows(2)
+            .position(|window| window == b"\r\n")?
+            + cursor;
+        let size_line = std::str::from_utf8(&body[cursor..line_end]).ok()?;
+        let size = usize::from_str_radix(size_line.split(';').next()?.trim(), 16).ok()?;
+        cursor = line_end + 2;
+        if size == 0 {
+            return String::from_utf8(decoded).ok();
+        }
+        decoded.extend_from_slice(body.get(cursor..cursor + size)?);
+        cursor += size;
+        if body.get(cursor..cursor + 2)? != b"\r\n" {
+            return None;
+        }
+        cursor += 2;
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
+fn chunked_wire_complete(body: &[u8]) -> bool {
+    let mut cursor = 0usize;
+    loop {
+        let Some(line_rel_end) = body[cursor..]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+        else {
+            return false;
+        };
+        let line_end = cursor + line_rel_end;
+        let Ok(size_line) = std::str::from_utf8(&body[cursor..line_end]) else {
+            return false;
+        };
+        let Ok(size) = usize::from_str_radix(
+            size_line.split(';').next().unwrap_or_default().trim(),
+            16,
+        ) else {
+            return false;
+        };
+        cursor = line_end + 2;
+        if size == 0 {
+            return body.get(cursor..cursor + 2) == Some(b"\r\n");
+        }
+        if body.len() < cursor + size + 2 {
+            return false;
+        }
+        cursor += size;
+        if body.get(cursor..cursor + 2) != Some(b"\r\n") {
+            return false;
+        }
+        cursor += 2;
+    }
 }
 
 #[cfg(any(test, debug_assertions))]
