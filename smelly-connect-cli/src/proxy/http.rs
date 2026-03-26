@@ -50,6 +50,12 @@ pub struct TimeoutTestResult {
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
+#[derive(Debug, Clone)]
+enum UpstreamConnectError {
+    TimedOut,
+    Failed(String),
+}
+
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_for_test() -> Result<HttpProxyTestResult, String> {
     let upstream = spawn_http_upstream().await;
@@ -247,6 +253,33 @@ pub async fn proxy_http_connect_timeout_for_test() -> Result<TimeoutTestResult, 
     })
 }
 
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_connect_failure_status_for_test() -> Result<NoReadySessionResult, String> {
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy_with_timeout(
+        pool,
+        Duration::from_millis(20),
+        |_account_name, _host, _port| async move { Err(io::Error::other("upstream failed")) },
+    )
+    .await?;
+    request_connect_status(addr).await
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_connect_timeout_status_for_test() -> Result<NoReadySessionResult, String> {
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy_with_timeout(
+        pool,
+        Duration::from_millis(20),
+        |_account_name, _host, _port| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Err(io::Error::new(io::ErrorKind::TimedOut, "slow upstream"))
+        },
+    )
+    .await?;
+    request_connect_status(addr).await
+}
+
 pub async fn serve_http(
     listen: String,
     pool: SessionPool,
@@ -357,6 +390,32 @@ async fn request_no_ready_session(addr: SocketAddr) -> Result<NoReadySessionResu
     client
         .write_all(
             b"GET http://intranet.zju.edu.cn/health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let status_line = response.lines().next().unwrap_or_default().to_string();
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+    Ok(NoReadySessionResult { status_code })
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn request_connect_status(addr: SocketAddr) -> Result<NoReadySessionResult, String> {
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"CONNECT libdb.zju.edu.cn:443 HTTP/1.1\r\nHost: libdb.zju.edu.cn:443\r\nConnection: close\r\n\r\n",
         )
         .await
         .map_err(|err| err.to_string())?;
@@ -509,9 +568,13 @@ async fn handle_live_client(
         );
         let (host, port) = split_host_port(target, 443)?;
         let upstream = session.connect_tcp((host, port));
-        let mut upstream = connect_with_timeout(connect_timeout, upstream)
-            .await
-            .map_err(|err| format!("{account_name}: {err}"))?;
+        let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
+            Ok(upstream) => upstream,
+            Err(err) => {
+                write_gateway_error_response(&mut client, &err).await?;
+                return Ok(());
+            }
+        };
         let connection = stats.open_connection(ProxyProtocol::Http);
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -541,9 +604,13 @@ async fn handle_live_client(
 
     let (host, port, path) = parse_absolute_target(target)?;
     let upstream = session.connect_tcp((host.as_str(), port));
-    let mut upstream = connect_with_timeout(connect_timeout, upstream)
-        .await
-        .map_err(|err| format!("{account_name}: {err}"))?;
+    let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            write_gateway_error_response(&mut client, &err).await?;
+            return Ok(());
+        }
+    };
     let connection = stats.open_connection(ProxyProtocol::Http);
 
     let mut upstream_request = format!("{method} {path} {version}\r\n");
@@ -591,7 +658,13 @@ where
 {
     let (host, port) = split_host_port(target, 443)?;
     let upstream = connector(account_name, host.to_string(), port);
-    let mut upstream = connect_with_timeout(connect_timeout, upstream).await?;
+    let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            write_gateway_error_response(&mut client, &err).await?;
+            return Ok(());
+        }
+    };
     let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
     relay_connect_tunnel(&mut client, &mut upstream, &leftover, connection.as_ref()).await
 }
@@ -611,7 +684,13 @@ where
 {
     let (host, port, path) = parse_absolute_target(request.target)?;
     let upstream = connector(account_name, host.clone(), port);
-    let mut upstream = connect_with_timeout(connect_timeout, upstream).await?;
+    let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            write_gateway_error_response(&mut client, &err).await?;
+            return Ok(());
+        }
+    };
     let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
 
     let mut upstream_request = format!("{} {path} {}\r\n", request.method, request.version);
@@ -709,16 +788,39 @@ fn record_tunnel_transfer(
     }
 }
 
-async fn connect_with_timeout<T, E, Fut>(timeout: Duration, fut: Fut) -> Result<T, String>
+async fn connect_with_timeout<T, E, Fut>(
+    timeout: Duration,
+    fut: Fut,
+) -> Result<T, UpstreamConnectError>
 where
     E: std::fmt::Debug,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
     match tokio::time::timeout(timeout, fut).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(err)) => Err(format!("{err:?}")),
-        Err(_) => Err(format!("connect timed out after {}ms", timeout.as_millis())),
+        Ok(Err(err)) => Err(UpstreamConnectError::Failed(format!("{err:?}"))),
+        Err(_) => Err(UpstreamConnectError::TimedOut),
     }
+}
+
+async fn write_gateway_error_response(
+    client: &mut TcpStream,
+    err: &UpstreamConnectError,
+) -> Result<(), String> {
+    let status = match err {
+        UpstreamConnectError::TimedOut => "504 Gateway Timeout",
+        UpstreamConnectError::Failed(message) => {
+            let _ = message;
+            "502 Bad Gateway"
+        }
+    };
+    client
+        .write_all(
+            format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .map_err(|err| err.to_string())
 }
 
 async fn read_headers(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> io::Result<usize> {

@@ -52,3 +52,19 @@ async fn http_proxy_enforces_connect_timeout() {
         .unwrap();
     assert!(result.elapsed < std::time::Duration::from_millis(150));
 }
+
+#[tokio::test]
+async fn http_connect_returns_bad_gateway_on_upstream_connect_failure() {
+    let result = smelly_connect_cli::proxy::http::proxy_connect_failure_status_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.status_code, 502);
+}
+
+#[tokio::test]
+async fn http_connect_returns_gateway_timeout_on_upstream_timeout() {
+    let result = smelly_connect_cli::proxy::http::proxy_connect_timeout_status_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.status_code, 504);
+}
