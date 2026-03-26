@@ -1,3 +1,5 @@
+#![cfg(not(feature = "management-api"))]
+
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};

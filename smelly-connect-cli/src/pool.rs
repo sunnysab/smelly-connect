@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
@@ -131,6 +131,49 @@ pub struct PoolSnapshot {
     pub nodes: Vec<AccountNodeSnapshot>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainRouteSnapshot {
+    pub domain: String,
+    pub port_min: u16,
+    pub port_max: u16,
+    pub protocol: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpRouteSnapshot {
+    pub ip_min: String,
+    pub ip_max: String,
+    pub port_min: u16,
+    pub port_max: u16,
+    pub protocol: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaticDnsSnapshot {
+    pub host: String,
+    pub ip: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteSetSnapshot {
+    pub domain_rules: Vec<DomainRouteSnapshot>,
+    pub ip_rules: Vec<IpRouteSnapshot>,
+    pub static_dns: Vec<StaticDnsSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountRoutesSnapshot {
+    pub name: String,
+    pub state: String,
+    pub routes: Option<RouteSetSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutesSnapshot {
+    pub total_nodes: usize,
+    pub nodes: Vec<AccountRoutesSnapshot>,
+}
+
 impl PoolError {
     fn new(message: impl Into<String>) -> Self {
         Self {
@@ -212,6 +255,45 @@ impl SessionPool {
                     PooledSession {
                         account_name: name.to_string(),
                         session: None,
+                    }
+                    .into(),
+                ),
+                flaky_retry: false,
+                consecutive_failures: 0,
+                failure_threshold: 3,
+                current_backoff: Duration::from_secs(30),
+                backoff_base: Duration::from_secs(30),
+                backoff_max: Duration::from_secs(600),
+                open_until: None,
+            })
+            .collect();
+        Self {
+            inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            retry_delay: Duration::from_secs(1),
+            server: None,
+            allow_request_triggered_probe: true,
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub async fn from_named_ready_live_accounts<const N: usize>(
+        entries: [(&str, &str, std::net::Ipv4Addr); N],
+    ) -> Self {
+        let nodes = entries
+            .into_iter()
+            .map(|(account_name, host, ip)| AccountNode {
+                name: account_name.to_string(),
+                account: AccountConfig {
+                    name: account_name.to_string(),
+                    username: account_name.to_string(),
+                    password: "pass".to_string(),
+                },
+                state: AccountState::Ready(
+                    PooledSession {
+                        account_name: account_name.to_string(),
+                        session: Some(smelly_connect::session::tests::session_with_domain_match(
+                            host, ip,
+                        )),
                     }
                     .into(),
                 ),
@@ -460,6 +542,31 @@ impl SessionPool {
         self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
         build_pool_summary(&state)
+    }
+
+    pub async fn routes_snapshot(&self) -> RoutesSnapshot {
+        self.refresh_time_based_states().await;
+        let state = self.inner.lock().await;
+        let mut nodes = Vec::with_capacity(state.nodes.len());
+
+        for node in &state.nodes {
+            let routes = match &node.state {
+                AccountState::Ready(session) | AccountState::Suspect(session) => {
+                    session.session().map(build_route_set_snapshot)
+                }
+                _ => None,
+            };
+            nodes.push(AccountRoutesSnapshot {
+                name: node.name.clone(),
+                state: state_label(&node.state).to_ascii_lowercase(),
+                routes,
+            });
+        }
+
+        RoutesSnapshot {
+            total_nodes: nodes.len(),
+            nodes,
+        }
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -1090,6 +1197,59 @@ fn state_label(state: &AccountState) -> &'static str {
         AccountState::Suspect(_) => "Suspect",
         AccountState::Open(_) => "Open",
         AccountState::HalfOpen(_) => "HalfOpen",
+    }
+}
+
+fn build_route_set_snapshot(session: &Session) -> RouteSetSnapshot {
+    let resources = session.resources();
+
+    let mut domain_rules = resources
+        .domain_rules
+        .iter()
+        .map(|(domain, rule)| DomainRouteSnapshot {
+            domain: domain.clone(),
+            port_min: rule.port_min,
+            port_max: rule.port_max,
+            protocol: rule.protocol.clone(),
+        })
+        .collect::<Vec<_>>();
+    domain_rules.sort_by(|a, b| a.domain.cmp(&b.domain));
+
+    let mut ip_rules = resources
+        .ip_rules
+        .iter()
+        .map(|rule| IpRouteSnapshot {
+            ip_min: rule.ip_min.to_string(),
+            ip_max: rule.ip_max.to_string(),
+            port_min: rule.port_min,
+            port_max: rule.port_max,
+            protocol: rule.protocol.clone(),
+        })
+        .collect::<Vec<_>>();
+    ip_rules.sort_by(|a, b| {
+        (&a.ip_min, &a.ip_max, a.port_min, a.port_max, &a.protocol).cmp(&(
+            &b.ip_min,
+            &b.ip_max,
+            b.port_min,
+            b.port_max,
+            &b.protocol,
+        ))
+    });
+
+    let mut static_dns = resources
+        .static_dns
+        .iter()
+        .map(|(host, ip)| StaticDnsSnapshot {
+            host: host.clone(),
+            ip: ip.to_string(),
+        })
+        .collect::<Vec<_>>();
+    static_dns.sort_by(|a, b| a.host.cmp(&b.host));
+
+    RouteSetSnapshot {
+        domain_rules,
+        ip_rules,
+        static_dns,
     }
 }
 

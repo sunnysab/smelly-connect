@@ -78,6 +78,10 @@ impl EasyConnectSession {
         self.client_ip
     }
 
+    pub fn resources(&self) -> &ResourceSet {
+        &self.resources
+    }
+
     pub fn spawn_icmp_keepalive_task(
         &self,
         target: IcmpKeepAliveTarget,
@@ -304,6 +308,9 @@ pub mod tests {
             port_max: 65535,
             protocol: "all".to_string(),
         });
+        resources
+            .static_dns
+            .insert(host.to_string(), IpAddr::V4(ip));
 
         let mut system = HashMap::new();
         system.insert(host.to_string(), IpAddr::V4(ip));

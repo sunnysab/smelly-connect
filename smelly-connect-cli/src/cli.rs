@@ -15,6 +15,7 @@ pub struct Cli {
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
     Proxy(ProxyCommand),
+    Routes,
     Status,
     #[command(subcommand)]
     Inspect(InspectCommand),

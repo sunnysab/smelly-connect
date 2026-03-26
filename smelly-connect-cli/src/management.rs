@@ -73,6 +73,7 @@ fn router(pool: SessionPool, runtime_stats: RuntimeStats) -> Router {
         .route("/healthz", get(health))
         .route("/stats", get(stats_snapshot))
         .route("/nodes", get(nodes))
+        .route("/routes", get(routes))
         .with_state(state)
 }
 
@@ -97,6 +98,10 @@ async fn nodes(State(state): State<ManagementState>) -> Json<NodesResponse> {
         total_nodes: snapshot.summary.total_nodes,
         nodes: snapshot.nodes,
     })
+}
+
+async fn routes(State(state): State<ManagementState>) -> Json<crate::pool::RoutesSnapshot> {
+    Json(state.pool.routes_snapshot().await)
 }
 
 #[cfg(any(test, debug_assertions))]

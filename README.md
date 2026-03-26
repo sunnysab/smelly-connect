@@ -143,6 +143,7 @@ file = "smelly-connect.log"
 
 ```bash
 smelly-connect-cli --config ./config.toml proxy --listen-http 127.0.0.1:8080 --listen-socks5 127.0.0.1:1080
+smelly-connect-cli --config ./config.toml routes
 smelly-connect-cli --config ./config.toml status
 smelly-connect-cli --config ./config.toml inspect route jwxt.sit.edu.cn 443
 smelly-connect-cli --config ./config.toml inspect session
@@ -190,10 +191,12 @@ smelly-connect-cli --config ./config.toml test http http://intranet.zju.edu.cn/h
 - 这是一个独立监听口，默认建议只绑定 `127.0.0.1`
 - 需要使用 `management-api` feature 编译
 - 如果 `config.toml` 里启用了 `[management].enabled = true`，但二进制没有带 `management-api` feature，`proxy` 启动会直接失败
+- `routes` 命令会从 `[management].listen` 拉取当前已加载的域名规则、IP 规则和静态 DNS 映射
 - `status` 命令会从 `[management].listen` 拉取当前健康状态和统计信息，因此要求目标服务已开启 management API
 - `GET /healthz` 返回池健康摘要
 - `GET /stats` 返回当前连接数、累计连接数、双向流量统计，以及 pool 节点状态摘要
 - `GET /nodes` 返回逐节点状态明细
+- `GET /routes` 返回当前已加载的路由规则快照
 
 最小返回示例：
 

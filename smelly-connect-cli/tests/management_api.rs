@@ -50,3 +50,29 @@ async fn management_nodes_endpoint_reports_verbose_node_states() {
     assert_eq!(json["nodes"][0]["name"], "acct-01");
     assert_eq!(json["nodes"][0]["state"], "ready");
 }
+
+#[tokio::test]
+async fn management_routes_endpoint_reports_route_tables() {
+    let pool = smelly_connect_cli::pool::SessionPool::from_named_ready_live_accounts([(
+        "acct-01",
+        "jwxt.sit.edu.cn",
+        std::net::Ipv4Addr::new(10, 0, 0, 8),
+    )])
+    .await;
+    let stats = smelly_connect_cli::runtime::RuntimeStats::default();
+    let body = smelly_connect_cli::management::fetch_json_for_test(pool, stats, "/routes")
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["total_nodes"], 1);
+    assert_eq!(json["nodes"][0]["name"], "acct-01");
+    assert_eq!(json["nodes"][0]["state"], "ready");
+    assert_eq!(
+        json["nodes"][0]["routes"]["domain_rules"][0]["domain"],
+        "jwxt.sit.edu.cn"
+    );
+    assert_eq!(
+        json["nodes"][0]["routes"]["ip_rules"][0]["ip_min"],
+        "10.0.0.8"
+    );
+}
