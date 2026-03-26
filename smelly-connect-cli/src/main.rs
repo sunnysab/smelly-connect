@@ -36,6 +36,13 @@ fn main() {
             smelly_connect_cli::cli::Command::Proxy(command) => {
                 smelly_connect_cli::commands::proxy::run_proxy(&config_path, &command).await
             }
+            smelly_connect_cli::cli::Command::Status => {
+                let output =
+                    smelly_connect_cli::commands::status::run_status_with_config(&config_path)
+                        .await?;
+                println!("{output}");
+                Ok(())
+            }
             smelly_connect_cli::cli::Command::Inspect(cmd) => match cmd {
                 smelly_connect_cli::cli::InspectCommand::Route { host, port } => {
                     let output = smelly_connect_cli::commands::inspect::run_route_with_config(

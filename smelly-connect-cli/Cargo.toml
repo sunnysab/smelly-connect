@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = []
-management-api = ["dep:axum", "dep:serde_json"]
+management-api = ["dep:axum"]
 
 [lib]
 name = "smelly_connect_cli"
@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time", "net", "io-util", "test-util"] }
 smelly-connect = { path = "../smelly-connect" }
@@ -25,4 +26,3 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "time"] }
 axum = { version = "0.8", optional = true, features = ["json"] }
-serde_json = { version = "1", optional = true }

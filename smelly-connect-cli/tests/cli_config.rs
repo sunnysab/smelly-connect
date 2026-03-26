@@ -33,6 +33,15 @@ fn proxy_command_accepts_config_and_listener_overrides() {
 }
 
 #[test]
+fn status_is_available_as_a_top_level_command() {
+    let cli = smelly_connect_cli::cli::Cli::parse_from(["smelly-connect-cli", "status"]);
+    assert!(matches!(
+        cli.command,
+        smelly_connect_cli::cli::Command::Status
+    ));
+}
+
+#[test]
 fn cli_flags_override_config_values() {
     let merged = smelly_connect_cli::config::merge_for_test(
         "tests/fixtures/config.sample.toml",
