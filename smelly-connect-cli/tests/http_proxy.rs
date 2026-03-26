@@ -42,6 +42,15 @@ async fn http_proxy_handles_expect_100_continue_requests() {
 }
 
 #[tokio::test]
+async fn http_proxy_does_not_forward_proxy_authorization_header() {
+    let result =
+        smelly_connect_cli::proxy::http::proxy_http_strips_proxy_authorization_for_test()
+            .await
+            .unwrap();
+    assert_eq!(result.body, "clean");
+}
+
+#[tokio::test]
 async fn http_connect_proxy_tunnels_bytes_through_selected_session() {
     let result = smelly_connect_cli::proxy::http::proxy_connect_for_test()
         .await

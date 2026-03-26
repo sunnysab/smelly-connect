@@ -326,6 +326,39 @@ pub async fn proxy_http_expect_continue_for_test() -> Result<HttpBodyTestResult,
 }
 
 #[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_strips_proxy_authorization_for_test(
+) -> Result<HttpBodyTestResult, String> {
+    let upstream = spawn_proxy_auth_capture_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
+        TcpStream::connect(upstream).await
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"GET http://intranet.zju.edu.cn/health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nProxy-Authorization: Basic Zm9vOmJhcg==\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    Ok(HttpBodyTestResult { body })
+}
+
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_connect_for_test() -> Result<ConnectProxyTestResult, String> {
     let upstream = spawn_echo_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
@@ -1048,6 +1081,7 @@ async fn handle_live_client(
     for header in &headers {
         let lower = header.to_ascii_lowercase();
         if lower.starts_with("proxy-connection:")
+            || lower.starts_with("proxy-authorization:")
             || lower.starts_with("connection:")
             || lower.starts_with("keep-alive:")
             || lower.starts_with("expect:")
@@ -1127,6 +1161,7 @@ where
     for header in request.headers {
         let lower = header.to_ascii_lowercase();
         if lower.starts_with("proxy-connection:")
+            || lower.starts_with("proxy-authorization:")
             || lower.starts_with("connection:")
             || lower.starts_with("keep-alive:")
             || lower.starts_with("expect:")
@@ -1647,6 +1682,39 @@ async fn spawn_chunked_request_body_echo_upstream() -> SocketAddr {
         }
 
         let body = extract_chunked_request_body(&request).unwrap_or_default();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    addr
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_proxy_auth_capture_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let n = socket.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..n]);
+            if find_header_end(&request).is_some() {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+        let body = if request.contains("proxy-authorization:") {
+            "leaked"
+        } else {
+            "clean"
+        };
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
