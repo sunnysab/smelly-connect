@@ -7,6 +7,13 @@ use tokio::sync::oneshot;
 
 use crate::session::EasyConnectSession;
 
+#[derive(Debug, Clone, Copy)]
+enum RequestBodyKind {
+    None,
+    ContentLength(usize),
+    Chunked,
+}
+
 pub struct ProxyHandle {
     local_addr: SocketAddr,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -71,7 +78,7 @@ async fn handle_client(session: EasyConnectSession, mut client: TcpStream) -> io
     let target = parts.next().unwrap_or_default();
     let version = parts.next().unwrap_or("HTTP/1.1");
     let headers: Vec<&str> = lines.collect();
-    let content_length = parse_content_length(&headers);
+    let body_kind = parse_request_body_kind(&headers);
 
     if method.eq_ignore_ascii_case("CONNECT") {
         return handle_connect(session, client, target, leftover).await;
@@ -85,7 +92,7 @@ async fn handle_client(session: EasyConnectSession, mut client: TcpStream) -> io
         version,
         headers,
         leftover,
-        content_length,
+        body_kind,
     )
     .await
 }
@@ -116,7 +123,7 @@ async fn handle_forward(
     version: &str,
     headers: Vec<&str>,
     leftover: Vec<u8>,
-    content_length: Option<usize>,
+    body_kind: RequestBodyKind,
 ) -> io::Result<()> {
     let (host, port, path) = parse_absolute_target(target)?;
     let mut upstream = session
@@ -143,8 +150,7 @@ async fn handle_forward(
     if !leftover.is_empty() {
         upstream.write_all(&leftover).await?;
     }
-    stream_remaining_request_body(&mut client, &mut upstream, leftover.len(), content_length)
-        .await?;
+    stream_remaining_request_body(&mut client, &mut upstream, &leftover, body_kind).await?;
     tokio::io::copy(&mut upstream, &mut client).await?;
     Ok(())
 }
@@ -152,31 +158,54 @@ async fn handle_forward(
 async fn stream_remaining_request_body(
     client: &mut TcpStream,
     upstream: &mut crate::transport::VpnStream,
-    already_buffered: usize,
-    content_length: Option<usize>,
+    leftover: &[u8],
+    body_kind: RequestBodyKind,
 ) -> io::Result<()> {
-    let Some(content_length) = content_length else {
-        return Ok(());
-    };
-    if already_buffered >= content_length {
-        return Ok(());
-    }
+    match body_kind {
+        RequestBodyKind::None => Ok(()),
+        RequestBodyKind::ContentLength(content_length) => {
+            if leftover.len() >= content_length {
+                return Ok(());
+            }
 
-    let mut remaining = content_length - already_buffered;
-    let mut chunk = [0_u8; 8192];
-    while remaining > 0 {
-        let limit = remaining.min(chunk.len());
-        let n = client.read(&mut chunk[..limit]).await?;
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "connection closed before request body completed",
-            ));
+            let mut remaining = content_length - leftover.len();
+            let mut chunk = [0_u8; 8192];
+            while remaining > 0 {
+                let limit = remaining.min(chunk.len());
+                let n = client.read(&mut chunk[..limit]).await?;
+                if n == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "connection closed before request body completed",
+                    ));
+                }
+                upstream.write_all(&chunk[..n]).await?;
+                remaining -= n;
+            }
+            Ok(())
         }
-        upstream.write_all(&chunk[..n]).await?;
-        remaining -= n;
+        RequestBodyKind::Chunked => {
+            let mut tracker = ChunkedBodyTracker::new();
+            if tracker.feed(leftover)? {
+                return Ok(());
+            }
+
+            let mut chunk = [0_u8; 8192];
+            loop {
+                let n = client.read(&mut chunk).await?;
+                if n == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "connection closed before chunked request body completed",
+                    ));
+                }
+                upstream.write_all(&chunk[..n]).await?;
+                if tracker.feed(&chunk[..n])? {
+                    return Ok(());
+                }
+            }
+        }
     }
-    Ok(())
 }
 
 async fn read_headers(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> io::Result<usize> {
@@ -211,6 +240,105 @@ fn parse_content_length(headers: &[&str]) -> Option<usize> {
                 .flatten()
         })
     })
+}
+
+fn has_chunked_transfer_encoding(headers: &[&str]) -> bool {
+    headers.iter().any(|header| {
+        header.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("transfer-encoding")
+                && value
+                    .split(',')
+                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        })
+    })
+}
+
+fn parse_request_body_kind(headers: &[&str]) -> RequestBodyKind {
+    if has_chunked_transfer_encoding(headers) {
+        RequestBodyKind::Chunked
+    } else if let Some(content_length) = parse_content_length(headers) {
+        RequestBodyKind::ContentLength(content_length)
+    } else {
+        RequestBodyKind::None
+    }
+}
+
+struct ChunkedBodyTracker {
+    state: ChunkedState,
+}
+
+enum ChunkedState {
+    SizeLine(Vec<u8>),
+    Data(usize),
+    DataCrLf(usize),
+    Trailers(Vec<u8>),
+    Done,
+}
+
+impl ChunkedBodyTracker {
+    fn new() -> Self {
+        Self {
+            state: ChunkedState::SizeLine(Vec::new()),
+        }
+    }
+
+    fn feed(&mut self, input: &[u8]) -> io::Result<bool> {
+        let mut idx = 0usize;
+        while idx < input.len() {
+            match &mut self.state {
+                ChunkedState::SizeLine(buffer) => {
+                    buffer.push(input[idx]);
+                    idx += 1;
+                    if buffer.ends_with(b"\r\n") {
+                        let line = std::str::from_utf8(&buffer[..buffer.len() - 2]).map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size line")
+                        })?;
+                        let size_text = line.split(';').next().unwrap_or_default().trim();
+                        let size = usize::from_str_radix(size_text, 16).map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size")
+                        })?;
+                        self.state = if size == 0 {
+                            ChunkedState::Trailers(Vec::new())
+                        } else {
+                            ChunkedState::Data(size)
+                        };
+                    }
+                }
+                ChunkedState::Data(remaining) => {
+                    let take = (*remaining).min(input.len() - idx);
+                    *remaining -= take;
+                    idx += take;
+                    if *remaining == 0 {
+                        self.state = ChunkedState::DataCrLf(0);
+                    }
+                }
+                ChunkedState::DataCrLf(seen) => {
+                    let expected = if *seen == 0 { b'\r' } else { b'\n' };
+                    if input[idx] != expected {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid chunk delimiter",
+                        ));
+                    }
+                    *seen += 1;
+                    idx += 1;
+                    if *seen == 2 {
+                        self.state = ChunkedState::SizeLine(Vec::new());
+                    }
+                }
+                ChunkedState::Trailers(buffer) => {
+                    buffer.push(input[idx]);
+                    idx += 1;
+                    if buffer == b"\r\n" || buffer.ends_with(b"\r\n\r\n") {
+                        self.state = ChunkedState::Done;
+                        return Ok(true);
+                    }
+                }
+                ChunkedState::Done => return Ok(true),
+            }
+        }
+        Ok(matches!(self.state, ChunkedState::Done))
+    }
 }
 
 fn parse_absolute_target(target: &str) -> io::Result<(String, u16, String)> {

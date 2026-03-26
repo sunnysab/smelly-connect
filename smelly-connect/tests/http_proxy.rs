@@ -33,3 +33,16 @@ async fn proxy_completes_body_when_upstream_keeps_connection_alive() {
         .await;
     assert_eq!(body, "hello");
 }
+
+#[tokio::test]
+async fn proxy_streams_split_chunked_http_request_body() {
+    let harness = smelly_connect::proxy::tests::http_proxy_harness_with_chunked_body_echo().await;
+    let body = harness
+        .post_split_chunked_body_via_proxy(
+            "http://intranet.zju.edu.cn/upload",
+            "5\r\nhello\r\n",
+            "6\r\n world\r\n0\r\n\r\n",
+        )
+        .await;
+    assert_eq!(body, "hello world");
+}

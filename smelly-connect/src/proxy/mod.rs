@@ -81,6 +81,27 @@ pub mod tests {
             let response = String::from_utf8(response).unwrap();
             response.split("\r\n\r\n").nth(1).unwrap().to_string()
         }
+
+        pub async fn post_split_chunked_body_via_proxy(
+            &self,
+            url: &str,
+            first: &str,
+            second: &str,
+        ) -> String {
+            let mut client = TcpStream::connect(self.proxy_addr).await.unwrap();
+            let request = format!(
+                "POST {url} HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{first}"
+            );
+            client.write_all(request.as_bytes()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            client.write_all(second.as_bytes()).await.unwrap();
+            client.shutdown().await.unwrap();
+
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).await.unwrap();
+            let response = String::from_utf8(response).unwrap();
+            response.split("\r\n\r\n").nth(1).unwrap().to_string()
+        }
     }
 
     pub async fn http_proxy_harness() -> HttpProxyHarness {
@@ -113,6 +134,20 @@ pub mod tests {
 
     pub async fn http_proxy_harness_with_keep_alive() -> HttpProxyHarness {
         let http_upstream = spawn_keep_alive_http_upstream().await;
+        let tunnel_upstream = spawn_echo_upstream().await;
+        let session = proxy_ready_session(http_upstream, tunnel_upstream);
+        let handle = session
+            .start_http_proxy("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        HttpProxyHarness {
+            proxy_addr: handle.local_addr(),
+            handle,
+        }
+    }
+
+    pub async fn http_proxy_harness_with_chunked_body_echo() -> HttpProxyHarness {
+        let http_upstream = spawn_chunked_body_echo_http_upstream().await;
         let tunnel_upstream = spawn_echo_upstream().await;
         let session = proxy_ready_session(http_upstream, tunnel_upstream);
         let handle = session
@@ -239,6 +274,118 @@ pub mod tests {
             tokio::time::sleep(Duration::from_secs(5)).await;
         });
         addr
+    }
+
+    async fn spawn_chunked_body_echo_http_upstream() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+
+            loop {
+                let n = match tokio::time::timeout(Duration::from_millis(200), socket.read(&mut chunk))
+                    .await
+                {
+                    Ok(Ok(n)) => n,
+                    Ok(Err(err)) => panic!("upstream read failed: {err}"),
+                    Err(_) => break,
+                };
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..n]);
+                if chunked_request_complete(&request) {
+                    break;
+                }
+            }
+
+            let body = extract_chunked_request_body(&request).unwrap_or_default();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        addr
+    }
+
+    fn chunked_request_complete(request: &[u8]) -> bool {
+        let Some(header_end) = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|idx| idx + 4)
+        else {
+            return false;
+        };
+        let body = &request[header_end..];
+        chunked_wire_complete(body)
+    }
+
+    fn extract_chunked_request_body(request: &[u8]) -> Option<String> {
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|idx| idx + 4)?;
+        let body = &request[header_end..];
+        if !chunked_wire_complete(body) {
+            return None;
+        }
+        let mut cursor = 0usize;
+        let mut decoded = Vec::new();
+        loop {
+            let line_end = body[cursor..]
+                .windows(2)
+                .position(|window| window == b"\r\n")?
+                + cursor;
+            let size_line = std::str::from_utf8(&body[cursor..line_end]).ok()?;
+            let size = usize::from_str_radix(size_line.split(';').next()?.trim(), 16).ok()?;
+            cursor = line_end + 2;
+            if size == 0 {
+                return String::from_utf8(decoded).ok();
+            }
+            decoded.extend_from_slice(body.get(cursor..cursor + size)?);
+            cursor += size;
+            if body.get(cursor..cursor + 2)? != b"\r\n" {
+                return None;
+            }
+            cursor += 2;
+        }
+    }
+
+    fn chunked_wire_complete(body: &[u8]) -> bool {
+        let mut cursor = 0usize;
+        loop {
+            let Some(line_rel_end) = body[cursor..]
+                .windows(2)
+                .position(|window| window == b"\r\n")
+            else {
+                return false;
+            };
+            let line_end = cursor + line_rel_end;
+            let Ok(size_line) = std::str::from_utf8(&body[cursor..line_end]) else {
+                return false;
+            };
+            let Ok(size) = usize::from_str_radix(
+                size_line.split(';').next().unwrap_or_default().trim(),
+                16,
+            ) else {
+                return false;
+            };
+            cursor = line_end + 2;
+            if size == 0 {
+                return body.get(cursor..cursor + 2) == Some(b"\r\n");
+            }
+            if body.len() < cursor + size + 2 {
+                return false;
+            }
+            cursor += size;
+            if body.get(cursor..cursor + 2) != Some(b"\r\n") {
+                return false;
+            }
+            cursor += 2;
+        }
     }
 
     fn proxy_ready_session(
