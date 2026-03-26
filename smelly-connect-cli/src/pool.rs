@@ -74,6 +74,7 @@ struct PoolState {
 pub struct SessionPool {
     inner: Arc<Mutex<PoolState>>,
     retry_delay: Duration,
+    connect_timeout: Duration,
     server: Option<String>,
     allow_request_triggered_probe: bool,
 }
@@ -235,6 +236,7 @@ impl SessionPool {
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(20),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -270,6 +272,7 @@ impl SessionPool {
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(20),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -309,6 +312,7 @@ impl SessionPool {
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(20),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -344,6 +348,7 @@ impl SessionPool {
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(20),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -402,6 +407,7 @@ impl SessionPool {
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(20),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -434,6 +440,7 @@ impl SessionPool {
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(20),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -468,6 +475,7 @@ impl SessionPool {
                 cursor: 0,
             })),
             retry_delay: Duration::from_millis(100),
+            connect_timeout: Duration::from_secs(20),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -505,6 +513,7 @@ impl SessionPool {
         let pool = Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             retry_delay: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
+            connect_timeout: Duration::from_secs(cfg.pool.connect_timeout_secs.max(1)),
             server: Some(cfg.vpn.server.clone()),
             allow_request_triggered_probe: cfg.pool.allow_request_triggered_probe,
         };
@@ -723,6 +732,7 @@ impl SessionPool {
                 cursor: 0,
             })),
             retry_delay: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(20),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -754,6 +764,7 @@ impl SessionPool {
                 cursor: 0,
             })),
             retry_delay: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(20),
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -779,6 +790,11 @@ impl SessionPool {
             .first()
             .map(|node| node.current_backoff)
             .unwrap_or_default()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub async fn connect_timeout_for_test(&self) -> Duration {
+        self.connect_timeout
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -1051,7 +1067,7 @@ impl SessionPool {
             (name, account, server)
         };
 
-        match connect_account(&server, &account, self.retry_delay).await {
+        match connect_account(&server, &account, self.connect_timeout).await {
             Ok(session) => {
                 let mut state = self.inner.lock().await;
                 if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
@@ -1130,7 +1146,7 @@ impl SessionPool {
             .as_deref()
             .ok_or_else(|| PoolError::new("real server configuration unavailable"))?;
 
-        match connect_account(server, &account, self.retry_delay).await {
+        match connect_account(server, &account, self.connect_timeout).await {
             Ok(session) => {
                 self.complete_probe_success(
                     &name,

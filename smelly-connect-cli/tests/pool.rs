@@ -83,6 +83,44 @@ fn resilience_defaults_are_present() {
 }
 
 #[tokio::test]
+async fn pool_uses_connect_timeout_secs_for_recovery_login_timeout() {
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+        [pool]
+        prewarm = 0
+        connect_timeout_secs = 7
+        healthcheck_interval_secs = 60
+        selection = "round_robin"
+        failure_threshold = 3
+        backoff_base_secs = 30
+        backoff_max_secs = 600
+        allow_request_triggered_probe = true
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+    )
+    .unwrap();
+
+    let pool = smelly_connect_cli::pool::SessionPool::from_config_allow_empty(&cfg)
+        .await
+        .unwrap();
+    assert_eq!(
+        pool.connect_timeout_for_test().await,
+        std::time::Duration::from_secs(7)
+    );
+}
+
+#[tokio::test]
 async fn single_failure_marks_node_suspect_but_keeps_it_selectable() {
     let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
     pool.force_failures_for_test(1).await;
