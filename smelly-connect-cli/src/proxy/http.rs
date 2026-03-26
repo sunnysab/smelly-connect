@@ -388,6 +388,61 @@ pub async fn proxy_http_route_rejection_does_not_open_for_test(
     })
 }
 
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_timeout_does_not_open_for_test(
+) -> Result<LiveFailureRecoveryTestResult, String> {
+    let session = smelly_connect::session::tests::session_with_slow_domain_match(
+        "jwxt.sit.edu.cn",
+        std::net::Ipv4Addr::new(10, 0, 0, 8),
+    );
+    let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|err| err.to_string())?;
+    let addr = listener.local_addr().map_err(|err| err.to_string())?;
+    let serve_pool = pool.clone();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let _ = handle_live_client(
+            stream,
+            serve_pool,
+            RuntimeStats::default(),
+            Duration::from_millis(20),
+        )
+        .await;
+    });
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"CONNECT jwxt.sit.edu.cn:443 HTTP/1.1\r\nHost: jwxt.sit.edu.cn:443\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let status_line = response.lines().next().unwrap_or_default().to_string();
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+    Ok(LiveFailureRecoveryTestResult {
+        status_code,
+        state_summary: pool.state_summary_for_test().await,
+        selectable_after_failure: pool.has_selectable_nodes_for_test().await,
+        recovered_account: "acct-01".to_string(),
+    })
+}
+
 pub async fn serve_http(
     listen: String,
     pool: SessionPool,
@@ -719,7 +774,10 @@ async fn handle_live_client(
         let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
             Ok(upstream) => upstream,
             Err(err) => {
-                if !matches!(err, UpstreamConnectError::RouteRejected) {
+                if !matches!(
+                    err,
+                    UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
+                ) {
                     stats.record_connect_failure();
                     pool.report_live_session_failure(&account_name, err.label())
                         .await;
@@ -761,7 +819,10 @@ async fn handle_live_client(
     let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
         Err(err) => {
-            if !matches!(err, UpstreamConnectError::RouteRejected) {
+            if !matches!(
+                err,
+                UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
+            ) {
                 stats.record_connect_failure();
                 pool.report_live_session_failure(&account_name, err.label())
                     .await;
@@ -975,6 +1036,11 @@ where
         Ok(Err(smelly_connect::Error::RouteDecision(
             smelly_connect::error::RouteDecisionError::TargetNotAllowed,
         ))) => Err(UpstreamConnectError::RouteRejected),
+        Ok(Err(smelly_connect::Error::Transport(
+            smelly_connect::error::TransportError::ConnectFailed(message),
+        ))) if message.to_ascii_lowercase().contains("timed out") => {
+            Err(UpstreamConnectError::TimedOut)
+        }
         Ok(Err(err)) => Err(UpstreamConnectError::Failed(format!("{err:?}"))),
         Err(_) => Err(UpstreamConnectError::TimedOut),
     }

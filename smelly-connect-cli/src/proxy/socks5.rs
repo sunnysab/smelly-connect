@@ -630,7 +630,10 @@ async fn handle_live_client(
     let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
         Err(err) => {
-            if !matches!(err, UpstreamConnectError::RouteRejected) {
+            if !matches!(
+                err,
+                UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
+            ) {
                 stats.record_connect_failure();
                 pool.report_live_session_failure(&account_name, err.label())
                     .await;
@@ -689,6 +692,11 @@ where
         Ok(Err(smelly_connect::Error::RouteDecision(
             smelly_connect::error::RouteDecisionError::TargetNotAllowed,
         ))) => Err(UpstreamConnectError::RouteRejected),
+        Ok(Err(smelly_connect::Error::Transport(
+            smelly_connect::error::TransportError::ConnectFailed(message),
+        ))) if message.to_ascii_lowercase().contains("timed out") => {
+            Err(UpstreamConnectError::TimedOut)
+        }
         Ok(Err(err)) => Err(UpstreamConnectError::Failed(format!("{err:?}"))),
         Err(_) => Err(UpstreamConnectError::TimedOut),
     }

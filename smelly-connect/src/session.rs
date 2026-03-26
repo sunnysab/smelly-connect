@@ -385,6 +385,43 @@ pub mod tests {
         )
     }
 
+    pub fn session_with_slow_domain_match(host: &str, ip: Ipv4Addr) -> EasyConnectSession {
+        let mut resources = ResourceSet::default();
+        resources.domain_rules.insert(
+            host.to_string(),
+            DomainRule {
+                port_min: 1,
+                port_max: 65535,
+                protocol: "all".to_string(),
+            },
+        );
+        resources.ip_rules.push(IpRule {
+            ip_min: IpAddr::V4(ip),
+            ip_max: IpAddr::V4(ip),
+            port_min: 1,
+            port_max: 65535,
+            protocol: "all".to_string(),
+        });
+        resources
+            .static_dns
+            .insert(host.to_string(), IpAddr::V4(ip));
+
+        let mut system = HashMap::new();
+        system.insert(host.to_string(), IpAddr::V4(ip));
+
+        let transport = TransportStack::new(|_| async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Err(io::Error::new(io::ErrorKind::TimedOut, "forced slow connect"))
+        });
+
+        EasyConnectSession::new(
+            ip,
+            resources,
+            SessionResolver::new(HashMap::new(), None, system),
+            transport,
+        )
+    }
+
     pub fn session_with_icmp_ping(counter: Arc<AtomicUsize>) -> EasyConnectSession {
         let transport = ready_transport().with_icmp_pinger(move |_| {
             let counter = counter.clone();
