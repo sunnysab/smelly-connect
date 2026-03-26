@@ -70,6 +70,30 @@ fn no_ready_session_fast_fail_emits_warn_log() {
 }
 
 #[test]
+fn http_live_failure_emits_warn_log_with_error_context() {
+    let events = smelly_connect_cli::logging::capture_http_live_failure_warn_for_test();
+    assert!(events.iter().any(|line| line.contains(" WARN ")));
+    assert!(
+        events
+            .iter()
+            .any(|line| line.contains("live proxy request failed"))
+    );
+    assert!(events.iter().any(|line| line.contains("protocol=http")));
+}
+
+#[test]
+fn socks5_live_failure_emits_warn_log_with_error_context() {
+    let events = smelly_connect_cli::logging::capture_socks5_live_failure_warn_for_test();
+    assert!(events.iter().any(|line| line.contains(" WARN ")));
+    assert!(
+        events
+            .iter()
+            .any(|line| line.contains("live proxy request failed"))
+    );
+    assert!(events.iter().any(|line| line.contains("protocol=socks5")));
+}
+
+#[test]
 fn file_mode_falls_back_to_stderr_when_file_open_fails() {
     let result = smelly_connect_cli::logging::init_for_test(
         "file",

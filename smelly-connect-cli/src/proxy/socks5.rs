@@ -269,9 +269,49 @@ pub async fn serve_socks5(
         let stats = stats.clone();
         let connect_timeout = connect_timeout;
         tokio::spawn(async move {
-            let _ = handle_live_client(stream, pool, stats, connect_timeout).await;
+            if let Err(err) = handle_live_client(stream, pool, stats, connect_timeout).await {
+                tracing::warn!(
+                    protocol = tracing::field::display("socks5"),
+                    error = %err,
+                    "live proxy request failed"
+                );
+            }
         });
     }
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_live_failure_for_test() -> Result<(), String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|err| err.to_string())?;
+    let addr = listener.local_addr().map_err(|err| err.to_string())?;
+    let pool = SessionPool::from_failed_accounts(1).await;
+    let stats = RuntimeStats::default();
+
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        if let Err(err) = handle_live_client(stream, pool, stats, DEFAULT_CONNECT_TIMEOUT).await {
+            tracing::warn!(
+                protocol = tracing::field::display("socks5"),
+                error = %err,
+                "live proxy request failed"
+            );
+        }
+    });
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(&[0x05, 0x01, 0x00, 0x05, 0x00, 0x00, 0x00])
+        .await
+        .map_err(|err| err.to_string())?;
+    let _ = client.shutdown().await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    Ok(())
 }
 
 #[cfg(any(test, debug_assertions))]

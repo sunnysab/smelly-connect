@@ -113,6 +113,20 @@ pub fn capture_no_ready_session_warn_for_test() -> Vec<String> {
 }
 
 #[cfg(any(test, debug_assertions))]
+pub fn capture_http_live_failure_warn_for_test() -> Vec<String> {
+    capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Warn, async {
+        let _ = crate::proxy::http::proxy_http_live_failure_for_test().await;
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub fn capture_socks5_live_failure_warn_for_test() -> Vec<String> {
+    capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Warn, async {
+        let _ = crate::proxy::socks5::proxy_socks5_live_failure_for_test().await;
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
 pub fn capture_config_load_error_for_test(path: &str) -> Vec<String> {
     capture_lines(parse_mode("stdout").unwrap(), LoggingLevel::Error, || {
         if let Err(err) = crate::config::load(path) {
