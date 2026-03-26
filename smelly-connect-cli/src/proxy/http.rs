@@ -63,6 +63,7 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 enum UpstreamConnectError {
     TimedOut,
     Failed(String),
+    RouteRejected,
 }
 
 impl UpstreamConnectError {
@@ -70,6 +71,7 @@ impl UpstreamConnectError {
         match self {
             Self::TimedOut => "connect timed out".to_string(),
             Self::Failed(message) => message.clone(),
+            Self::RouteRejected => "route rejected".to_string(),
         }
     }
 }
@@ -327,6 +329,61 @@ pub async fn proxy_http_live_connect_failure_recovery_for_test(
         state_summary,
         selectable_after_failure,
         recovered_account: recovered.account_name().to_string(),
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_route_rejection_does_not_open_for_test(
+) -> Result<LiveFailureRecoveryTestResult, String> {
+    let session = smelly_connect::session::tests::session_with_domain_match(
+        "jwxt.sit.edu.cn",
+        std::net::Ipv4Addr::new(10, 0, 0, 8),
+    );
+    let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|err| err.to_string())?;
+    let addr = listener.local_addr().map_err(|err| err.to_string())?;
+    let serve_pool = pool.clone();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let _ = handle_live_client(
+            stream,
+            serve_pool,
+            RuntimeStats::default(),
+            DEFAULT_CONNECT_TIMEOUT,
+        )
+        .await;
+    });
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"CONNECT xg.sit.edu.cn:443 HTTP/1.1\r\nHost: xg.sit.edu.cn:443\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let status_line = response.lines().next().unwrap_or_default().to_string();
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+    Ok(LiveFailureRecoveryTestResult {
+        status_code,
+        state_summary: pool.state_summary_for_test().await,
+        selectable_after_failure: pool.has_selectable_nodes_for_test().await,
+        recovered_account: "acct-01".to_string(),
     })
 }
 
@@ -658,10 +715,13 @@ async fn handle_live_client(
         );
         let (host, port) = split_host_port(target, 443)?;
         let upstream = session.connect_tcp((host, port));
-        let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
+        let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
             Ok(upstream) => upstream,
             Err(err) => {
-                pool.report_live_session_failure(&account_name, err.label()).await;
+                if !matches!(err, UpstreamConnectError::RouteRejected) {
+                    pool.report_live_session_failure(&account_name, err.label())
+                        .await;
+                }
                 write_gateway_error_response(&mut client, &err).await?;
                 return Ok(());
             }
@@ -695,10 +755,13 @@ async fn handle_live_client(
 
     let (host, port, path) = parse_absolute_target(target)?;
     let upstream = session.connect_tcp((host.as_str(), port));
-    let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
+    let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
         Err(err) => {
-            pool.report_live_session_failure(&account_name, err.label()).await;
+            if !matches!(err, UpstreamConnectError::RouteRejected) {
+                pool.report_live_session_failure(&account_name, err.label())
+                    .await;
+            }
             write_gateway_error_response(&mut client, &err).await?;
             return Ok(());
         }
@@ -895,6 +958,23 @@ where
     }
 }
 
+async fn connect_session_with_timeout<Fut>(
+    timeout: Duration,
+    fut: Fut,
+) -> Result<smelly_connect::transport::VpnStream, UpstreamConnectError>
+where
+    Fut: std::future::Future<Output = Result<smelly_connect::transport::VpnStream, smelly_connect::Error>>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(smelly_connect::Error::RouteDecision(
+            smelly_connect::error::RouteDecisionError::TargetNotAllowed,
+        ))) => Err(UpstreamConnectError::RouteRejected),
+        Ok(Err(err)) => Err(UpstreamConnectError::Failed(format!("{err:?}"))),
+        Err(_) => Err(UpstreamConnectError::TimedOut),
+    }
+}
+
 async fn write_gateway_error_response(
     client: &mut TcpStream,
     err: &UpstreamConnectError,
@@ -905,6 +985,7 @@ async fn write_gateway_error_response(
             let _ = message;
             "502 Bad Gateway"
         }
+        UpstreamConnectError::RouteRejected => "502 Bad Gateway",
     };
     client
         .write_all(

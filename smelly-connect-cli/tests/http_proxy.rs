@@ -79,3 +79,13 @@ async fn http_live_connect_failure_marks_node_open_for_recovery() {
     assert!(!result.selectable_after_failure);
     assert_eq!(result.recovered_account, "acct-01");
 }
+
+#[tokio::test]
+async fn http_route_rejection_does_not_mark_live_session_open() {
+    let result = smelly_connect_cli::proxy::http::proxy_http_route_rejection_does_not_open_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.status_code, 502);
+    assert!(result.state_summary.contains("Ready"));
+    assert!(result.selectable_after_failure);
+}

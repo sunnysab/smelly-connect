@@ -28,6 +28,7 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 enum UpstreamConnectError {
     TimedOut,
     Failed(String),
+    RouteRejected,
 }
 
 impl UpstreamConnectError {
@@ -35,6 +36,7 @@ impl UpstreamConnectError {
         match self {
             Self::TimedOut => "connect timed out".to_string(),
             Self::Failed(message) => message.clone(),
+            Self::RouteRejected => "route rejected".to_string(),
         }
     }
 }
@@ -625,10 +627,13 @@ async fn handle_live_client(
     );
 
     let upstream = session.connect_tcp((host.as_str(), port));
-    let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
+    let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
         Err(err) => {
-            pool.report_live_session_failure(&account_name, err.label()).await;
+            if !matches!(err, UpstreamConnectError::RouteRejected) {
+                pool.report_live_session_failure(&account_name, err.label())
+                    .await;
+            }
             return Err(format!("{account_name}: {}", err.label()));
         }
     };
@@ -665,6 +670,23 @@ where
 {
     match tokio::time::timeout(timeout, fut).await {
         Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(UpstreamConnectError::Failed(format!("{err:?}"))),
+        Err(_) => Err(UpstreamConnectError::TimedOut),
+    }
+}
+
+async fn connect_session_with_timeout<Fut>(
+    timeout: Duration,
+    fut: Fut,
+) -> Result<smelly_connect::transport::VpnStream, UpstreamConnectError>
+where
+    Fut: std::future::Future<Output = Result<smelly_connect::transport::VpnStream, smelly_connect::Error>>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(smelly_connect::Error::RouteDecision(
+            smelly_connect::error::RouteDecisionError::TargetNotAllowed,
+        ))) => Err(UpstreamConnectError::RouteRejected),
         Ok(Err(err)) => Err(UpstreamConnectError::Failed(format!("{err:?}"))),
         Err(_) => Err(UpstreamConnectError::TimedOut),
     }
