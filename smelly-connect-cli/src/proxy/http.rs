@@ -172,6 +172,51 @@ pub async fn proxy_http_body_completes_for_keep_alive_upstream_for_test(
 }
 
 #[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_streams_request_body_for_test() -> Result<HttpBodyTestResult, String> {
+    let upstream = spawn_request_body_echo_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
+        TcpStream::connect(upstream).await
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"POST http://intranet.zju.edu.cn/upload HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    client
+        .write_all(b" world")
+        .await
+        .map_err(|err| err.to_string())?;
+    client.shutdown().await.map_err(|err| err.to_string())?;
+
+    let response = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok::<Vec<u8>, String>(response)
+    })
+    .await
+    .map_err(|_| "proxy response timed out".to_string())??;
+
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    Ok(HttpBodyTestResult { body })
+}
+
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_connect_for_test() -> Result<ConnectProxyTestResult, String> {
     let upstream = spawn_echo_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
@@ -562,6 +607,7 @@ struct ForwardRequest<'a> {
     version: &'a str,
     headers: Vec<&'a str>,
     leftover: Vec<u8>,
+    content_length: Option<usize>,
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -710,6 +756,8 @@ where
     let method = parts.next().unwrap_or_default();
     let target = parts.next().unwrap_or_default();
     let version = parts.next().unwrap_or("HTTP/1.1");
+    let headers: Vec<&str> = lines.collect();
+    let content_length = parse_content_length(&headers);
 
     let account_name = match pool.next_account_name().await {
         Ok(name) => name,
@@ -762,8 +810,9 @@ where
             method,
             target,
             version,
-            headers: lines.collect(),
+            headers,
             leftover,
+            content_length,
         },
     )
     .await
@@ -790,6 +839,8 @@ async fn handle_live_client(
     let method = parts.next().unwrap_or_default();
     let target = parts.next().unwrap_or_default();
     let version = parts.next().unwrap_or("HTTP/1.1");
+    let headers: Vec<&str> = lines.collect();
+    let content_length = parse_content_length(&headers);
 
     let (account_name, session) = match pool.next_live_session().await {
         Ok(ready) => ready,
@@ -881,7 +932,7 @@ async fn handle_live_client(
     let connection = stats.open_connection(ProxyProtocol::Http);
 
     let mut upstream_request = format!("{method} {path} {version}\r\n");
-    for header in lines {
+    for header in &headers {
         let lower = header.to_ascii_lowercase();
         if lower.starts_with("proxy-connection:")
             || lower.starts_with("connection:")
@@ -895,23 +946,15 @@ async fn handle_live_client(
     upstream_request.push_str("Connection: close\r\n");
     upstream_request.push_str("\r\n");
 
-    upstream
-        .write_all(upstream_request.as_bytes())
-        .await
-        .map_err(|err| err.to_string())?;
-    record_client_to_upstream(Some(&connection), upstream_request.len());
-    if !leftover.is_empty() {
-        upstream
-            .write_all(&leftover)
-            .await
-            .map_err(|err| err.to_string())?;
-        record_client_to_upstream(Some(&connection), leftover.len());
-    }
-    let upstream_to_client = tokio::io::copy(&mut upstream, &mut client)
-        .await
-        .map_err(|err| err.to_string())?;
-    record_upstream_to_client(Some(&connection), upstream_to_client);
-    Ok(())
+    relay_forward_stream(
+        &mut client,
+        &mut upstream,
+        &upstream_request,
+        &leftover,
+        content_length,
+        Some(&connection),
+    )
+    .await
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -985,6 +1028,7 @@ where
         &mut upstream,
         &upstream_request,
         &request.leftover,
+        request.content_length,
         connection.as_ref(),
     )
     .await
@@ -1021,6 +1065,7 @@ async fn relay_forward_stream(
     upstream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     upstream_request: &str,
     leftover: &[u8],
+    content_length: Option<usize>,
     connection: Option<&ConnectionGuard>,
 ) -> Result<(), String> {
     upstream
@@ -1035,10 +1080,46 @@ async fn relay_forward_stream(
             .map_err(|err| err.to_string())?;
         record_client_to_upstream(connection, leftover.len());
     }
+    if let Some(content_length) = content_length {
+        stream_remaining_request_body(client, upstream, leftover.len(), content_length, connection)
+            .await?;
+    }
     let upstream_to_client = tokio::io::copy(upstream, client)
         .await
         .map_err(|err| err.to_string())?;
     record_upstream_to_client(connection, upstream_to_client);
+    Ok(())
+}
+
+async fn stream_remaining_request_body(
+    client: &mut TcpStream,
+    upstream: &mut (impl AsyncWrite + Unpin),
+    already_buffered: usize,
+    content_length: usize,
+    connection: Option<&ConnectionGuard>,
+) -> Result<(), String> {
+    if already_buffered >= content_length {
+        return Ok(());
+    }
+
+    let mut remaining = content_length - already_buffered;
+    let mut buffer = [0_u8; 8192];
+    while remaining > 0 {
+        let limit = remaining.min(buffer.len());
+        let n = client
+            .read(&mut buffer[..limit])
+            .await
+            .map_err(|err| err.to_string())?;
+        if n == 0 {
+            return Err("connection closed before request body completed".to_string());
+        }
+        upstream
+            .write_all(&buffer[..n])
+            .await
+            .map_err(|err| err.to_string())?;
+        record_client_to_upstream(connection, n);
+        remaining -= n;
+    }
     Ok(())
 }
 
@@ -1147,6 +1228,16 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
         .map(|idx| idx + 4)
 }
 
+fn parse_content_length(headers: &[&str]) -> Option<usize> {
+    headers.iter().find_map(|header| {
+        header.split_once(':').and_then(|(name, value)| {
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+    })
+}
+
 fn parse_absolute_target(target: &str) -> Result<(String, u16, String), String> {
     let without_scheme = target
         .strip_prefix("http://")
@@ -1202,6 +1293,68 @@ async fn spawn_keep_alive_http_upstream() -> SocketAddr {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    });
+    addr
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_request_body_echo_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let mut content_length = None::<usize>;
+        let mut header_end = None::<usize>;
+        let mut body_complete = false;
+
+        loop {
+            let n = match tokio::time::timeout(Duration::from_millis(200), socket.read(&mut chunk))
+                .await
+            {
+                Ok(Ok(n)) => n,
+                Ok(Err(err)) => panic!("upstream read failed: {err}"),
+                Err(_) => break,
+            };
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..n]);
+            if header_end.is_none() {
+                header_end = find_header_end(&request);
+                if let Some(end) = header_end {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let lower = line.to_ascii_lowercase();
+                            lower
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        });
+                }
+            }
+            if let (Some(end), Some(length)) = (header_end, content_length)
+                && request.len() >= end + length
+            {
+                body_complete = true;
+                break;
+            }
+        }
+
+        let body = if let (Some(end), Some(length)) = (header_end, content_length) {
+            let available = request.len().saturating_sub(end).min(length);
+            String::from_utf8_lossy(&request[end..end + available]).to_string()
+        } else {
+            String::new()
+        };
+        let status = if body_complete { "200 OK" } else { "400 Bad Request" };
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
     });
     addr
 }
