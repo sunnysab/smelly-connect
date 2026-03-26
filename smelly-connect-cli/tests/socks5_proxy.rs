@@ -36,3 +36,11 @@ async fn socks5_proxy_updates_runtime_stats_after_tunneling() {
     assert!(snapshot.socks5.client_to_upstream_bytes >= 4);
     assert!(snapshot.socks5.upstream_to_client_bytes >= 4);
 }
+
+#[tokio::test]
+async fn socks5_proxy_enforces_connect_timeout() {
+    let result = smelly_connect_cli::proxy::socks5::proxy_socks5_connect_timeout_for_test()
+        .await
+        .unwrap();
+    assert!(result.elapsed < std::time::Duration::from_millis(150));
+}

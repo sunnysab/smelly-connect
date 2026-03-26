@@ -5,6 +5,7 @@ use std::io;
 use std::net::SocketAddr;
 #[cfg(any(test, debug_assertions))]
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(any(test, debug_assertions))]
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -12,6 +13,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
+#[cfg(any(test, debug_assertions))]
+use tokio::time::Instant;
 
 use crate::pool::SessionPool;
 #[cfg(any(test, debug_assertions))]
@@ -38,6 +41,14 @@ pub struct ConnectProxyTestResult {
 pub struct NoReadySessionResult {
     pub status_code: u16,
 }
+
+#[cfg(any(test, debug_assertions))]
+#[derive(Debug, Clone)]
+pub struct TimeoutTestResult {
+    pub elapsed: Duration,
+}
+
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_for_test() -> Result<HttpProxyTestResult, String> {
@@ -203,10 +214,44 @@ pub async fn proxy_http_runtime_stats_for_test() -> Result<RuntimeSnapshot, Stri
     Ok(stats.snapshot(pool.summary().await))
 }
 
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_connect_timeout_for_test() -> Result<TimeoutTestResult, String> {
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy_with_timeout(
+        pool,
+        Duration::from_millis(20),
+        |_account_name, _host, _port| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Err(io::Error::new(io::ErrorKind::TimedOut, "slow upstream"))
+        },
+    )
+    .await?;
+
+    let started = Instant::now();
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"CONNECT libdb.zju.edu.cn:443 HTTP/1.1\r\nHost: libdb.zju.edu.cn:443\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(TimeoutTestResult {
+        elapsed: started.elapsed(),
+    })
+}
+
 pub async fn serve_http(
     listen: String,
     pool: SessionPool,
     stats: RuntimeStats,
+    connect_timeout: Duration,
 ) -> Result<(), String> {
     let listener = TcpListener::bind(listen)
         .await
@@ -221,8 +266,9 @@ pub async fn serve_http(
         let (stream, _) = listener.accept().await.map_err(|err| err.to_string())?;
         let pool = pool.clone();
         let stats = stats.clone();
+        let connect_timeout = connect_timeout;
         tokio::spawn(async move {
-            let _ = handle_live_client(stream, pool, stats).await;
+            let _ = handle_live_client(stream, pool, stats, connect_timeout).await;
         });
     }
 }
@@ -242,7 +288,7 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    spawn_test_proxy_internal(pool, None, connector).await
+    spawn_test_proxy_internal(pool, None, DEFAULT_CONNECT_TIMEOUT, connector).await
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -255,13 +301,27 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    spawn_test_proxy_internal(pool, Some(stats), connector).await
+    spawn_test_proxy_internal(pool, Some(stats), DEFAULT_CONNECT_TIMEOUT, connector).await
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_test_proxy_with_timeout<F, Fut>(
+    pool: SessionPool,
+    connect_timeout: Duration,
+    connector: F,
+) -> Result<SocketAddr, String>
+where
+    F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
+{
+    spawn_test_proxy_internal(pool, None, connect_timeout, connector).await
 }
 
 #[cfg(any(test, debug_assertions))]
 async fn spawn_test_proxy_internal<F, Fut>(
     pool: SessionPool,
     stats: Option<RuntimeStats>,
+    connect_timeout: Duration,
     connector: F,
 ) -> Result<SocketAddr, String>
 where
@@ -280,8 +340,9 @@ where
             let pool = pool.clone();
             let stats = stats.clone();
             let connector = connector.clone();
+            let connect_timeout = connect_timeout;
             tokio::spawn(async move {
-                let _ = handle_client(stream, pool, stats, connector).await;
+                let _ = handle_client(stream, pool, stats, connect_timeout, connector).await;
             });
         }
     });
@@ -319,6 +380,7 @@ async fn handle_client<F, Fut>(
     mut client: TcpStream,
     pool: SessionPool,
     stats: Option<RuntimeStats>,
+    connect_timeout: Duration,
     connector: F,
 ) -> Result<(), String>
 where
@@ -369,6 +431,7 @@ where
             client,
             target,
             leftover,
+            connect_timeout,
             stats.as_ref(),
         )
         .await;
@@ -385,6 +448,7 @@ where
         account_name,
         connector,
         client,
+        connect_timeout,
         stats.as_ref(),
         ForwardRequest {
             method,
@@ -401,6 +465,7 @@ async fn handle_live_client(
     mut client: TcpStream,
     pool: SessionPool,
     stats: RuntimeStats,
+    connect_timeout: Duration,
 ) -> Result<(), String> {
     let mut buffer = Vec::with_capacity(1024);
     let header_end = read_headers(&mut client, &mut buffer)
@@ -443,10 +508,10 @@ async fn handle_live_client(
             "request accepted"
         );
         let (host, port) = split_host_port(target, 443)?;
-        let mut upstream = session
-            .connect_tcp((host, port))
+        let upstream = session.connect_tcp((host, port));
+        let mut upstream = connect_with_timeout(connect_timeout, upstream)
             .await
-            .map_err(|err| format!("{account_name}: {err:?}"))?;
+            .map_err(|err| format!("{account_name}: {err}"))?;
         let connection = stats.open_connection(ProxyProtocol::Http);
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -475,10 +540,10 @@ async fn handle_live_client(
     );
 
     let (host, port, path) = parse_absolute_target(target)?;
-    let mut upstream = session
-        .connect_tcp((host.as_str(), port))
+    let upstream = session.connect_tcp((host.as_str(), port));
+    let mut upstream = connect_with_timeout(connect_timeout, upstream)
         .await
-        .map_err(|err| format!("{account_name}: {err:?}"))?;
+        .map_err(|err| format!("{account_name}: {err}"))?;
     let connection = stats.open_connection(ProxyProtocol::Http);
 
     let mut upstream_request = format!("{method} {path} {version}\r\n");
@@ -517,6 +582,7 @@ async fn handle_connect<F, Fut>(
     mut client: TcpStream,
     target: &str,
     leftover: Vec<u8>,
+    connect_timeout: Duration,
     stats: Option<&RuntimeStats>,
 ) -> Result<(), String>
 where
@@ -524,9 +590,8 @@ where
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
     let (host, port) = split_host_port(target, 443)?;
-    let mut upstream = connector(account_name, host.to_string(), port)
-        .await
-        .map_err(|err| err.to_string())?;
+    let upstream = connector(account_name, host.to_string(), port);
+    let mut upstream = connect_with_timeout(connect_timeout, upstream).await?;
     let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
     relay_connect_tunnel(&mut client, &mut upstream, &leftover, connection.as_ref()).await
 }
@@ -536,6 +601,7 @@ async fn handle_forward<F, Fut>(
     account_name: String,
     connector: F,
     mut client: TcpStream,
+    connect_timeout: Duration,
     stats: Option<&RuntimeStats>,
     request: ForwardRequest<'_>,
 ) -> Result<(), String>
@@ -544,9 +610,8 @@ where
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
     let (host, port, path) = parse_absolute_target(request.target)?;
-    let mut upstream = connector(account_name, host.clone(), port)
-        .await
-        .map_err(|err| err.to_string())?;
+    let upstream = connector(account_name, host.clone(), port);
+    let mut upstream = connect_with_timeout(connect_timeout, upstream).await?;
     let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
 
     let mut upstream_request = format!("{} {path} {}\r\n", request.method, request.version);
@@ -641,6 +706,18 @@ fn record_tunnel_transfer(
     if let Some(connection) = connection {
         connection.add_client_to_upstream_bytes(client_to_upstream);
         connection.add_upstream_to_client_bytes(upstream_to_client);
+    }
+}
+
+async fn connect_with_timeout<T, E, Fut>(timeout: Duration, fut: Fut) -> Result<T, String>
+where
+    E: std::fmt::Debug,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(format!("{err:?}")),
+        Err(_) => Err(format!("connect timed out after {}ms", timeout.as_millis())),
     }
 }
 

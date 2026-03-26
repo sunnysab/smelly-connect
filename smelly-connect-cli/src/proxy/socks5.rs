@@ -7,13 +7,14 @@ use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 #[cfg(any(test, debug_assertions))]
 use std::sync::Arc;
-#[cfg(any(test, debug_assertions))]
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
+#[cfg(any(test, debug_assertions))]
+use tokio::time::Instant;
 
 use crate::pool::SessionPool;
 #[cfg(any(test, debug_assertions))]
@@ -21,6 +22,7 @@ use crate::runtime::RuntimeSnapshot;
 use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 
 const SOCKS5_NETWORK_UNREACHABLE: u8 = 0x03;
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
@@ -34,6 +36,12 @@ pub struct Socks5ProxyTestResult {
 #[derive(Debug, Clone)]
 pub struct Socks5FailureResult {
     pub reply_code: u8,
+}
+
+#[cfg(any(test, debug_assertions))]
+#[derive(Debug, Clone)]
+pub struct TimeoutTestResult {
+    pub elapsed: Duration,
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -197,10 +205,54 @@ pub async fn proxy_socks5_runtime_stats_for_test() -> Result<RuntimeSnapshot, St
     Ok(stats.snapshot(pool.summary().await))
 }
 
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_connect_timeout_for_test() -> Result<TimeoutTestResult, String> {
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_socks5_with_timeout(
+        pool,
+        Duration::from_millis(20),
+        |_account_name, _host, _port| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Err(io::Error::new(io::ErrorKind::TimedOut, "slow upstream"))
+        },
+    )
+    .await?;
+
+    let started = Instant::now();
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut method_reply = [0_u8; 2];
+    client
+        .read_exact(&mut method_reply)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(&[
+            0x05, 0x01, 0x00, 0x03, 0x10, b'l', b'i', b'b', b'd', b'b', b'.', b'z', b'j', b'u',
+            b'.', b'e', b'd', b'u', b'.', b'c', b'n', 0x01, 0xbb,
+        ])
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(TimeoutTestResult {
+        elapsed: started.elapsed(),
+    })
+}
+
 pub async fn serve_socks5(
     listen: String,
     pool: SessionPool,
     stats: RuntimeStats,
+    connect_timeout: Duration,
 ) -> Result<(), String> {
     let listener = TcpListener::bind(listen)
         .await
@@ -215,8 +267,9 @@ pub async fn serve_socks5(
         let (stream, _) = listener.accept().await.map_err(|err| err.to_string())?;
         let pool = pool.clone();
         let stats = stats.clone();
+        let connect_timeout = connect_timeout;
         tokio::spawn(async move {
-            let _ = handle_live_client(stream, pool, stats).await;
+            let _ = handle_live_client(stream, pool, stats, connect_timeout).await;
         });
     }
 }
@@ -227,7 +280,7 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    spawn_test_socks5_internal(pool, None, connector).await
+    spawn_test_socks5_internal(pool, None, DEFAULT_CONNECT_TIMEOUT, connector).await
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -240,13 +293,27 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    spawn_test_socks5_internal(pool, Some(stats), connector).await
+    spawn_test_socks5_internal(pool, Some(stats), DEFAULT_CONNECT_TIMEOUT, connector).await
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_test_socks5_with_timeout<F, Fut>(
+    pool: SessionPool,
+    connect_timeout: Duration,
+    connector: F,
+) -> Result<SocketAddr, String>
+where
+    F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
+{
+    spawn_test_socks5_internal(pool, None, connect_timeout, connector).await
 }
 
 #[cfg(any(test, debug_assertions))]
 async fn spawn_test_socks5_internal<F, Fut>(
     pool: SessionPool,
     stats: Option<RuntimeStats>,
+    connect_timeout: Duration,
     connector: F,
 ) -> Result<SocketAddr, String>
 where
@@ -265,8 +332,9 @@ where
             let pool = pool.clone();
             let stats = stats.clone();
             let connector = connector.clone();
+            let connect_timeout = connect_timeout;
             tokio::spawn(async move {
-                let _ = handle_client(stream, pool, stats, connector).await;
+                let _ = handle_client(stream, pool, stats, connect_timeout, connector).await;
             });
         }
     });
@@ -308,6 +376,7 @@ async fn handle_client<F, Fut>(
     mut client: TcpStream,
     pool: SessionPool,
     stats: Option<RuntimeStats>,
+    connect_timeout: Duration,
     connector: F,
 ) -> Result<(), String>
 where
@@ -400,9 +469,8 @@ where
         "request accepted"
     );
 
-    let mut upstream = connector(account_name, host, port)
-        .await
-        .map_err(|err| err.to_string())?;
+    let upstream = connector(account_name, host, port);
+    let mut upstream = connect_with_timeout(connect_timeout, upstream).await?;
     let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Socks5));
     relay_tunnel(&mut client, &mut upstream, connection.as_ref()).await
 }
@@ -411,6 +479,7 @@ async fn handle_live_client(
     mut client: TcpStream,
     pool: SessionPool,
     stats: RuntimeStats,
+    connect_timeout: Duration,
 ) -> Result<(), String> {
     let mut greeting = [0_u8; 2];
     client
@@ -498,10 +567,10 @@ async fn handle_live_client(
         "request accepted"
     );
 
-    let mut upstream = session
-        .connect_tcp((host.as_str(), port))
+    let upstream = session.connect_tcp((host.as_str(), port));
+    let mut upstream = connect_with_timeout(connect_timeout, upstream)
         .await
-        .map_err(|err| format!("{account_name}: {err:?}"))?;
+        .map_err(|err| format!("{account_name}: {err}"))?;
     let connection = stats.open_connection(ProxyProtocol::Socks5);
     relay_tunnel(&mut client, &mut upstream, Some(&connection)).await
 }
@@ -523,6 +592,18 @@ async fn relay_tunnel(
         connection.add_upstream_to_client_bytes(upstream_to_client);
     }
     Ok(())
+}
+
+async fn connect_with_timeout<T, E, Fut>(timeout: Duration, fut: Fut) -> Result<T, String>
+where
+    E: std::fmt::Debug,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(format!("{err:?}")),
+        Err(_) => Err(format!("connect timed out after {}ms", timeout.as_millis())),
+    }
 }
 
 #[cfg(any(test, debug_assertions))]

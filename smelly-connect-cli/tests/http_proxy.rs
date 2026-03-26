@@ -44,3 +44,11 @@ async fn http_proxy_updates_runtime_stats_after_forwarding() {
     assert!(snapshot.http.client_to_upstream_bytes > 0);
     assert!(snapshot.http.upstream_to_client_bytes > 0);
 }
+
+#[tokio::test]
+async fn http_proxy_enforces_connect_timeout() {
+    let result = smelly_connect_cli::proxy::http::proxy_http_connect_timeout_for_test()
+        .await
+        .unwrap();
+    assert!(result.elapsed < std::time::Duration::from_millis(150));
+}
