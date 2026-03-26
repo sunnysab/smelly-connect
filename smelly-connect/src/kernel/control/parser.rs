@@ -145,11 +145,16 @@ fn normalize_domain(value: &str) -> String {
         .trim()
         .trim_start_matches("https://")
         .trim_start_matches("http://");
-    trimmed
+    let host = trimmed
         .split('/')
         .next()
-        .unwrap_or_default()
-        .trim_matches('*')
-        .trim()
-        .to_string()
+        .unwrap_or_default();
+    let host = host.split(['?', '#']).next().unwrap_or_default().trim();
+    let host = match host.rsplit_once(':') {
+        Some((head, tail)) if !head.is_empty() && tail.chars().all(|ch| ch.is_ascii_digit()) => {
+            head
+        }
+        _ => host,
+    };
+    host.trim_matches('*').trim().to_string()
 }
