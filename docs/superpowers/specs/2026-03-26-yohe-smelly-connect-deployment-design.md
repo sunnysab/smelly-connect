@@ -74,7 +74,7 @@ Service model:
 - service name: `smelly-connect.service`
 - process type: long-running foreground service
 - restart policy: `Restart=always`
-- minimal elevated capability: `CAP_NET_RAW` for ICMP keepalive
+- no extra Linux capability required for the current ICMP keepalive path because it runs in user space over the EasyConnect tunnel
 
 The service will not replace or wrap Docker. It will run directly on the host as a normal `systemd`-managed process.
 
@@ -197,7 +197,7 @@ Expected failure classes and handling:
 - proxy request failure
   - validate management health, then validate direct CLI test commands, then inspect target-specific route behavior
 - keepalive-related permission failure
-  - verify `CAP_NET_RAW` is present on the service
+  - verify the deployed service still matches the current capability model and has not been wrapped by a raw-socket-based keepalive helper
 
 In all cases, the rollback for the first step is operationally trivial because no live consumer is switched to the new service yet.
 

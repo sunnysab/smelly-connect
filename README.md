@@ -274,7 +274,8 @@ systemd：
 
 说明：
 
-- `CAP_NET_RAW` 用于 ICMP keepalive；如果你完全不用 ICMP 探测，可以按环境再收紧
+- 当前实现的 ICMP keepalive 走用户态 `smoltcp` 和 EasyConnect 隧道，不依赖宿主机 raw socket
+- 默认 `systemd` service 不需要额外 Linux capabilities
 - 当前 service 文件假设使用前台 `proxy` 模式，由 systemd 负责守护与重启
 
 ## 环境变量

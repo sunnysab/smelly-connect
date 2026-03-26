@@ -12,8 +12,6 @@ ExecStart=/usr/local/bin/smelly-connect-cli --config /etc/smelly-connect/config.
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
-AmbientCapabilities=CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_RAW
 LimitNOFILE=1048576
 
 [Install]
