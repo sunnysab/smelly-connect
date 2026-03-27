@@ -695,6 +695,6 @@ fn udp_socket() -> udp::Socket<'static> {
 
 fn socket_addr_from_endpoint(endpoint: smoltcp::wire::IpEndpoint) -> io::Result<SocketAddr> {
     match endpoint.addr {
-        IpAddress::Ipv4(ip) => Ok(SocketAddr::new(IpAddr::V4(ip.into()), endpoint.port)),
+        IpAddress::Ipv4(ip) => Ok(SocketAddr::new(IpAddr::V4(ip), endpoint.port)),
     }
 }

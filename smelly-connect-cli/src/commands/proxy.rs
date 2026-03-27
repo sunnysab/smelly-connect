@@ -25,7 +25,6 @@ pub async fn run_proxy(
         let listen_http = config.proxy.http.listen.clone();
         let pool = pool.clone();
         let stats = stats.clone();
-        let connect_timeout = connect_timeout;
         tasks.push(tokio::spawn(crate::proxy::http::serve_http(
             listen_http,
             pool,
@@ -37,7 +36,6 @@ pub async fn run_proxy(
         let listen_socks5 = config.proxy.socks5.listen.clone();
         let pool = pool.clone();
         let stats = stats.clone();
-        let connect_timeout = connect_timeout;
         tasks.push(tokio::spawn(crate::proxy::socks5::serve_socks5(
             listen_socks5,
             pool,

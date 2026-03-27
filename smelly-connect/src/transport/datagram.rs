@@ -6,17 +6,13 @@ use std::sync::Arc;
 
 use tokio::net::UdpSocket;
 
-pub trait AsyncDatagramSocket: Send + Sync + 'static {
-    fn send_to<'a>(
-        &'a self,
-        data: &'a [u8],
-        target: SocketAddr,
-    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
+type SendToFuture<'a> = Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
+type RecvFromFuture<'a> = Pin<Box<dyn Future<Output = io::Result<(usize, SocketAddr)>> + Send + 'a>>;
 
-    fn recv_from<'a>(
-        &'a self,
-        buf: &'a mut [u8],
-    ) -> Pin<Box<dyn Future<Output = io::Result<(usize, SocketAddr)>> + Send + 'a>>;
+pub trait AsyncDatagramSocket: Send + Sync + 'static {
+    fn send_to<'a>(&'a self, data: &'a [u8], target: SocketAddr) -> SendToFuture<'a>;
+
+    fn recv_from<'a>(&'a self, buf: &'a mut [u8]) -> RecvFromFuture<'a>;
 
     fn local_addr(&self) -> io::Result<SocketAddr>;
 }
@@ -50,18 +46,11 @@ impl VpnUdpSocket {
 }
 
 impl AsyncDatagramSocket for UdpSocket {
-    fn send_to<'a>(
-        &'a self,
-        data: &'a [u8],
-        target: SocketAddr,
-    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+    fn send_to<'a>(&'a self, data: &'a [u8], target: SocketAddr) -> SendToFuture<'a> {
         Box::pin(async move { UdpSocket::send_to(self, data, target).await })
     }
 
-    fn recv_from<'a>(
-        &'a self,
-        buf: &'a mut [u8],
-    ) -> Pin<Box<dyn Future<Output = io::Result<(usize, SocketAddr)>> + Send + 'a>> {
+    fn recv_from<'a>(&'a self, buf: &'a mut [u8]) -> RecvFromFuture<'a> {
         Box::pin(async move { UdpSocket::recv_from(self, buf).await })
     }
 

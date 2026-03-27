@@ -20,6 +20,16 @@ enum RequestControl {
     ExpectContinue,
 }
 
+struct ForwardRequest<'a> {
+    method: &'a str,
+    target: &'a str,
+    version: &'a str,
+    headers: Vec<&'a str>,
+    leftover: Vec<u8>,
+    body_kind: RequestBodyKind,
+    request_control: RequestControl,
+}
+
 pub struct ProxyHandle {
     local_addr: SocketAddr,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -94,13 +104,15 @@ async fn handle_client(session: EasyConnectSession, mut client: TcpStream) -> io
     handle_forward(
         session,
         client,
-        method,
-        target,
-        version,
-        headers,
-        leftover,
-        body_kind,
-        request_control,
+        ForwardRequest {
+            method,
+            target,
+            version,
+            headers,
+            leftover,
+            body_kind,
+            request_control,
+        },
     )
     .await
 }
@@ -126,14 +138,17 @@ async fn handle_connect(
 async fn handle_forward(
     session: EasyConnectSession,
     mut client: TcpStream,
-    method: &str,
-    target: &str,
-    version: &str,
-    headers: Vec<&str>,
-    leftover: Vec<u8>,
-    body_kind: RequestBodyKind,
-    request_control: RequestControl,
+    request: ForwardRequest<'_>,
 ) -> io::Result<()> {
+    let ForwardRequest {
+        method,
+        target,
+        version,
+        headers,
+        leftover,
+        body_kind,
+        request_control,
+    } = request;
     let (host, port, path) = parse_absolute_target(target)?;
     let mut upstream = session
         .connect_tcp((host.as_str(), port))

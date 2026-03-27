@@ -521,7 +521,6 @@ pub async fn serve_socks5(
         let (stream, _) = listener.accept().await.map_err(|err| err.to_string())?;
         let pool = pool.clone();
         let stats = stats.clone();
-        let connect_timeout = connect_timeout;
         tokio::spawn(async move {
             if let Err(err) = handle_live_client(stream, pool, stats, connect_timeout).await {
                 tracing::warn!(
