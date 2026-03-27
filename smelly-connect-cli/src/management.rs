@@ -81,10 +81,7 @@ async fn health(State(state): State<ManagementState>) -> Json<HealthResponse> {
     let mut pool = state.pool.summary().await;
     let status = state.stats.effective_status(pool.status);
     pool.status = status;
-    Json(HealthResponse {
-        status,
-        pool,
-    })
+    Json(HealthResponse { status, pool })
 }
 
 async fn stats_snapshot(

@@ -22,9 +22,13 @@ async fn management_health_reflects_recent_connect_failures_until_a_success_rese
     let stats = smelly_connect_cli::runtime::RuntimeStats::default();
     stats.record_connect_failure_for_test();
 
-    let body = smelly_connect_cli::management::fetch_json_for_test(pool.clone(), stats.clone(), "/healthz")
-        .await
-        .unwrap();
+    let body = smelly_connect_cli::management::fetch_json_for_test(
+        pool.clone(),
+        stats.clone(),
+        "/healthz",
+    )
+    .await
+    .unwrap();
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["status"], "recovering");
     assert_eq!(json["pool"]["status"], "recovering");
@@ -153,9 +157,10 @@ async fn management_routes_endpoint_reports_local_overrides_separately() {
             protocol: "all".to_string(),
         }],
     ));
-    let pool =
-        smelly_connect_cli::pool::SessionPool::from_live_sessions_for_test(vec![("acct-01", session)])
-            .await;
+    let pool = smelly_connect_cli::pool::SessionPool::from_live_sessions_for_test(vec![(
+        "acct-01", session,
+    )])
+    .await;
     let stats = smelly_connect_cli::runtime::RuntimeStats::default();
     let body = smelly_connect_cli::management::fetch_json_for_test(pool, stats, "/routes")
         .await

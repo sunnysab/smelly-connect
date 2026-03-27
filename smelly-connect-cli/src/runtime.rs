@@ -48,7 +48,8 @@ impl RuntimeStats {
     }
 
     pub fn record_connect_success(&self) {
-        self.consecutive_connect_failures.store(0, Ordering::Relaxed);
+        self.consecutive_connect_failures
+            .store(0, Ordering::Relaxed);
     }
 
     pub fn record_connect_failure(&self) {
@@ -98,7 +99,10 @@ impl RuntimeStats {
         }
     }
 
-    pub fn effective_status(&self, pool_status: crate::pool::PoolHealthStatus) -> crate::pool::PoolHealthStatus {
+    pub fn effective_status(
+        &self,
+        pool_status: crate::pool::PoolHealthStatus,
+    ) -> crate::pool::PoolHealthStatus {
         if matches!(pool_status, crate::pool::PoolHealthStatus::Healthy)
             && self.consecutive_connect_failures.load(Ordering::Relaxed) > 0
         {
