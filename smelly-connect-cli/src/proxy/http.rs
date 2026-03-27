@@ -71,6 +71,13 @@ pub struct NoReadySessionResult {
 
 #[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
+pub struct HttpStatusBodyTestResult {
+    pub status_code: u16,
+    pub body: String,
+}
+
+#[cfg(any(test, debug_assertions))]
+#[derive(Debug, Clone)]
 pub struct TimeoutTestResult {
     pub elapsed: Duration,
 }
@@ -603,6 +610,45 @@ pub async fn proxy_http_streams_response_body_for_test(
         first_chunk,
         full_body,
     })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_head_response_for_test() -> Result<HttpStatusBodyTestResult, String> {
+    let upstream = spawn_head_response_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
+        TcpStream::connect(upstream).await
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"HEAD http://intranet.zju.edu.cn/health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let status_line = response.lines().next().unwrap_or_default().to_string();
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+
+    Ok(HttpStatusBodyTestResult { status_code, body })
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -2095,6 +2141,32 @@ async fn spawn_slow_streaming_response_upstream() -> SocketAddr {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(250)).await;
         socket.write_all(b" world").await.unwrap();
+    });
+    addr
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_head_response_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let n = socket.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                return;
+            }
+            request.extend_from_slice(&chunk[..n]);
+            if find_header_end(&request).is_some() {
+                break;
+            }
+        }
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
     });
     addr
 }

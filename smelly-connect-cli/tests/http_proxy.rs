@@ -69,6 +69,15 @@ async fn http_proxy_streams_upstream_response_without_full_buffering() {
 }
 
 #[tokio::test]
+async fn http_proxy_preserves_head_responses_without_waiting_for_body_bytes() {
+    let result = smelly_connect_cli::proxy::http::proxy_http_head_response_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.status_code, 200);
+    assert!(result.body.is_empty());
+}
+
+#[tokio::test]
 async fn http_connect_proxy_tunnels_bytes_through_selected_session() {
     let result = smelly_connect_cli::proxy::http::proxy_connect_for_test()
         .await
