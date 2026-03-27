@@ -1455,6 +1455,7 @@ fn build_pool_summary(state: &PoolState) -> PoolSummary {
     let mut ready_nodes = 0;
     let mut suspect_nodes = 0;
     let mut open_nodes = 0;
+    let mut timed_open_nodes = 0;
     let mut half_open_nodes = 0;
     let mut connecting_nodes = 0;
     let mut configured_nodes = 0;
@@ -1465,7 +1466,12 @@ fn build_pool_summary(state: &PoolState) -> PoolSummary {
             AccountState::Connecting => connecting_nodes += 1,
             AccountState::Ready(_) => ready_nodes += 1,
             AccountState::Suspect(_) => suspect_nodes += 1,
-            AccountState::Open(_) => open_nodes += 1,
+            AccountState::Open(_) => {
+                open_nodes += 1;
+                if node.open_until.is_some() {
+                    timed_open_nodes += 1;
+                }
+            }
             AccountState::HalfOpen(_) => half_open_nodes += 1,
         }
     }
@@ -1473,7 +1479,7 @@ fn build_pool_summary(state: &PoolState) -> PoolSummary {
     let selectable_nodes = ready_nodes + suspect_nodes;
     let status = if selectable_nodes > 0 {
         PoolHealthStatus::Healthy
-    } else if half_open_nodes > 0 || connecting_nodes > 0 {
+    } else if half_open_nodes > 0 || connecting_nodes > 0 || timed_open_nodes > 0 {
         PoolHealthStatus::Recovering
     } else {
         PoolHealthStatus::Down
