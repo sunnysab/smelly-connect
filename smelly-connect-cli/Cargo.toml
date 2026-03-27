@@ -26,3 +26,9 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "time"] }
 axum = { version = "0.8", optional = true, features = ["json"] }
+bytes = "1"
+fast-socks5 = "1"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
