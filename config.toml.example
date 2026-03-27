@@ -8,8 +8,10 @@ default_keepalive_host = "jwxt.sit.edu.cn"
 [pool]
 # Number of accounts to connect immediately during startup.
 prewarm = 2
-# Timeout for establishing a session for one account.
+# Legacy fallback timeout. Used only when the split timeout fields below are absent.
 connect_timeout_secs = 20
+# Timeout for establishing or recovering one VPN session.
+session_connect_timeout_secs = 7
 # Probe interval used for pool health checks.
 healthcheck_interval_secs = 60
 # Current implementation supports round_robin only.
@@ -22,6 +24,10 @@ backoff_base_secs = 30
 backoff_max_secs = 600
 # Allow one request-triggered early recovery attempt when no selectable upstream exists.
 allow_request_triggered_probe = true
+
+[proxy]
+# Timeout for TCP connect from the proxy to the upstream target.
+upstream_tcp_connect_timeout_secs = 3
 
 [[accounts]]
 name = "acct-01"
@@ -40,6 +46,8 @@ listen = "127.0.0.1:8080"
 [proxy.socks5]
 enabled = true
 listen = "127.0.0.1:1080"
+# Optional idle timeout for SOCKS5 UDP ASSOCIATE. 0 or unset disables it.
+udp_associate_idle_timeout_secs = 90
 
 [routing]
 # Bypass route filtering and allow all destinations through the VPN.

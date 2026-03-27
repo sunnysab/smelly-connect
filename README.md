@@ -104,12 +104,16 @@ default_keepalive_host = "jwxt.sit.edu.cn"
 [pool]
 prewarm = 2
 connect_timeout_secs = 20
+session_connect_timeout_secs = 7
 healthcheck_interval_secs = 60
 selection = "round_robin"
 failure_threshold = 3
 backoff_base_secs = 30
 backoff_max_secs = 600
 allow_request_triggered_probe = true
+
+[proxy]
+upstream_tcp_connect_timeout_secs = 3
 
 [[accounts]]
 name = "acct-01"
@@ -126,6 +130,7 @@ enabled = true
 listen = "127.0.0.1:8080"
 
 [proxy.socks5]
+udp_associate_idle_timeout_secs = 90
 enabled = true
 listen = "127.0.0.1:1080"
 
@@ -154,6 +159,8 @@ mode = "stdout"
 level = "info"
 file = "smelly-connect.log"
 ```
+
+如果显式配置了 `session_connect_timeout_secs` 或 `upstream_tcp_connect_timeout_secs`，它们会优先于旧的 `connect_timeout_secs`；旧字段现在只作为回退默认值。
 
 当前 CLI 命令面：
 
