@@ -75,6 +75,7 @@ struct PoolState {
 #[derive(Clone)]
 pub struct SessionPool {
     inner: Arc<Mutex<PoolState>>,
+    #[cfg(any(test, debug_assertions))]
     retry_delay: Duration,
     connect_timeout: Duration,
     local_route_overrides: LocalRouteOverrides,
@@ -240,6 +241,7 @@ impl SessionPool {
         }
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -278,6 +280,7 @@ impl SessionPool {
             .collect();
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -320,6 +323,7 @@ impl SessionPool {
             .collect();
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -358,6 +362,7 @@ impl SessionPool {
             .collect();
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -419,6 +424,7 @@ impl SessionPool {
         }
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -454,6 +460,7 @@ impl SessionPool {
         }
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -491,6 +498,7 @@ impl SessionPool {
                 }],
                 cursor: 0,
             })),
+            #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_millis(100),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -531,6 +539,7 @@ impl SessionPool {
 
         let pool = Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
             connect_timeout: Duration::from_secs(cfg.pool.connect_timeout_secs.max(1)),
             local_route_overrides: build_local_route_overrides(&cfg.routing)?,
