@@ -95,6 +95,8 @@ pub struct SessionPool {
 }
 
 const DEFAULT_SESSION_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const DEFAULT_VPN_HEALTH_PROBE_ATTEMPTS: usize = 3;
+const DEFAULT_VPN_HEALTH_PROBE_DELAY: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone)]
 pub struct PoolError {
@@ -692,7 +694,7 @@ impl SessionPool {
             tracing::warn!(
                 account = %account_name,
                 error = %error,
-                "live session marked unhealthy after vpn probe failure"
+                "live session marked unhealthy after vpn probe failures"
             );
         }
     }
@@ -706,13 +708,19 @@ impl SessionPool {
         let Some(target) = self.keepalive_target.clone() else {
             return;
         };
-        if session
-            .icmp_ping(smelly_connect::session::IcmpKeepAliveTarget::Host(target))
-            .await
-            .is_err()
-        {
-            self.report_live_session_unhealthy(account_name, error).await;
+        for attempt in 0..DEFAULT_VPN_HEALTH_PROBE_ATTEMPTS {
+            if session
+                .icmp_ping(smelly_connect::session::IcmpKeepAliveTarget::Host(target.clone()))
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            if attempt + 1 < DEFAULT_VPN_HEALTH_PROBE_ATTEMPTS {
+                tokio::time::sleep(DEFAULT_VPN_HEALTH_PROBE_DELAY).await;
+            }
         }
+        self.report_live_session_unhealthy(account_name, error).await;
     }
 
     #[cfg(any(test, debug_assertions))]
