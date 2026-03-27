@@ -264,17 +264,35 @@ impl EasyConnectSession {
     where
         T: Into<IcmpKeepAliveTarget>,
     {
+        self.start_icmp_keepalive_with_failure_handler(target, interval, || {})
+    }
+
+    pub fn start_icmp_keepalive_with_failure_handler<T, F>(
+        &self,
+        target: T,
+        interval: Duration,
+        on_failure: F,
+    ) -> KeepaliveHandle
+    where
+        T: Into<IcmpKeepAliveTarget>,
+        F: Fn() + Send + Sync + 'static,
+    {
         let target = target.into();
         let transport = self.transport.clone();
         let resolver = self.resolver.clone();
+        let on_failure = Arc::new(on_failure);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
                     _ = async {
-                        if let Ok(ip) = resolve_keepalive_target(&resolver, &target).await {
-                            let _ = transport.icmp_ping(ip).await;
+                        let failed = match resolve_keepalive_target(&resolver, &target).await {
+                            Ok(ip) => transport.icmp_ping(ip).await.is_err(),
+                            Err(_) => true,
+                        };
+                        if failed {
+                            on_failure();
                         }
                         tokio::time::sleep(interval).await;
                     } => {}
@@ -283,7 +301,7 @@ impl EasyConnectSession {
         });
         KeepaliveHandle {
             shutdown_tx: Some(shutdown_tx),
-            task,
+            task: Some(task),
         }
     }
 

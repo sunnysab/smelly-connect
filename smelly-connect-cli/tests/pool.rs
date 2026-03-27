@@ -401,3 +401,20 @@ async fn pool_prefers_default_keepalive_host_over_vpn_server() {
         Some("jwxt.sit.edu.cn")
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn session_keepalive_failure_marks_live_session_open_before_periodic_healthcheck() {
+    let session = smelly_connect::session::tests::session_with_icmp_result(false);
+    let pool =
+        smelly_connect_cli::pool::SessionPool::from_live_sessions_with_active_keepalive_for_test(
+            vec![("acct-01", session)],
+            "10.0.0.1",
+        )
+        .await;
+
+    tokio::time::advance(std::time::Duration::from_secs(11)).await;
+    tokio::task::yield_now().await;
+
+    assert!(pool.state_summary_for_test().await.contains("Open"));
+    assert!(!pool.has_selectable_nodes_for_test().await);
+}

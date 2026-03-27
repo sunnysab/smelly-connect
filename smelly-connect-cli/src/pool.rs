@@ -397,6 +397,17 @@ impl SessionPool {
     }
 
     #[cfg(any(test, debug_assertions))]
+    pub async fn from_live_sessions_with_active_keepalive_for_test(
+        entries: Vec<(&str, Session)>,
+        keepalive_target: &str,
+    ) -> Self {
+        let pool = Self::from_live_sessions_with_keepalive_target_for_test(entries, keepalive_target)
+            .await;
+        pool.arm_keepalives_for_live_sessions_for_test().await;
+        pool
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub async fn from_test_outcomes<const N: usize>(
         outcomes: [Result<&str, &str>; N],
         prewarm: usize,
@@ -830,6 +841,42 @@ impl SessionPool {
         }
     }
 
+    fn build_keepalive_handle(
+        &self,
+        account_name: &str,
+        session: &Session,
+    ) -> Option<Arc<std::sync::Mutex<smelly_connect::KeepaliveHandle>>> {
+        let target = self.keepalive_target.clone()?;
+        let pool = self.clone();
+        let account_name = account_name.to_string();
+        Some(Arc::new(std::sync::Mutex::new(
+            session.start_icmp_keepalive_with_failure_handler(
+                target,
+                DEFAULT_SESSION_KEEPALIVE_INTERVAL,
+                move || {
+                    let pool = pool.clone();
+                    let account_name = account_name.clone();
+                    tokio::spawn(async move {
+                        pool.report_live_session_unhealthy(
+                            &account_name,
+                            "session keepalive failed",
+                        )
+                        .await;
+                    });
+                },
+            ),
+        )))
+    }
+
+    fn wrap_live_session(&self, account_name: String, session: Session) -> PooledSession {
+        let keepalive = self.build_keepalive_handle(&account_name, &session);
+        PooledSession {
+            account_name,
+            session: Some(session),
+            _keepalive: keepalive,
+        }
+    }
+
     async fn claim_live_session_probe(&self, account_name: &str) -> bool {
         let mut state = self.inner.lock().await;
         let Some(node) = state
@@ -1117,6 +1164,22 @@ impl SessionPool {
         self.keepalive_target.clone()
     }
 
+    #[cfg(any(test, debug_assertions))]
+    async fn arm_keepalives_for_live_sessions_for_test(&self) {
+        let mut state = self.inner.lock().await;
+        for node in &mut state.nodes {
+            match &mut node.state {
+                AccountState::Ready(session) | AccountState::Suspect(session) => {
+                    if let Some(live) = session.session.as_ref() {
+                        session._keepalive =
+                            self.build_keepalive_handle(session.account_name(), live);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub async fn next_session(&self) -> Result<PooledSession, PoolError> {
         self.refresh_time_based_states().await;
         let mut state = self.inner.lock().await;
@@ -1315,9 +1378,10 @@ impl SessionPool {
         .await
         {
             Ok(session) => {
+                let pooled = self.wrap_live_session(account.name.clone(), session);
                 let mut state = self.inner.lock().await;
                 if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
-                    node.state = AccountState::Ready(session.into());
+                    node.state = AccountState::Ready(pooled.into());
                     tracing::info!(account = %account.name, "account ready");
                 }
                 Ok(())
@@ -1397,11 +1461,9 @@ impl SessionPool {
         .await
         {
             Ok(session) => {
-                let live = session
-                    .session()
-                    .cloned()
-                    .ok_or_else(|| PoolError::new("probe session missing live handle"))?;
-                self.complete_probe_success(&name, session, account).await?;
+                let live = session.clone();
+                let pooled = self.wrap_live_session(name.clone(), session);
+                self.complete_probe_success(&name, pooled, account).await?;
                 Ok(Some((name, live)))
             }
             Err(err) => {
@@ -1487,8 +1549,8 @@ async fn connect_account(
     timeout: Duration,
     local_route_overrides: &LocalRouteOverrides,
     allow_all_routes: bool,
-    keepalive_target: Option<&str>,
-) -> Result<PooledSession, PoolError> {
+    _keepalive_target: Option<&str>,
+) -> Result<Session, PoolError> {
     let client = EasyConnectClient::builder(server.to_string())
         .credentials(account.username.clone(), account.password.clone())
         .with_captcha_handler(CaptchaHandler::from_async(|_, _| async move {
@@ -1506,17 +1568,7 @@ async fn connect_account(
     let session = session
         .with_local_route_overrides(local_route_overrides.clone())
         .with_allow_all_routes(allow_all_routes);
-    let keepalive = keepalive_target.map(|target| {
-        Arc::new(std::sync::Mutex::new(session.start_icmp_keepalive(
-            target.to_string(),
-            DEFAULT_SESSION_KEEPALIVE_INTERVAL,
-        )))
-    });
-    Ok(PooledSession {
-        account_name: account.name.clone(),
-        session: Some(session),
-        _keepalive: keepalive,
-    })
+    Ok(session)
 }
 
 fn next_backoff(current: Duration, base: Duration, max: Duration) -> Duration {
