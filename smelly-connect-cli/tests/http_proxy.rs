@@ -146,14 +146,14 @@ async fn http_connect_returns_gateway_timeout_on_upstream_timeout() {
     assert_eq!(result.status_code, 504);
 }
 
-#[tokio::test(start_paused = true)]
-async fn http_live_connect_failure_marks_node_open_for_recovery() {
+#[tokio::test]
+async fn http_live_connect_failure_stays_request_scoped() {
     let result = smelly_connect_cli::proxy::http::proxy_http_live_connect_failure_recovery_for_test()
         .await
         .unwrap();
     assert_eq!(result.status_code, 502);
-    assert!(result.state_summary.contains("Open"));
-    assert!(!result.selectable_after_failure);
+    assert!(result.state_summary.contains("Ready"));
+    assert!(result.selectable_after_failure);
     assert_eq!(result.recovered_account, "acct-01");
 }
 

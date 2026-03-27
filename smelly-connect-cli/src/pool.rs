@@ -15,9 +15,18 @@ use crate::config::{AccountConfig, AppConfig};
 pub struct PooledSession {
     account_name: String,
     session: Option<Session>,
+    _keepalive: Option<Arc<std::sync::Mutex<smelly_connect::KeepaliveHandle>>>,
 }
 
 impl PooledSession {
+    fn new(account_name: String, session: Option<Session>) -> Self {
+        Self {
+            account_name,
+            session,
+            _keepalive: None,
+        }
+    }
+
     pub fn account_name(&self) -> &str {
         &self.account_name
     }
@@ -80,9 +89,12 @@ pub struct SessionPool {
     connect_timeout: Duration,
     local_route_overrides: LocalRouteOverrides,
     allow_all_routes: bool,
+    keepalive_target: Option<String>,
     server: Option<String>,
     allow_request_triggered_probe: bool,
 }
+
+const DEFAULT_SESSION_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct PoolError {
@@ -209,10 +221,7 @@ impl SessionPool {
             let name = format!("acct-{:02}", idx + 1);
             let state = if idx < prewarm {
                 AccountState::Ready(
-                    PooledSession {
-                        account_name: name.clone(),
-                        session: None,
-                    }
+                    PooledSession::new(name.clone(), None)
                     .into(),
                 )
             } else {
@@ -246,6 +255,7 @@ impl SessionPool {
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
             allow_all_routes: false,
+            keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -263,10 +273,7 @@ impl SessionPool {
                     password: "pass".to_string(),
                 },
                 state: AccountState::Ready(
-                    PooledSession {
-                        account_name: name.to_string(),
-                        session: None,
-                    }
+                    PooledSession::new(name.to_string(), None)
                     .into(),
                 ),
                 flaky_retry: false,
@@ -285,6 +292,7 @@ impl SessionPool {
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
             allow_all_routes: false,
+            keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -304,12 +312,10 @@ impl SessionPool {
                     password: "pass".to_string(),
                 },
                 state: AccountState::Ready(
-                    PooledSession {
-                        account_name: account_name.to_string(),
-                        session: Some(smelly_connect::session::tests::session_with_domain_match(
-                            host, ip,
-                        )),
-                    }
+                    PooledSession::new(
+                        account_name.to_string(),
+                        Some(smelly_connect::session::tests::session_with_domain_match(host, ip)),
+                    )
                     .into(),
                 ),
                 flaky_retry: false,
@@ -328,6 +334,7 @@ impl SessionPool {
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
             allow_all_routes: false,
+            keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -345,10 +352,7 @@ impl SessionPool {
                     password: "pass".to_string(),
                 },
                 state: AccountState::Ready(
-                    PooledSession {
-                        account_name: account_name.to_string(),
-                        session: Some(session),
-                    }
+                    PooledSession::new(account_name.to_string(), Some(session))
                     .into(),
                 ),
                 flaky_retry: false,
@@ -367,6 +371,7 @@ impl SessionPool {
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
             allow_all_routes: false,
+            keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -383,10 +388,7 @@ impl SessionPool {
                 Ok(name) if idx < prewarm => (
                     name.to_string(),
                     AccountState::Ready(
-                        PooledSession {
-                            account_name: name.to_string(),
-                            session: None,
-                        }
+                        PooledSession::new(name.to_string(), None)
                         .into(),
                     ),
                 ),
@@ -429,6 +431,7 @@ impl SessionPool {
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
             allow_all_routes: false,
+            keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -465,6 +468,7 @@ impl SessionPool {
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
             allow_all_routes: false,
+            keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -482,10 +486,7 @@ impl SessionPool {
                         password: "pass".to_string(),
                     },
                     state: AccountState::Ready(
-                        PooledSession {
-                            account_name: "acct-01".to_string(),
-                            session: None,
-                        }
+                        PooledSession::new("acct-01".to_string(), None)
                         .into(),
                     ),
                     flaky_retry: true,
@@ -503,6 +504,7 @@ impl SessionPool {
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
             allow_all_routes: false,
+            keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -544,6 +546,7 @@ impl SessionPool {
             connect_timeout: Duration::from_secs(cfg.pool.connect_timeout_secs.max(1)),
             local_route_overrides: build_local_route_overrides(&cfg.routing)?,
             allow_all_routes: cfg.routing.allow_all,
+            keepalive_target: Some(cfg.vpn.server.clone()),
             server: Some(cfg.vpn.server.clone()),
             allow_request_triggered_probe: cfg.pool.allow_request_triggered_probe,
         };
@@ -671,6 +674,47 @@ impl SessionPool {
         }
     }
 
+    pub async fn report_live_session_unhealthy(
+        &self,
+        account_name: &str,
+        error: impl Into<String>,
+    ) {
+        let error = error.into();
+        let mut state = self.inner.lock().await;
+        if let Some(node) = state.nodes.iter_mut().find(|node| node.name == account_name)
+            && matches!(node.state, AccountState::Ready(_) | AccountState::Suspect(_))
+        {
+            node.consecutive_failures = node.failure_threshold;
+            node.open_until = Some(Instant::now());
+            node.state = AccountState::Open(AccountFailure {
+                message: error.clone(),
+            });
+            tracing::warn!(
+                account = %account_name,
+                error = %error,
+                "live session marked unhealthy after vpn probe failure"
+            );
+        }
+    }
+
+    pub async fn report_live_session_unhealthy_if_probe_fails(
+        &self,
+        account_name: &str,
+        session: &Session,
+        error: impl Into<String>,
+    ) {
+        let Some(target) = self.keepalive_target.clone() else {
+            return;
+        };
+        if session
+            .icmp_ping(smelly_connect::session::IcmpKeepAliveTarget::Host(target))
+            .await
+            .is_err()
+        {
+            self.report_live_session_unhealthy(account_name, error).await;
+        }
+    }
+
     #[cfg(any(test, debug_assertions))]
     pub async fn has_selectable_nodes_for_test(&self) -> bool {
         self.refresh_time_based_states().await;
@@ -696,10 +740,7 @@ impl SessionPool {
                             password: "pass".to_string(),
                         },
                         state: AccountState::Ready(
-                            PooledSession {
-                                account_name: "ready-01".to_string(),
-                                session: None,
-                            }
+                            PooledSession::new("ready-01".to_string(), None)
                             .into(),
                         ),
                         flaky_retry: false,
@@ -718,10 +759,7 @@ impl SessionPool {
                             password: "pass".to_string(),
                         },
                         state: AccountState::Suspect(
-                            PooledSession {
-                                account_name: "suspect-01".to_string(),
-                                session: None,
-                            }
+                            PooledSession::new("suspect-01".to_string(), None)
                             .into(),
                         ),
                         flaky_retry: false,
@@ -777,6 +815,7 @@ impl SessionPool {
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
             allow_all_routes: false,
+            keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -811,6 +850,7 @@ impl SessionPool {
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
             allow_all_routes: false,
+            keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -848,10 +888,7 @@ impl SessionPool {
         let Some((name, account)) = self.claim_request_triggered_probe().await? else {
             return Err(PoolError::new("no ready session"));
         };
-        let session = PooledSession {
-            account_name: name.clone(),
-            session: None,
-        };
+        let session = PooledSession::new(name.clone(), None);
         self.complete_probe_success(&name, session.clone(), account)
             .await?;
         Ok(session)
@@ -950,11 +987,8 @@ impl SessionPool {
             .find(|node| matches!(node.state, AccountState::Configured(_)))
         {
             node.state = AccountState::Ready(
-                PooledSession {
-                    account_name: node.name.clone(),
-                    session: None,
-                }
-                .into(),
+                            PooledSession::new(node.name.clone(), None)
+                            .into(),
             );
             return Ok(());
         }
@@ -1027,10 +1061,7 @@ impl SessionPool {
                     let mut state = inner.lock().await;
                     if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
                         node.state = AccountState::Ready(
-                            PooledSession {
-                                account_name: node.account.name.clone(),
-                                session: None,
-                            }
+                            PooledSession::new(node.account.name.clone(), None)
                             .into(),
                         );
                         node.consecutive_failures = 0;
@@ -1119,19 +1150,14 @@ impl SessionPool {
             self.connect_timeout,
             &self.local_route_overrides,
             self.allow_all_routes,
+            self.keepalive_target.as_deref(),
         )
         .await
         {
             Ok(session) => {
                 let mut state = self.inner.lock().await;
                 if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
-                    node.state = AccountState::Ready(
-                        PooledSession {
-                            account_name: account.name.clone(),
-                            session: Some(session),
-                        }
-                        .into(),
-                    );
+                    node.state = AccountState::Ready(session.into());
                     tracing::info!(account = %account.name, "account ready");
                 }
                 Ok(())
@@ -1206,20 +1232,22 @@ impl SessionPool {
             self.connect_timeout,
             &self.local_route_overrides,
             self.allow_all_routes,
+            self.keepalive_target.as_deref(),
         )
         .await
         {
             Ok(session) => {
+                let live = session
+                    .session()
+                    .cloned()
+                    .ok_or_else(|| PoolError::new("probe session missing live handle"))?;
                 self.complete_probe_success(
                     &name,
-                    PooledSession {
-                        account_name: account.name.clone(),
-                        session: Some(session.clone()),
-                    },
+                    session,
                     account,
                 )
                 .await?;
-                Ok(Some((name, session)))
+                Ok(Some((name, live)))
             }
             Err(err) => {
                 self.complete_probe_failure(&name, err.to_string()).await?;
@@ -1281,7 +1309,8 @@ async fn connect_account(
     timeout: Duration,
     local_route_overrides: &LocalRouteOverrides,
     allow_all_routes: bool,
-) -> Result<Session, PoolError> {
+    keepalive_target: Option<&str>,
+) -> Result<PooledSession, PoolError> {
     let client = EasyConnectClient::builder(server.to_string())
         .credentials(account.username.clone(), account.password.clone())
         .with_captcha_handler(CaptchaHandler::from_async(|_, _| async move {
@@ -1296,9 +1325,20 @@ async fn connect_account(
         .await
         .map_err(|_| PoolError::new("session connect timeout"))?
         .map_err(|err| PoolError::new(format!("{err:?}")))?;
-    Ok(session
+    let session = session
         .with_local_route_overrides(local_route_overrides.clone())
-        .with_allow_all_routes(allow_all_routes))
+        .with_allow_all_routes(allow_all_routes);
+    let keepalive = keepalive_target.map(|target| {
+        Arc::new(std::sync::Mutex::new(session.start_icmp_keepalive(
+            target.to_string(),
+            DEFAULT_SESSION_KEEPALIVE_INTERVAL,
+        )))
+    });
+    Ok(PooledSession {
+        account_name: account.name.clone(),
+        session: Some(session),
+        _keepalive: keepalive,
+    })
 }
 
 fn next_backoff(current: Duration, base: Duration, max: Duration) -> Duration {

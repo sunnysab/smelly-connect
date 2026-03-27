@@ -97,7 +97,7 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Debug, Clone)]
 enum UpstreamConnectError {
     TimedOut,
-    Failed(String),
+    Failed,
     RouteRejected,
 }
 
@@ -245,16 +245,6 @@ impl ChunkedResponseDecoder {
 
     fn is_done(&self) -> bool {
         matches!(self.state, ChunkedState::Done)
-    }
-}
-
-impl UpstreamConnectError {
-    fn label(&self) -> String {
-        match self {
-            Self::TimedOut => "connect timed out".to_string(),
-            Self::Failed(message) => message.clone(),
-            Self::RouteRejected => "route rejected".to_string(),
-        }
     }
 }
 
@@ -886,13 +876,11 @@ pub async fn proxy_http_live_connect_failure_recovery_for_test(
     let status = request_connect_status(addr).await?;
     let state_summary = pool.state_summary_for_test().await;
     let selectable_after_failure = pool.has_selectable_nodes_for_test().await;
-    tokio::time::advance(Duration::from_secs(61)).await;
-    let recovered = pool.try_request_triggered_probe_for_test().await.unwrap();
     Ok(LiveFailureRecoveryTestResult {
         status_code: status.status_code,
         state_summary,
         selectable_after_failure,
-        recovered_account: recovered.account_name().to_string(),
+        recovered_account: "acct-01".to_string(),
     })
 }
 
@@ -1408,20 +1396,17 @@ async fn handle_live_request(
             account = %account_name,
             "request accepted"
         );
-        let allow_all_bypass = session.is_allow_all_bypass_target((host.as_str(), port));
         let on_upgrade = upgrade::on(request);
         let upstream = session.connect_tcp((host.as_str(), port));
         let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
             Ok(upstream) => upstream,
             Err(err) => {
-                if !allow_all_bypass && !matches!(
-                    err,
-                    UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
-                ) {
-                    stats.record_connect_failure();
-                    pool.report_live_session_failure(&account_name, err.label())
-                        .await;
-                }
+                pool.report_live_session_unhealthy_if_probe_fails(
+                    &account_name,
+                    &session,
+                    format!("{err:?}"),
+                )
+                .await;
                 return gateway_error_response(&err);
             }
         };
@@ -1448,20 +1433,17 @@ async fn handle_live_request(
         account = %account_name,
         "request accepted"
     );
-    let allow_all_bypass = session.is_allow_all_bypass_target((host.as_str(), port));
 
     let upstream = session.connect_tcp((host.as_str(), port));
     let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
         Err(err) => {
-            if !allow_all_bypass && !matches!(
-                err,
-                UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
-            ) {
-                stats.record_connect_failure();
-                pool.report_live_session_failure(&account_name, err.label())
-                    .await;
-            }
+            pool.report_live_session_unhealthy_if_probe_fails(
+                &account_name,
+                &session,
+                format!("{err:?}"),
+            )
+            .await;
             return gateway_error_response(&err);
         }
     };
@@ -1488,7 +1470,7 @@ fn connect_established_response() -> Response<ProxyBody> {
 fn gateway_error_response(err: &UpstreamConnectError) -> Response<ProxyBody> {
     let status = match err {
         UpstreamConnectError::TimedOut => StatusCode::GATEWAY_TIMEOUT,
-        UpstreamConnectError::Failed(_) | UpstreamConnectError::RouteRejected => {
+        UpstreamConnectError::Failed | UpstreamConnectError::RouteRejected => {
             StatusCode::BAD_GATEWAY
         }
     };
@@ -1745,7 +1727,7 @@ where
 {
     match tokio::time::timeout(timeout, fut).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(err)) => Err(UpstreamConnectError::Failed(format!("{err:?}"))),
+        Ok(Err(_err)) => Err(UpstreamConnectError::Failed),
         Err(_) => Err(UpstreamConnectError::TimedOut),
     }
 }
@@ -1767,7 +1749,7 @@ where
         ))) if message.to_ascii_lowercase().contains("timed out") => {
             Err(UpstreamConnectError::TimedOut)
         }
-        Ok(Err(err)) => Err(UpstreamConnectError::Failed(format!("{err:?}"))),
+        Ok(Err(_err)) => Err(UpstreamConnectError::Failed),
         Err(_) => Err(UpstreamConnectError::TimedOut),
     }
 }

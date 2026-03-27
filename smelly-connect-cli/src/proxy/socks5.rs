@@ -34,18 +34,8 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Debug, Clone)]
 enum UpstreamConnectError {
     TimedOut,
-    Failed(String),
+    Failed,
     RouteRejected,
-}
-
-impl UpstreamConnectError {
-    fn label(&self) -> String {
-        match self {
-            Self::TimedOut => "connect timed out".to_string(),
-            Self::Failed(message) => message.clone(),
-            Self::RouteRejected => "route rejected".to_string(),
-        }
-    }
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -850,20 +840,17 @@ async fn handle_live_client(
                 account = %account_name,
                 "request accepted"
             );
-            let allow_all_bypass = session.is_allow_all_bypass_target((host.as_str(), port));
 
             let upstream = session.connect_tcp((host.as_str(), port));
             let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
                 Ok(upstream) => upstream,
                 Err(err) => {
-                    if !allow_all_bypass && !matches!(
-                        err,
-                        UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
-                    ) {
-                        stats.record_connect_failure();
-                        pool.report_live_session_failure(&account_name, err.label())
-                            .await;
-                    }
+                    pool.report_live_session_unhealthy_if_probe_fails(
+                        &account_name,
+                        &session,
+                        format!("{err:?}"),
+                    )
+                    .await;
                     proto.reply_error(&map_socks5_reply_error(&err))
                         .await
                         .map_err(|reply_err| reply_err.to_string())?;
@@ -1005,7 +992,7 @@ where
 {
     match tokio::time::timeout(timeout, fut).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(err)) => Err(UpstreamConnectError::Failed(format!("{err:?}"))),
+        Ok(Err(_err)) => Err(UpstreamConnectError::Failed),
         Err(_) => Err(UpstreamConnectError::TimedOut),
     }
 }
@@ -1078,7 +1065,7 @@ where
         ))) if message.to_ascii_lowercase().contains("timed out") => {
             Err(UpstreamConnectError::TimedOut)
         }
-        Ok(Err(err)) => Err(UpstreamConnectError::Failed(format!("{err:?}"))),
+        Ok(Err(_err)) => Err(UpstreamConnectError::Failed),
         Err(_) => Err(UpstreamConnectError::TimedOut),
     }
 }

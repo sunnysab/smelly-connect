@@ -73,6 +73,11 @@ struct SmolTcpStream {
     handle: SocketHandle,
 }
 
+struct PendingConnectGuard {
+    stack: Arc<SmolStackInner>,
+    handle: Option<SocketHandle>,
+}
+
 struct SmolUdpSocket {
     stack: Arc<SmolStackInner>,
     handle: SocketHandle,
@@ -173,12 +178,14 @@ impl SmolStack {
         };
 
         self.inner.wake.notify_one();
+        let mut guard = PendingConnectGuard {
+            stack: Arc::clone(&self.inner),
+            handle: Some(handle),
+        };
 
         let connected = poll_fn(|cx| self.inner.poll_connect(handle, cx)).await;
-        if let Err(err) = connected {
-            self.inner.remove_socket(handle);
-            return Err(err);
-        }
+        connected?;
+        guard.handle = None;
 
         Ok(VpnStream::new(SmolTcpStream {
             stack: Arc::clone(&self.inner),
@@ -576,6 +583,15 @@ impl Drop for SmolTcpStream {
     }
 }
 
+impl Drop for PendingConnectGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.stack.remove_socket(handle);
+            self.stack.wake.notify_one();
+        }
+    }
+}
+
 impl AsyncDatagramSocket for SmolUdpSocket {
     fn send_to<'a>(
         &'a self,
@@ -696,5 +712,30 @@ fn udp_socket() -> udp::Socket<'static> {
 fn socket_addr_from_endpoint(endpoint: smoltcp::wire::IpEndpoint) -> io::Result<SocketAddr> {
     match endpoint.addr {
         IpAddress::Ipv4(ip) => Ok(SocketAddr::new(IpAddr::V4(ip), endpoint.port)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_connect_releases_pending_socket_handle() {
+        let (_vpn_tx, vpn_rx) = mpsc::channel(4);
+        let (stack_tx, _stack_rx) = mpsc::channel(4);
+        let stack = SmolStack::new(Ipv4Addr::new(10, 0, 0, 8), vpn_rx, stack_tx);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            stack.connect(SocketAddr::from((Ipv4Addr::new(10, 0, 0, 9), 443))),
+        )
+        .await;
+        assert!(result.is_err(), "connect should time out in test");
+
+        let state = stack.inner.state.lock().expect("netstack mutex poisoned");
+        assert!(
+            state.active_handles.is_empty(),
+            "timed out connect leaked active socket handles"
+        );
     }
 }
