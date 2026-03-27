@@ -1006,6 +1006,63 @@ pub async fn proxy_http_timeout_does_not_open_for_test(
     })
 }
 
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_allow_all_failure_does_not_open_for_test(
+) -> Result<LiveFailureRecoveryTestResult, String> {
+    let session = smelly_connect::session::tests::fake_session_without_match_with_transport(
+        smelly_connect::session::EasyConnectSession::failing_transport(
+            "forced allow-all target failure",
+        ),
+    )
+    .with_allow_all_routes(true);
+    let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|err| err.to_string())?;
+    let addr = listener.local_addr().map_err(|err| err.to_string())?;
+    let serve_pool = pool.clone();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let _ = handle_live_client(
+            stream,
+            serve_pool,
+            RuntimeStats::default(),
+            DEFAULT_CONNECT_TIMEOUT,
+        )
+        .await;
+    });
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"CONNECT baidu.com:443 HTTP/1.1\r\nHost: baidu.com:443\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let status_line = response.lines().next().unwrap_or_default().to_string();
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+    Ok(LiveFailureRecoveryTestResult {
+        status_code,
+        state_summary: pool.state_summary_for_test().await,
+        selectable_after_failure: pool.has_selectable_nodes_for_test().await,
+        recovered_account: "acct-01".to_string(),
+    })
+}
+
 pub async fn serve_http(
     listen: String,
     pool: SessionPool,
@@ -1351,12 +1408,13 @@ async fn handle_live_request(
             account = %account_name,
             "request accepted"
         );
+        let allow_all_bypass = session.is_allow_all_bypass_target((host.as_str(), port));
         let on_upgrade = upgrade::on(request);
         let upstream = session.connect_tcp((host.as_str(), port));
         let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
             Ok(upstream) => upstream,
             Err(err) => {
-                if !matches!(
+                if !allow_all_bypass && !matches!(
                     err,
                     UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
                 ) {
@@ -1390,12 +1448,13 @@ async fn handle_live_request(
         account = %account_name,
         "request accepted"
     );
+    let allow_all_bypass = session.is_allow_all_bypass_target((host.as_str(), port));
 
     let upstream = session.connect_tcp((host.as_str(), port));
     let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
         Err(err) => {
-            if !matches!(
+            if !allow_all_bypass && !matches!(
                 err,
                 UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
             ) {

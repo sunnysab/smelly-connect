@@ -69,6 +69,14 @@ pub struct TimeoutTestResult {
 }
 
 #[cfg(any(test, debug_assertions))]
+#[derive(Debug, Clone)]
+pub struct Socks5LiveFailureRecoveryTestResult {
+    pub reply_code: u8,
+    pub state_summary: String,
+    pub selectable_after_failure: bool,
+}
+
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_for_test() -> Result<Socks5ProxyTestResult, String> {
     let upstream = spawn_echo_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
@@ -568,6 +576,27 @@ pub async fn proxy_socks5_live_failure_for_test() -> Result<(), String> {
 }
 
 #[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_allow_all_failure_does_not_open_for_test(
+) -> Result<Socks5LiveFailureRecoveryTestResult, String> {
+    let session = smelly_connect::session::tests::fake_session_without_match_with_transport(
+        smelly_connect::session::EasyConnectSession::failing_transport(
+            "forced allow-all target failure",
+        ),
+    )
+    .with_allow_all_routes(true);
+    let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+    let addr = spawn_live_test_socks5(pool.clone(), RuntimeStats::default(), DEFAULT_CONNECT_TIMEOUT)
+        .await?;
+
+    let result = request_connect_failure(addr).await?;
+    Ok(Socks5LiveFailureRecoveryTestResult {
+        reply_code: result.reply_code,
+        state_summary: pool.state_summary_for_test().await,
+        selectable_after_failure: pool.has_selectable_nodes_for_test().await,
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
 async fn spawn_test_socks5<F, Fut>(pool: SessionPool, connector: F) -> Result<SocketAddr, String>
 where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
@@ -821,12 +850,13 @@ async fn handle_live_client(
                 account = %account_name,
                 "request accepted"
             );
+            let allow_all_bypass = session.is_allow_all_bypass_target((host.as_str(), port));
 
             let upstream = session.connect_tcp((host.as_str(), port));
             let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
                 Ok(upstream) => upstream,
                 Err(err) => {
-                    if !matches!(
+                    if !allow_all_bypass && !matches!(
                         err,
                         UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
                     ) {

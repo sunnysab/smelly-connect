@@ -104,3 +104,13 @@ async fn socks5_proxy_rejects_unsupported_address_types_with_reply() {
         .unwrap();
     assert_eq!(result.reply_code, 0x08);
 }
+
+#[tokio::test]
+async fn socks5_allow_all_connect_failure_does_not_mark_live_session_open() {
+    let result = smelly_connect_cli::proxy::socks5::proxy_socks5_allow_all_failure_does_not_open_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.reply_code, 0x03);
+    assert!(result.state_summary.contains("Ready"));
+    assert!(result.selectable_after_failure);
+}

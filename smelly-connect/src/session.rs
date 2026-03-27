@@ -170,6 +170,26 @@ impl EasyConnectSession {
         self
     }
 
+    pub fn is_allow_all_bypass_target<T>(&self, target: T) -> bool
+    where
+        T: Into<TargetAddr>,
+    {
+        if !self.allow_all_routes {
+            return false;
+        }
+
+        let target = target.into();
+        let host = target.host();
+        let port = target.port();
+        if let Ok(ip) = host.parse::<Ipv4Addr>() {
+            !self.resources.matches_ip(IpAddr::V4(ip), port)
+                && !self.local_route_overrides.matches_ip(IpAddr::V4(ip), port)
+        } else {
+            !self.resources.matches_domain(host, port)
+                && !self.local_route_overrides.matches_domain(host, port)
+        }
+    }
+
     pub fn spawn_icmp_keepalive_task(
         &self,
         target: IcmpKeepAliveTarget,
@@ -378,6 +398,15 @@ pub mod tests {
             ResourceSet::default(),
             SessionResolver::new(HashMap::new(), None, HashMap::new()),
             ready_transport(),
+        )
+    }
+
+    pub fn fake_session_without_match_with_transport(transport: TransportStack) -> EasyConnectSession {
+        EasyConnectSession::new(
+            Ipv4Addr::new(10, 0, 0, 8),
+            ResourceSet::default(),
+            SessionResolver::new(HashMap::new(), None, HashMap::new()),
+            transport,
         )
     }
 
