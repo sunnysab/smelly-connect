@@ -75,6 +75,7 @@ pub struct ListenerConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct RoutingConfig {
+    pub allow_all: bool,
     pub domain_rules: Vec<LocalDomainRuleConfig>,
     pub ip_rules: Vec<LocalIpRuleConfig>,
 }
@@ -244,5 +245,8 @@ pub fn apply_proxy_overrides(cfg: &mut AppConfig, command: &ProxyCommand) {
     }
     if let Some(keepalive_host) = &command.keepalive_host {
         cfg.vpn.default_keepalive_host = Some(keepalive_host.clone());
+    }
+    if command.allow_all {
+        cfg.routing.allow_all = true;
     }
 }

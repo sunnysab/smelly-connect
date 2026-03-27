@@ -64,6 +64,41 @@ fn parses_local_routing_overrides_from_config() {
 }
 
 #[test]
+fn parses_allow_all_routing_flag_from_config() {
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+
+        [pool]
+        prewarm = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+        selection = "round_robin"
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+
+        [routing]
+        allow_all = true
+        "#,
+    )
+    .unwrap();
+
+    assert!(cfg.routing.allow_all);
+}
+
+#[test]
 fn proxy_command_accepts_config_and_listener_overrides() {
     let cli = smelly_connect_cli::cli::Cli::parse_from([
         "smelly-connect-cli",
@@ -108,6 +143,16 @@ fn cli_flags_override_config_values() {
     .unwrap();
     assert_eq!(merged.pool.prewarm, 5);
     assert_eq!(merged.proxy.http.listen, "127.0.0.1:18080");
+}
+
+#[test]
+fn allow_all_flag_overrides_config_values() {
+    let merged = smelly_connect_cli::config::merge_for_test(
+        "tests/fixtures/config.sample.toml",
+        ["--allow-all"],
+    )
+    .unwrap();
+    assert!(merged.routing.allow_all);
 }
 
 #[test]

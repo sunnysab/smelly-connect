@@ -130,6 +130,7 @@ enabled = true
 listen = "127.0.0.1:1080"
 
 [routing]
+allow_all = false
 
 [[routing.domain_rules]]
 domain = "*.foo.edu.cn"
@@ -158,6 +159,7 @@ file = "smelly-connect.log"
 
 ```bash
 smelly-connect-cli --config ./config.toml proxy --listen-http 127.0.0.1:8080 --listen-socks5 127.0.0.1:1080
+smelly-connect-cli --config ./config.toml proxy --allow-all
 smelly-connect-cli --config ./config.toml routes
 smelly-connect-cli --config ./config.toml status
 smelly-connect-cli --config ./config.toml inspect route jwxt.sit.edu.cn 443
@@ -175,6 +177,7 @@ smelly-connect-cli --config ./config.toml test http http://intranet.zju.edu.cn/h
 本地补充路由：
 
 - `[routing]` 用于追加本地域名/IP 放行规则，与服务端下发规则做并集
+- `allow_all = true` 时跳过 `TargetNotAllowed` 路由拒绝，所有目标都允许尝试走 VPN
 - `[[routing.domain_rules]]` 支持精确域名和 `*.example.com` 泛域名
 - `[[routing.ip_rules]]` 支持单 IP 和 `ip_min` 到 `ip_max` 的 IPv4 / IPv6 范围
 - 本地规则支持 `port_min` / `port_max` / `protocol`

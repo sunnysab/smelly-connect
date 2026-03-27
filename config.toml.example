@@ -42,6 +42,7 @@ enabled = true
 listen = "127.0.0.1:1080"
 
 [routing]
+allow_all = false
 
 [[routing.domain_rules]]
 domain = "*.foo.edu.cn"

@@ -78,6 +78,7 @@ pub struct SessionPool {
     retry_delay: Duration,
     connect_timeout: Duration,
     local_route_overrides: LocalRouteOverrides,
+    allow_all_routes: bool,
     server: Option<String>,
     allow_request_triggered_probe: bool,
 }
@@ -242,6 +243,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            allow_all_routes: false,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -279,6 +281,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            allow_all_routes: false,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -320,6 +323,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            allow_all_routes: false,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -357,6 +361,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            allow_all_routes: false,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -417,6 +422,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            allow_all_routes: false,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -451,6 +457,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            allow_all_routes: false,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -487,6 +494,7 @@ impl SessionPool {
             retry_delay: Duration::from_millis(100),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            allow_all_routes: false,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -526,6 +534,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
             connect_timeout: Duration::from_secs(cfg.pool.connect_timeout_secs.max(1)),
             local_route_overrides: build_local_route_overrides(&cfg.routing)?,
+            allow_all_routes: cfg.routing.allow_all,
             server: Some(cfg.vpn.server.clone()),
             allow_request_triggered_probe: cfg.pool.allow_request_triggered_probe,
         };
@@ -758,6 +767,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            allow_all_routes: false,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -791,6 +801,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            allow_all_routes: false,
             server: None,
             allow_request_triggered_probe: true,
         }
@@ -1098,6 +1109,7 @@ impl SessionPool {
             &account,
             self.connect_timeout,
             &self.local_route_overrides,
+            self.allow_all_routes,
         )
         .await
         {
@@ -1184,6 +1196,7 @@ impl SessionPool {
             &account,
             self.connect_timeout,
             &self.local_route_overrides,
+            self.allow_all_routes,
         )
         .await
         {
@@ -1258,6 +1271,7 @@ async fn connect_account(
     account: &AccountConfig,
     timeout: Duration,
     local_route_overrides: &LocalRouteOverrides,
+    allow_all_routes: bool,
 ) -> Result<Session, PoolError> {
     let client = EasyConnectClient::builder(server.to_string())
         .credentials(account.username.clone(), account.password.clone())
@@ -1273,7 +1287,9 @@ async fn connect_account(
         .await
         .map_err(|_| PoolError::new("session connect timeout"))?
         .map_err(|err| PoolError::new(format!("{err:?}")))?;
-    Ok(session.with_local_route_overrides(local_route_overrides.clone()))
+    Ok(session
+        .with_local_route_overrides(local_route_overrides.clone())
+        .with_allow_all_routes(allow_all_routes))
 }
 
 fn next_backoff(current: Duration, base: Duration, max: Duration) -> Duration {

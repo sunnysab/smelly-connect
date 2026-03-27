@@ -40,6 +40,7 @@ async fn proxy_command_rejects_management_config_when_feature_is_disabled() {
         listen_socks5: None,
         prewarm: None,
         keepalive_host: None,
+        allow_all: false,
     };
 
     let err = smelly_connect_cli::commands::proxy::run_proxy(&path, &command)

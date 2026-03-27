@@ -9,6 +9,28 @@ async fn routing_rejects_non_resource_targets_by_default() {
 }
 
 #[tokio::test]
+async fn allow_all_bypasses_target_not_allowed_for_domains_and_ips() {
+    let session = smelly_connect::session::tests::fake_session_without_match()
+        .with_allow_all_routes(true);
+
+    let domain_route = session
+        .plan_tcp_connect(("example.com", 443))
+        .await
+        .unwrap();
+    assert!(matches!(
+        domain_route,
+        smelly_connect::session::RoutePlan::VpnResolved(_)
+    ));
+
+    let ip_route = session.plan_tcp_connect(("172.24.9.11", 80)).await.unwrap();
+    assert!(matches!(
+        ip_route,
+        smelly_connect::session::RoutePlan::VpnResolved(addr)
+            if addr == "172.24.9.11:80".parse().unwrap()
+    ));
+}
+
+#[tokio::test]
 async fn config_connect_builds_session_with_client_ip() {
     let harness = smelly_connect::session::tests::login_harness();
     let session = harness.config().connect().await.unwrap();

@@ -33,6 +33,8 @@ pub struct ProxyCommand {
     pub prewarm: Option<usize>,
     #[arg(long)]
     pub keepalive_host: Option<String>,
+    #[arg(long)]
+    pub allow_all: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]

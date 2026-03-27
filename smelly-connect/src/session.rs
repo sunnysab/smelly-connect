@@ -96,6 +96,7 @@ pub struct EasyConnectSession {
     client_ip: Ipv4Addr,
     resources: ResourceSet,
     local_route_overrides: LocalRouteOverrides,
+    allow_all_routes: bool,
     resolver: SessionResolver,
     transport: TransportStack,
     legacy_data_plane: Option<LegacyDataPlaneConfig>,
@@ -120,6 +121,7 @@ impl EasyConnectSession {
             client_ip,
             resources,
             local_route_overrides: LocalRouteOverrides::default(),
+            allow_all_routes: false,
             resolver,
             transport,
             legacy_data_plane: None,
@@ -154,6 +156,11 @@ impl EasyConnectSession {
 
     pub fn with_local_route_overrides(mut self, overrides: LocalRouteOverrides) -> Self {
         self.local_route_overrides = overrides;
+        self
+    }
+
+    pub fn with_allow_all_routes(mut self, allow_all_routes: bool) -> Self {
+        self.allow_all_routes = allow_all_routes;
         self
     }
 
@@ -263,7 +270,8 @@ impl EasyConnectSession {
             return self.plan_ip(ip, port);
         }
 
-        if !self.resources.matches_domain(&host, port)
+        if !self.allow_all_routes
+            && !self.resources.matches_domain(&host, port)
             && !self.local_route_overrides.matches_domain(&host, port)
         {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
@@ -279,7 +287,8 @@ impl EasyConnectSession {
     }
 
     fn plan_ip(&self, ip: Ipv4Addr, port: u16) -> Result<RoutePlan, Error> {
-        if !self.resources.matches_ip(IpAddr::V4(ip), port)
+        if !self.allow_all_routes
+            && !self.resources.matches_ip(IpAddr::V4(ip), port)
             && !self.local_route_overrides.matches_ip(IpAddr::V4(ip), port)
         {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
