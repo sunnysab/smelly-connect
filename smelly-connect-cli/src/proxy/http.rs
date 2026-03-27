@@ -33,6 +33,7 @@ use crate::runtime::RuntimeSnapshot;
 use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 
 type ProxyBody = BoxBody<Bytes, io::Error>;
+const MAX_HEADER_BYTES: usize = 16 * 1024;
 
 #[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
@@ -683,6 +684,40 @@ pub async fn proxy_http_head_response_for_test() -> Result<HttpStatusBodyTestRes
         .to_string();
 
     Ok(HttpStatusBodyTestResult { status_code, body })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_rejects_oversized_response_headers_for_test()
+-> Result<NoReadySessionResult, String> {
+    let upstream = spawn_oversized_header_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
+        TcpStream::connect(upstream).await
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"GET http://intranet.zju.edu.cn/health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let status_line = response.lines().next().unwrap_or_default().to_string();
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+    Ok(NoReadySessionResult { status_code })
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -2084,6 +2119,12 @@ async fn read_headers(
             ));
         }
         buffer.extend_from_slice(&chunk[..n]);
+        if buffer.len() > MAX_HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "response header too large",
+            ));
+        }
         if let Some(index) = find_header_end(buffer) {
             return Ok(index);
         }
@@ -2373,6 +2414,33 @@ async fn spawn_head_response_upstream() -> SocketAddr {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n")
             .await
             .unwrap();
+    });
+    addr
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_oversized_header_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let n = socket.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                return;
+            }
+            request.extend_from_slice(&chunk[..n]);
+            if find_header_end(&request).is_some() {
+                break;
+            }
+        }
+        let oversized = "a".repeat(17 * 1024);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nX-Oversized: {oversized}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
     });
     addr
 }

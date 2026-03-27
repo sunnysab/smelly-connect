@@ -85,6 +85,15 @@ async fn http_proxy_preserves_head_responses_without_waiting_for_body_bytes() {
 }
 
 #[tokio::test]
+async fn http_proxy_rejects_oversized_upstream_response_headers() {
+    let result =
+        smelly_connect_cli::proxy::http::proxy_http_rejects_oversized_response_headers_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.status_code, 502);
+}
+
+#[tokio::test]
 async fn http_connect_proxy_tunnels_bytes_through_selected_session() {
     let result = smelly_connect_cli::proxy::http::proxy_connect_for_test()
         .await

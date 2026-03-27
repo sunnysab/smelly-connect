@@ -7,6 +7,9 @@ use tokio::sync::oneshot;
 
 use crate::session::EasyConnectSession;
 
+const MAX_HEADER_BYTES: usize = 16 * 1024;
+const HEADER_TOO_LARGE_MESSAGE: &str = "request header too large";
+
 #[derive(Debug, Clone, Copy)]
 enum RequestBodyKind {
     None,
@@ -81,7 +84,18 @@ pub async fn start_http_proxy(
 
 async fn handle_client(session: EasyConnectSession, mut client: TcpStream) -> io::Result<()> {
     let mut buffer = Vec::with_capacity(1024);
-    let header_end = read_headers(&mut client, &mut buffer).await?;
+    let header_end = match read_headers(&mut client, &mut buffer).await {
+        Ok(header_end) => header_end,
+        Err(err) if is_header_too_large(&err) => {
+            client
+                .write_all(
+                    b"HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                )
+                .await?;
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
     let header_bytes = &buffer[..header_end];
     let leftover = buffer[header_end..].to_vec();
     let header_text = String::from_utf8_lossy(header_bytes);
@@ -248,10 +262,20 @@ async fn read_headers(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> io::Resul
             ));
         }
         buffer.extend_from_slice(&chunk[..n]);
+        if buffer.len() > MAX_HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                HEADER_TOO_LARGE_MESSAGE,
+            ));
+        }
         if let Some(index) = find_header_end(buffer) {
             return Ok(index);
         }
     }
+}
+
+fn is_header_too_large(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::InvalidData && err.to_string() == HEADER_TOO_LARGE_MESSAGE
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {

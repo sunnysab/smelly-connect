@@ -144,6 +144,25 @@ pub mod tests {
             let response = String::from_utf8(response).unwrap();
             response.split("\r\n\r\n").nth(1).unwrap().to_string()
         }
+
+        pub async fn oversized_header_status_via_proxy(&self) -> u16 {
+            let mut client = TcpStream::connect(self.proxy_addr).await.unwrap();
+            let oversized = "a".repeat(17 * 1024);
+            let request = format!(
+                "GET http://intranet.zju.edu.cn/health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nX-Oversized: {oversized}\r\nConnection: close\r\n\r\n"
+            );
+            client.write_all(request.as_bytes()).await.unwrap();
+
+            let mut response = [0_u8; 256];
+            let n = client.read(&mut response).await.unwrap();
+            let response = String::from_utf8_lossy(&response[..n]);
+            response
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|code| code.parse::<u16>().ok())
+                .unwrap()
+        }
     }
 
     pub async fn http_proxy_harness() -> HttpProxyHarness {

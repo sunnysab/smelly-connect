@@ -67,3 +67,10 @@ async fn proxy_does_not_forward_proxy_authorization_header() {
         .await;
     assert_eq!(body, "clean");
 }
+
+#[tokio::test]
+async fn proxy_rejects_oversized_header_block() {
+    let harness = smelly_connect::proxy::tests::http_proxy_harness().await;
+    let status = harness.oversized_header_status_via_proxy().await;
+    assert_eq!(status, 431);
+}
