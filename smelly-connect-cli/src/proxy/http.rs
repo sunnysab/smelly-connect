@@ -986,6 +986,7 @@ pub async fn proxy_http_route_rejection_does_not_open_for_test()
         .nth(1)
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+    tokio::time::sleep(Duration::from_millis(20)).await;
     Ok(LiveFailureRecoveryTestResult {
         status_code,
         state_summary: pool.state_summary_for_test().await,
@@ -1507,12 +1508,14 @@ async fn handle_live_request(
         let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
             Ok(upstream) => upstream,
             Err(err) => {
-                pool.report_live_session_unhealthy_if_probe_fails(
-                    &account_name,
-                    &session,
-                    format!("{err:?}"),
-                )
-                .await;
+                if should_report_live_session_failure(&err) {
+                    pool.report_live_session_unhealthy_if_probe_fails(
+                        &account_name,
+                        &session,
+                        format!("{err:?}"),
+                    )
+                    .await;
+                }
                 return gateway_error_response(&err);
             }
         };
@@ -1544,12 +1547,14 @@ async fn handle_live_request(
     let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
         Err(err) => {
-            pool.report_live_session_unhealthy_if_probe_fails(
-                &account_name,
-                &session,
-                format!("{err:?}"),
-            )
-            .await;
+            if should_report_live_session_failure(&err) {
+                pool.report_live_session_unhealthy_if_probe_fails(
+                    &account_name,
+                    &session,
+                    format!("{err:?}"),
+                )
+                .await;
+            }
             return gateway_error_response(&err);
         }
     };
@@ -1576,11 +1581,14 @@ fn connect_established_response() -> Response<ProxyBody> {
 fn gateway_error_response(err: &UpstreamConnectError) -> Response<ProxyBody> {
     let status = match err {
         UpstreamConnectError::TimedOut => StatusCode::GATEWAY_TIMEOUT,
-        UpstreamConnectError::Failed | UpstreamConnectError::RouteRejected => {
-            StatusCode::BAD_GATEWAY
-        }
+        UpstreamConnectError::RouteRejected => StatusCode::FORBIDDEN,
+        UpstreamConnectError::Failed => StatusCode::BAD_GATEWAY,
     };
     empty_response(status)
+}
+
+fn should_report_live_session_failure(err: &UpstreamConnectError) -> bool {
+    !matches!(err, UpstreamConnectError::RouteRejected)
 }
 
 fn resolve_forward_target(

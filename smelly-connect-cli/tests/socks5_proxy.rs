@@ -133,3 +133,14 @@ async fn socks5_allow_all_connect_failure_does_not_mark_live_session_open() {
     assert!(result.state_summary.contains("Ready"));
     assert!(result.selectable_after_failure);
 }
+
+#[tokio::test]
+async fn socks5_route_rejection_does_not_mark_live_session_open() {
+    let result =
+        smelly_connect_cli::proxy::socks5::proxy_socks5_route_rejection_does_not_open_for_test()
+            .await
+            .unwrap();
+    assert_eq!(result.reply_code, 0x02);
+    assert!(result.state_summary.contains("Ready"));
+    assert!(result.selectable_after_failure);
+}

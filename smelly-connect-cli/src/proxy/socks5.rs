@@ -681,6 +681,35 @@ pub async fn proxy_socks5_allow_all_failure_does_not_open_for_test()
 }
 
 #[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_route_rejection_does_not_open_for_test()
+-> Result<Socks5LiveFailureRecoveryTestResult, String> {
+    let session = smelly_connect::session::tests::session_with_domain_match(
+        "jwxt.sit.edu.cn",
+        std::net::Ipv4Addr::new(10, 0, 0, 8),
+    );
+    let pool = SessionPool::from_live_sessions_with_keepalive_target_for_test(
+        vec![("acct-01", session)],
+        "10.0.0.1",
+    )
+    .await;
+    let addr = spawn_live_test_socks5(
+        pool.clone(),
+        RuntimeStats::default(),
+        DEFAULT_CONNECT_TIMEOUT,
+        None,
+    )
+    .await?;
+
+    let result = request_connect_failure_to_target(addr, "xg.sit.edu.cn", 443).await?;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    Ok(Socks5LiveFailureRecoveryTestResult {
+        reply_code: result.reply_code,
+        state_summary: pool.state_summary_for_test().await,
+        selectable_after_failure: pool.has_selectable_nodes_for_test().await,
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_live_timeout_reply_for_test() -> Result<Socks5FailureResult, String> {
     let session = smelly_connect::session::tests::session_with_immediate_timeout_domain_match(
         "libdb.zju.edu.cn",
@@ -824,6 +853,15 @@ async fn request_no_ready_session(addr: SocketAddr) -> Result<Socks5FailureResul
 
 #[cfg(any(test, debug_assertions))]
 async fn request_connect_failure(addr: SocketAddr) -> Result<Socks5FailureResult, String> {
+    request_connect_failure_to_target(addr, "libdb.zju.edu.cn", 443).await
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn request_connect_failure_to_target(
+    addr: SocketAddr,
+    host: &str,
+    port: u16,
+) -> Result<Socks5FailureResult, String> {
     let mut client = TcpStream::connect(addr)
         .await
         .map_err(|err| err.to_string())?;
@@ -838,10 +876,7 @@ async fn request_connect_failure(addr: SocketAddr) -> Result<Socks5FailureResult
         .map_err(|err| err.to_string())?;
 
     client
-        .write_all(&[
-            0x05, 0x01, 0x00, 0x03, 0x10, b'l', b'i', b'b', b'd', b'b', b'.', b'z', b'j', b'u',
-            b'.', b'e', b'd', b'u', b'.', b'c', b'n', 0x01, 0xbb,
-        ])
+        .write_all(&build_domain_connect_request(host, port))
         .await
         .map_err(|err| err.to_string())?;
     let mut reply = [0_u8; 10];
@@ -852,6 +887,16 @@ async fn request_connect_failure(addr: SocketAddr) -> Result<Socks5FailureResult
     Ok(Socks5FailureResult {
         reply_code: reply[1],
     })
+}
+
+#[cfg(any(test, debug_assertions))]
+fn build_domain_connect_request(host: &str, port: u16) -> Vec<u8> {
+    let host_bytes = host.as_bytes();
+    let mut request = Vec::with_capacity(7 + host_bytes.len());
+    request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host_bytes.len() as u8]);
+    request.extend_from_slice(host_bytes);
+    request.extend_from_slice(&port.to_be_bytes());
+    request
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -964,12 +1009,14 @@ async fn handle_live_client(
             let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
                 Ok(upstream) => upstream,
                 Err(err) => {
-                    pool.report_live_session_unhealthy_if_probe_fails(
-                        &account_name,
-                        &session,
-                        format!("{err:?}"),
-                    )
-                    .await;
+                    if !matches!(err, UpstreamConnectError::RouteRejected) {
+                        pool.report_live_session_unhealthy_if_probe_fails(
+                            &account_name,
+                            &session,
+                            format!("{err:?}"),
+                        )
+                        .await;
+                    }
                     proto
                         .reply_error(&map_socks5_reply_error(&err))
                         .await
