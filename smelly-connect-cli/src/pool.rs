@@ -1183,25 +1183,21 @@ impl SessionPool {
     pub async fn next_session(&self) -> Result<PooledSession, PoolError> {
         self.refresh_time_based_states().await;
         let mut state = self.inner.lock().await;
-        let ready: Vec<_> = state
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, node)| match &node.state {
-                AccountState::Ready(session) | AccountState::Suspect(session) => {
-                    Some((idx, session.as_ref().clone()))
-                }
-                _ => None,
-            })
-            .collect();
-
-        if ready.is_empty() {
+        let Some(idx) = next_selectable_index(&mut state, |node| {
+            matches!(
+                node.state,
+                AccountState::Ready(_) | AccountState::Suspect(_)
+            )
+        }) else {
             return Err(PoolError::new("no ready session"));
-        }
+        };
 
-        let pos = state.cursor % ready.len();
-        state.cursor += 1;
-        Ok(ready[pos].1.clone())
+        match &state.nodes[idx].state {
+            AccountState::Ready(session) | AccountState::Suspect(session) => {
+                Ok(session.as_ref().clone())
+            }
+            _ => Err(PoolError::new("no ready session")),
+        }
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -1323,27 +1319,22 @@ impl SessionPool {
     async fn next_ready_with_session(&self) -> Result<Option<(String, Session)>, PoolError> {
         self.refresh_time_based_states().await;
         let mut state = self.inner.lock().await;
-        let ready: Vec<_> = state
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, node)| match &node.state {
-                AccountState::Ready(session) | AccountState::Suspect(session) => session
+        let Some(idx) = next_selectable_index(&mut state, |node| match &node.state {
+            AccountState::Ready(session) | AccountState::Suspect(session) => session.session().is_some(),
+            _ => false,
+        }) else {
+            return Ok(None);
+        };
+
+        match &state.nodes[idx].state {
+            AccountState::Ready(session) | AccountState::Suspect(session) => {
+                Ok(session
                     .session()
                     .cloned()
-                    .map(|live| (idx, session.account_name().to_string(), live)),
-                _ => None,
-            })
-            .collect();
-
-        if ready.is_empty() {
-            return Ok(None);
+                    .map(|live| (session.account_name().to_string(), live)))
+            }
+            _ => Ok(None),
         }
-
-        let pos = state.cursor % ready.len();
-        state.cursor += 1;
-        let (_, account_name, session) = ready[pos].clone();
-        Ok(Some((account_name, session)))
     }
 
     async fn connect_one_configured(&self) -> Result<(), PoolError> {
@@ -1795,6 +1786,26 @@ fn build_pool_summary(state: &PoolState) -> PoolSummary {
         connecting_nodes,
         configured_nodes,
     }
+}
+
+fn next_selectable_index(
+    state: &mut PoolState,
+    mut predicate: impl FnMut(&AccountNode) -> bool,
+) -> Option<usize> {
+    let total = state.nodes.len();
+    if total == 0 {
+        return None;
+    }
+
+    for offset in 0..total {
+        let idx = (state.cursor + offset) % total;
+        if predicate(&state.nodes[idx]) {
+            state.cursor = idx + 1;
+            return Some(idx);
+        }
+    }
+
+    None
 }
 
 fn open_node(node: &mut AccountNode, message: String) {
