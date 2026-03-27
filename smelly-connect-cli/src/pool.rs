@@ -5,7 +5,9 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use smelly_connect::{CaptchaError, CaptchaHandler, EasyConnectClient, LocalRouteOverrides, Session};
+use smelly_connect::{
+    CaptchaError, CaptchaHandler, EasyConnectClient, LocalRouteOverrides, Session,
+};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
@@ -73,6 +75,7 @@ struct AccountNode {
     backoff_base: Duration,
     backoff_max: Duration,
     open_until: Option<Instant>,
+    live_probe_in_flight: bool,
 }
 
 #[derive(Default)]
@@ -222,10 +225,7 @@ impl SessionPool {
         for idx in 0..total {
             let name = format!("acct-{:02}", idx + 1);
             let state = if idx < prewarm {
-                AccountState::Ready(
-                    PooledSession::new(name.clone(), None)
-                    .into(),
-                )
+                AccountState::Ready(PooledSession::new(name.clone(), None).into())
             } else {
                 AccountState::Configured(AccountConfig {
                     name: name.clone(),
@@ -248,6 +248,7 @@ impl SessionPool {
                 backoff_base: Duration::from_secs(30),
                 backoff_max: Duration::from_secs(600),
                 open_until: None,
+                live_probe_in_flight: false,
             });
         }
         Self {
@@ -274,10 +275,7 @@ impl SessionPool {
                     username: name.to_string(),
                     password: "pass".to_string(),
                 },
-                state: AccountState::Ready(
-                    PooledSession::new(name.to_string(), None)
-                    .into(),
-                ),
+                state: AccountState::Ready(PooledSession::new(name.to_string(), None).into()),
                 flaky_retry: false,
                 consecutive_failures: 0,
                 failure_threshold: 3,
@@ -285,6 +283,7 @@ impl SessionPool {
                 backoff_base: Duration::from_secs(30),
                 backoff_max: Duration::from_secs(600),
                 open_until: None,
+                live_probe_in_flight: false,
             })
             .collect();
         Self {
@@ -316,7 +315,9 @@ impl SessionPool {
                 state: AccountState::Ready(
                     PooledSession::new(
                         account_name.to_string(),
-                        Some(smelly_connect::session::tests::session_with_domain_match(host, ip)),
+                        Some(smelly_connect::session::tests::session_with_domain_match(
+                            host, ip,
+                        )),
                     )
                     .into(),
                 ),
@@ -327,6 +328,7 @@ impl SessionPool {
                 backoff_base: Duration::from_secs(30),
                 backoff_max: Duration::from_secs(600),
                 open_until: None,
+                live_probe_in_flight: false,
             })
             .collect();
         Self {
@@ -354,8 +356,7 @@ impl SessionPool {
                     password: "pass".to_string(),
                 },
                 state: AccountState::Ready(
-                    PooledSession::new(account_name.to_string(), Some(session))
-                    .into(),
+                    PooledSession::new(account_name.to_string(), Some(session)).into(),
                 ),
                 flaky_retry: false,
                 consecutive_failures: 0,
@@ -364,6 +365,7 @@ impl SessionPool {
                 backoff_base: Duration::from_secs(30),
                 backoff_max: Duration::from_secs(600),
                 open_until: None,
+                live_probe_in_flight: false,
             })
             .collect();
         Self {
@@ -399,10 +401,7 @@ impl SessionPool {
             let (name, state) = match outcome {
                 Ok(name) if idx < prewarm => (
                     name.to_string(),
-                    AccountState::Ready(
-                        PooledSession::new(name.to_string(), None)
-                        .into(),
-                    ),
+                    AccountState::Ready(PooledSession::new(name.to_string(), None).into()),
                 ),
                 Ok(name) => (
                     name.to_string(),
@@ -434,6 +433,7 @@ impl SessionPool {
                 backoff_base: Duration::from_secs(30),
                 backoff_max: Duration::from_secs(600),
                 open_until: None,
+                live_probe_in_flight: false,
             });
         }
         Self {
@@ -471,6 +471,7 @@ impl SessionPool {
                 backoff_base: Duration::from_secs(30),
                 backoff_max: Duration::from_secs(600),
                 open_until: None,
+                live_probe_in_flight: false,
             });
         }
         Self {
@@ -498,8 +499,7 @@ impl SessionPool {
                         password: "pass".to_string(),
                     },
                     state: AccountState::Ready(
-                        PooledSession::new("acct-01".to_string(), None)
-                        .into(),
+                        PooledSession::new("acct-01".to_string(), None).into(),
                     ),
                     flaky_retry: true,
                     consecutive_failures: 0,
@@ -508,6 +508,7 @@ impl SessionPool {
                     backoff_base: Duration::from_secs(30),
                     backoff_max: Duration::from_secs(600),
                     open_until: None,
+                    live_probe_in_flight: false,
                 }],
                 cursor: 0,
             })),
@@ -548,6 +549,7 @@ impl SessionPool {
                 backoff_base: Duration::from_secs(cfg.pool.backoff_base_secs),
                 backoff_max: Duration::from_secs(cfg.pool.backoff_max_secs),
                 open_until: None,
+                live_probe_in_flight: false,
             });
         }
 
@@ -555,7 +557,7 @@ impl SessionPool {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
-            connect_timeout: Duration::from_secs(cfg.pool.connect_timeout_secs.max(1)),
+            connect_timeout: cfg.session_connect_timeout(),
             local_route_overrides: build_local_route_overrides(&cfg.routing)?,
             allow_all_routes: cfg.routing.allow_all,
             keepalive_target: Some(cfg.vpn.server.clone()),
@@ -673,16 +675,24 @@ impl SessionPool {
     pub async fn report_live_session_failure(&self, account_name: &str, error: impl Into<String>) {
         let error = error.into();
         let mut state = self.inner.lock().await;
-        if let Some(node) = state.nodes.iter_mut().find(|node| node.name == account_name)
-            && matches!(node.state, AccountState::Ready(_) | AccountState::Suspect(_))
+        if let Some(node) = state
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == account_name)
         {
-            node.consecutive_failures = node.failure_threshold;
-            open_node(node, error.clone());
-            tracing::warn!(
-                account = %account_name,
-                error = %error,
-                "live session marked open after proxy failure"
-            );
+            node.live_probe_in_flight = false;
+            if matches!(
+                node.state,
+                AccountState::Ready(_) | AccountState::Suspect(_)
+            ) {
+                node.consecutive_failures = node.failure_threshold;
+                open_node(node, error.clone());
+                tracing::warn!(
+                    account = %account_name,
+                    error = %error,
+                    "live session marked open after proxy failure"
+                );
+            }
         }
     }
 
@@ -693,19 +703,27 @@ impl SessionPool {
     ) {
         let error = error.into();
         let mut state = self.inner.lock().await;
-        if let Some(node) = state.nodes.iter_mut().find(|node| node.name == account_name)
-            && matches!(node.state, AccountState::Ready(_) | AccountState::Suspect(_))
+        if let Some(node) = state
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == account_name)
         {
-            node.consecutive_failures = node.failure_threshold;
-            node.open_until = Some(Instant::now());
-            node.state = AccountState::Open(AccountFailure {
-                message: error.clone(),
-            });
-            tracing::warn!(
-                account = %account_name,
-                error = %error,
-                "live session marked unhealthy after vpn probe failures"
-            );
+            node.live_probe_in_flight = false;
+            if matches!(
+                node.state,
+                AccountState::Ready(_) | AccountState::Suspect(_)
+            ) {
+                node.consecutive_failures = node.failure_threshold;
+                node.open_until = Some(Instant::now());
+                node.state = AccountState::Open(AccountFailure {
+                    message: error.clone(),
+                });
+                tracing::warn!(
+                    account = %account_name,
+                    error = %error,
+                    "live session marked unhealthy after vpn probe failures"
+                );
+            }
         }
     }
 
@@ -718,19 +736,59 @@ impl SessionPool {
         let Some(target) = self.keepalive_target.clone() else {
             return;
         };
-        for attempt in 0..DEFAULT_VPN_HEALTH_PROBE_ATTEMPTS {
-            if session
-                .icmp_ping(smelly_connect::session::IcmpKeepAliveTarget::Host(target.clone()))
-                .await
-                .is_ok()
-            {
-                return;
-            }
-            if attempt + 1 < DEFAULT_VPN_HEALTH_PROBE_ATTEMPTS {
-                tokio::time::sleep(DEFAULT_VPN_HEALTH_PROBE_DELAY).await;
-            }
+        if !self.claim_live_session_probe(account_name).await {
+            return;
         }
-        self.report_live_session_unhealthy(account_name, error).await;
+        let account_name = account_name.to_string();
+        let error = error.into();
+        let pool = self.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            let result = probe_live_session_health(
+                &session,
+                smelly_connect::session::IcmpKeepAliveTarget::from(target),
+            )
+            .await;
+            if result.is_ok() {
+                pool.clear_live_session_probe(&account_name).await;
+            } else {
+                pool.report_live_session_unhealthy(&account_name, error)
+                    .await;
+            }
+        });
+    }
+
+    async fn claim_live_session_probe(&self, account_name: &str) -> bool {
+        let mut state = self.inner.lock().await;
+        let Some(node) = state
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == account_name)
+        else {
+            return false;
+        };
+        if !matches!(
+            node.state,
+            AccountState::Ready(_) | AccountState::Suspect(_)
+        ) {
+            return false;
+        }
+        if node.live_probe_in_flight {
+            return false;
+        }
+        node.live_probe_in_flight = true;
+        true
+    }
+
+    async fn clear_live_session_probe(&self, account_name: &str) {
+        let mut state = self.inner.lock().await;
+        if let Some(node) = state
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == account_name)
+        {
+            node.live_probe_in_flight = false;
+        }
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -758,8 +816,7 @@ impl SessionPool {
                             password: "pass".to_string(),
                         },
                         state: AccountState::Ready(
-                            PooledSession::new("ready-01".to_string(), None)
-                            .into(),
+                            PooledSession::new("ready-01".to_string(), None).into(),
                         ),
                         flaky_retry: false,
                         consecutive_failures: 0,
@@ -768,6 +825,7 @@ impl SessionPool {
                         backoff_base: Duration::from_secs(30),
                         backoff_max: Duration::from_secs(600),
                         open_until: None,
+                        live_probe_in_flight: false,
                     },
                     AccountNode {
                         name: "suspect-01".to_string(),
@@ -777,8 +835,7 @@ impl SessionPool {
                             password: "pass".to_string(),
                         },
                         state: AccountState::Suspect(
-                            PooledSession::new("suspect-01".to_string(), None)
-                            .into(),
+                            PooledSession::new("suspect-01".to_string(), None).into(),
                         ),
                         flaky_retry: false,
                         consecutive_failures: 1,
@@ -787,6 +844,7 @@ impl SessionPool {
                         backoff_base: Duration::from_secs(30),
                         backoff_max: Duration::from_secs(600),
                         open_until: None,
+                        live_probe_in_flight: false,
                     },
                     AccountNode {
                         name: "open-01".to_string(),
@@ -805,6 +863,7 @@ impl SessionPool {
                         backoff_base: Duration::from_secs(30),
                         backoff_max: Duration::from_secs(600),
                         open_until: Some(Instant::now() + Duration::from_secs(30)),
+                        live_probe_in_flight: false,
                     },
                     AccountNode {
                         name: "half-open-01".to_string(),
@@ -825,6 +884,7 @@ impl SessionPool {
                         backoff_base: Duration::from_secs(30),
                         backoff_max: Duration::from_secs(600),
                         open_until: None,
+                        live_probe_in_flight: false,
                     },
                 ],
                 cursor: 0,
@@ -861,6 +921,7 @@ impl SessionPool {
                     backoff_base: Duration::from_secs(30),
                     backoff_max: Duration::from_secs(600),
                     open_until: Some(Instant::now() + Duration::from_secs(30)),
+                    live_probe_in_flight: false,
                 }],
                 cursor: 0,
             })),
@@ -1004,10 +1065,7 @@ impl SessionPool {
             .iter_mut()
             .find(|node| matches!(node.state, AccountState::Configured(_)))
         {
-            node.state = AccountState::Ready(
-                            PooledSession::new(node.name.clone(), None)
-                            .into(),
-            );
+            node.state = AccountState::Ready(PooledSession::new(node.name.clone(), None).into());
             return Ok(());
         }
         Err(PoolError::new("no configurable account remaining"))
@@ -1032,6 +1090,7 @@ impl SessionPool {
                 }) {
                     let name = node.name.clone();
                     let flaky_retry = node.flaky_retry;
+                    node.live_probe_in_flight = false;
                     node.consecutive_failures += 1;
 
                     let session = match std::mem::replace(
@@ -1079,8 +1138,7 @@ impl SessionPool {
                     let mut state = inner.lock().await;
                     if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
                         node.state = AccountState::Ready(
-                            PooledSession::new(node.account.name.clone(), None)
-                            .into(),
+                            PooledSession::new(node.account.name.clone(), None).into(),
                         );
                         node.consecutive_failures = 0;
                         node.open_until = None;
@@ -1259,12 +1317,7 @@ impl SessionPool {
                     .session()
                     .cloned()
                     .ok_or_else(|| PoolError::new("probe session missing live handle"))?;
-                self.complete_probe_success(
-                    &name,
-                    session,
-                    account,
-                )
-                .await?;
+                self.complete_probe_success(&name, session, account).await?;
                 Ok(Some((name, live)))
             }
             Err(err) => {
@@ -1319,6 +1372,29 @@ impl SessionPool {
             }
         }
     }
+}
+
+async fn probe_live_session_health(
+    session: &Session,
+    target: smelly_connect::session::IcmpKeepAliveTarget,
+) -> Result<(), ()> {
+    let resolved_target = match target {
+        smelly_connect::session::IcmpKeepAliveTarget::Ip(ip) => ip,
+        host @ smelly_connect::session::IcmpKeepAliveTarget::Host(_) => {
+            session.resolve_icmp_target(host).await.map_err(|_| ())?
+        }
+    };
+
+    for attempt in 0..DEFAULT_VPN_HEALTH_PROBE_ATTEMPTS {
+        if session.icmp_ping_ip(resolved_target).await.is_ok() {
+            return Ok(());
+        }
+        if attempt + 1 < DEFAULT_VPN_HEALTH_PROBE_ATTEMPTS {
+            tokio::time::sleep(DEFAULT_VPN_HEALTH_PROBE_DELAY).await;
+        }
+    }
+
+    Err(())
 }
 
 async fn connect_account(
@@ -1588,5 +1664,6 @@ fn build_pool_summary(state: &PoolState) -> PoolSummary {
 fn open_node(node: &mut AccountNode, message: String) {
     node.current_backoff = next_backoff(node.current_backoff, node.backoff_base, node.backoff_max);
     node.open_until = Some(Instant::now() + node.current_backoff);
+    node.live_probe_in_flight = false;
     node.state = AccountState::Open(AccountFailure { message });
 }

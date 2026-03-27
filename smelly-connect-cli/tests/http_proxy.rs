@@ -59,10 +59,9 @@ async fn http_proxy_handles_expect_100_continue_requests() {
 
 #[tokio::test]
 async fn http_proxy_does_not_forward_proxy_authorization_header() {
-    let result =
-        smelly_connect_cli::proxy::http::proxy_http_strips_proxy_authorization_for_test()
-            .await
-            .unwrap();
+    let result = smelly_connect_cli::proxy::http::proxy_http_strips_proxy_authorization_for_test()
+        .await
+        .unwrap();
     assert_eq!(result.body, "clean");
 }
 
@@ -148,9 +147,10 @@ async fn http_connect_returns_gateway_timeout_on_upstream_timeout() {
 
 #[tokio::test]
 async fn http_live_connect_failure_stays_request_scoped() {
-    let result = smelly_connect_cli::proxy::http::proxy_http_live_connect_failure_recovery_for_test()
-        .await
-        .unwrap();
+    let result =
+        smelly_connect_cli::proxy::http::proxy_http_live_connect_failure_recovery_for_test()
+            .await
+            .unwrap();
     assert_eq!(result.status_code, 502);
     assert!(result.state_summary.contains("Ready"));
     assert!(result.selectable_after_failure);
@@ -159,9 +159,10 @@ async fn http_live_connect_failure_stays_request_scoped() {
 
 #[tokio::test]
 async fn http_route_rejection_does_not_mark_live_session_open() {
-    let result = smelly_connect_cli::proxy::http::proxy_http_route_rejection_does_not_open_for_test()
-        .await
-        .unwrap();
+    let result =
+        smelly_connect_cli::proxy::http::proxy_http_route_rejection_does_not_open_for_test()
+            .await
+            .unwrap();
     assert_eq!(result.status_code, 502);
     assert!(result.state_summary.contains("Ready"));
     assert!(result.selectable_after_failure);
@@ -178,10 +179,21 @@ async fn http_connect_timeout_does_not_mark_live_session_open() {
 }
 
 #[tokio::test]
+async fn http_live_connect_failure_returns_without_waiting_for_vpn_probe() {
+    let result =
+        smelly_connect_cli::proxy::http::proxy_http_live_connect_failure_does_not_wait_for_probe_for_test()
+            .await
+            .unwrap();
+    assert_eq!(result.status_code, 502);
+    assert!(result.elapsed < std::time::Duration::from_millis(150));
+}
+
+#[tokio::test]
 async fn http_allow_all_connect_failure_does_not_mark_live_session_open() {
-    let result = smelly_connect_cli::proxy::http::proxy_http_allow_all_failure_does_not_open_for_test()
-        .await
-        .unwrap();
+    let result =
+        smelly_connect_cli::proxy::http::proxy_http_allow_all_failure_does_not_open_for_test()
+            .await
+            .unwrap();
     assert_eq!(result.status_code, 502);
     assert!(result.state_summary.contains("Ready"));
     assert!(result.selectable_after_failure);

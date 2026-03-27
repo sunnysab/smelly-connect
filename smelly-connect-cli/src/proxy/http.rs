@@ -92,6 +92,13 @@ pub struct LiveFailureRecoveryTestResult {
 }
 
 #[cfg(any(test, debug_assertions))]
+#[derive(Debug, Clone)]
+pub struct LiveFailureLatencyTestResult {
+    pub status_code: u16,
+    pub elapsed: Duration,
+}
+
+#[cfg(any(test, debug_assertions))]
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
@@ -191,9 +198,13 @@ impl ChunkedResponseDecoder {
                     buffer.push(input[idx]);
                     idx += 1;
                     if buffer.ends_with(b"\r\n") {
-                        let line = std::str::from_utf8(&buffer[..buffer.len() - 2]).map_err(|_| {
-                            io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size line")
-                        })?;
+                        let line =
+                            std::str::from_utf8(&buffer[..buffer.len() - 2]).map_err(|_| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "invalid chunk size line",
+                                )
+                            })?;
                         let size_text = line.split(';').next().unwrap_or_default().trim();
                         let size = usize::from_str_radix(size_text, 16).map_err(|_| {
                             io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size")
@@ -335,9 +346,7 @@ pub async fn proxy_http_origin_form_ipv6_for_test() -> Result<HttpBodyTestResult
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
     let addr = spawn_test_proxy(pool, move |_account_name, host, _port| async move {
         if host != "::1" {
-            return Err(io::Error::other(format!(
-                "unexpected ipv6 host {host}"
-            )));
+            return Err(io::Error::other(format!("unexpected ipv6 host {host}")));
         }
         TcpStream::connect(upstream).await
     })
@@ -347,9 +356,7 @@ pub async fn proxy_http_origin_form_ipv6_for_test() -> Result<HttpBodyTestResult
         .await
         .map_err(|err| err.to_string())?;
     client
-        .write_all(
-            b"GET /health HTTP/1.1\r\nHost: [::1]\r\nConnection: close\r\n\r\n",
-        )
+        .write_all(b"GET /health HTTP/1.1\r\nHost: [::1]\r\nConnection: close\r\n\r\n")
         .await
         .map_err(|err| err.to_string())?;
     let mut response = Vec::new();
@@ -367,8 +374,8 @@ pub async fn proxy_http_origin_form_ipv6_for_test() -> Result<HttpBodyTestResult
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_http_body_completes_for_keep_alive_upstream_for_test(
-) -> Result<HttpBodyTestResult, String> {
+pub async fn proxy_http_body_completes_for_keep_alive_upstream_for_test()
+-> Result<HttpBodyTestResult, String> {
     let upstream = spawn_keep_alive_http_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
     let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
@@ -452,8 +459,8 @@ pub async fn proxy_http_streams_request_body_for_test() -> Result<HttpBodyTestRe
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_http_streams_chunked_request_body_for_test(
-) -> Result<HttpBodyTestResult, String> {
+pub async fn proxy_http_streams_chunked_request_body_for_test() -> Result<HttpBodyTestResult, String>
+{
     let upstream = spawn_chunked_request_body_echo_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
     let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
@@ -554,8 +561,8 @@ pub async fn proxy_http_expect_continue_for_test() -> Result<HttpBodyTestResult,
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_http_strips_proxy_authorization_for_test(
-) -> Result<HttpBodyTestResult, String> {
+pub async fn proxy_http_strips_proxy_authorization_for_test() -> Result<HttpBodyTestResult, String>
+{
     let upstream = spawn_proxy_auth_capture_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
     let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
@@ -587,8 +594,8 @@ pub async fn proxy_http_strips_proxy_authorization_for_test(
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_http_streams_response_body_for_test(
-) -> Result<StreamingResponseTestResult, String> {
+pub async fn proxy_http_streams_response_body_for_test()
+-> Result<StreamingResponseTestResult, String> {
     let upstream = spawn_slow_streaming_response_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
     let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
@@ -854,8 +861,8 @@ pub async fn proxy_connect_timeout_status_for_test() -> Result<NoReadySessionRes
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_http_live_connect_failure_recovery_for_test(
-) -> Result<LiveFailureRecoveryTestResult, String> {
+pub async fn proxy_http_live_connect_failure_recovery_for_test()
+-> Result<LiveFailureRecoveryTestResult, String> {
     let session = smelly_connect::session::tests::session_with_failing_domain_match(
         "libdb.zju.edu.cn",
         std::net::Ipv4Addr::new(10, 0, 0, 8),
@@ -870,7 +877,13 @@ pub async fn proxy_http_live_connect_failure_recovery_for_test(
         let Ok((stream, _)) = listener.accept().await else {
             return;
         };
-        let _ = handle_live_client(stream, serve_pool, RuntimeStats::default(), DEFAULT_CONNECT_TIMEOUT).await;
+        let _ = handle_live_client(
+            stream,
+            serve_pool,
+            RuntimeStats::default(),
+            DEFAULT_CONNECT_TIMEOUT,
+        )
+        .await;
     });
 
     let status = request_connect_status(addr).await?;
@@ -885,8 +898,50 @@ pub async fn proxy_http_live_connect_failure_recovery_for_test(
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_http_route_rejection_does_not_open_for_test(
-) -> Result<LiveFailureRecoveryTestResult, String> {
+pub async fn proxy_http_live_connect_failure_does_not_wait_for_probe_for_test()
+-> Result<LiveFailureLatencyTestResult, String> {
+    let probe_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let session =
+        smelly_connect::session::tests::session_with_failing_domain_match_and_delayed_icmp(
+            "libdb.zju.edu.cn",
+            std::net::Ipv4Addr::new(10, 0, 0, 8),
+            Duration::from_millis(50),
+            probe_count,
+        );
+    let pool = SessionPool::from_live_sessions_with_keepalive_target_for_test(
+        vec![("acct-01", session)],
+        "10.0.0.1",
+    )
+    .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|err| err.to_string())?;
+    let addr = listener.local_addr().map_err(|err| err.to_string())?;
+    let serve_pool = pool.clone();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let _ = handle_live_client(
+            stream,
+            serve_pool,
+            RuntimeStats::default(),
+            DEFAULT_CONNECT_TIMEOUT,
+        )
+        .await;
+    });
+
+    let started = Instant::now();
+    let status = request_connect_status(addr).await?;
+    Ok(LiveFailureLatencyTestResult {
+        status_code: status.status_code,
+        elapsed: started.elapsed(),
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_route_rejection_does_not_open_for_test()
+-> Result<LiveFailureRecoveryTestResult, String> {
     let session = smelly_connect::session::tests::session_with_domain_match(
         "jwxt.sit.edu.cn",
         std::net::Ipv4Addr::new(10, 0, 0, 8),
@@ -940,8 +995,8 @@ pub async fn proxy_http_route_rejection_does_not_open_for_test(
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_http_timeout_does_not_open_for_test(
-) -> Result<LiveFailureRecoveryTestResult, String> {
+pub async fn proxy_http_timeout_does_not_open_for_test()
+-> Result<LiveFailureRecoveryTestResult, String> {
     let session = smelly_connect::session::tests::session_with_slow_domain_match(
         "jwxt.sit.edu.cn",
         std::net::Ipv4Addr::new(10, 0, 0, 8),
@@ -995,8 +1050,8 @@ pub async fn proxy_http_timeout_does_not_open_for_test(
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_http_allow_all_failure_does_not_open_for_test(
-) -> Result<LiveFailureRecoveryTestResult, String> {
+pub async fn proxy_http_allow_all_failure_does_not_open_for_test()
+-> Result<LiveFailureRecoveryTestResult, String> {
     let session = smelly_connect::session::tests::fake_session_without_match_with_transport(
         smelly_connect::session::EasyConnectSession::failing_transport(
             "forced allow-all target failure",
@@ -1288,7 +1343,11 @@ async fn handle_live_client(
             service_fn(move |request| {
                 let pool = pool.clone();
                 let stats = stats.clone();
-                async move { Ok::<_, Infallible>(handle_live_request(request, pool, stats, connect_timeout).await) }
+                async move {
+                    Ok::<_, Infallible>(
+                        handle_live_request(request, pool, stats, connect_timeout).await,
+                    )
+                }
             }),
         )
         .with_upgrades()
@@ -1373,7 +1432,7 @@ async fn handle_live_request(
     pool: SessionPool,
     stats: RuntimeStats,
     connect_timeout: Duration,
-)-> Response<ProxyBody> {
+) -> Response<ProxyBody> {
     let (account_name, session) = match pool.next_live_session().await {
         Ok(ready) => ready,
         Err(_) => {
@@ -1498,7 +1557,9 @@ fn resolve_forward_target(
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or("/");
-    let uri = path_and_query.parse::<Uri>().map_err(|err| err.to_string())?;
+    let uri = path_and_query
+        .parse::<Uri>()
+        .map_err(|err| err.to_string())?;
     let target = format!("{host}:{port}{path_and_query}");
     Ok((host.to_string(), port, target, uri))
 }
@@ -1546,13 +1607,7 @@ async fn forward_request(
 
     record_client_to_upstream(
         connection.as_ref(),
-        estimate_request_size(
-            &parts.method,
-            &uri,
-            parts.version,
-            &forwarded_headers,
-            0,
-        ),
+        estimate_request_size(&parts.method, &uri, parts.version, &forwarded_headers, 0),
     );
 
     if upstream
@@ -1661,7 +1716,9 @@ async fn read_upstream_response(
     let header_bytes = &buffer[..header_end];
     let header_text = String::from_utf8_lossy(header_bytes);
     let mut lines = header_text.split("\r\n").filter(|line| !line.is_empty());
-    let status_line = lines.next().ok_or_else(|| "missing status line".to_string())?;
+    let status_line = lines
+        .next()
+        .ok_or_else(|| "missing status line".to_string())?;
     let status_code = status_line
         .split_whitespace()
         .nth(1)
@@ -1737,7 +1794,9 @@ async fn connect_session_with_timeout<Fut>(
     fut: Fut,
 ) -> Result<smelly_connect::transport::VpnStream, UpstreamConnectError>
 where
-    Fut: std::future::Future<Output = Result<smelly_connect::transport::VpnStream, smelly_connect::Error>>,
+    Fut: std::future::Future<
+            Output = Result<smelly_connect::transport::VpnStream, smelly_connect::Error>,
+        >,
 {
     match tokio::time::timeout(timeout, fut).await {
         Ok(Ok(value)) => Ok(value),
@@ -1940,8 +1999,7 @@ fn empty_body() -> ProxyBody {
 
 fn full_body(body: Vec<u8>, connection: Option<ConnectionGuard>) -> ProxyBody {
     CountedBody::new(
-        Full::new(Bytes::from(body))
-            .map_err(|never| match never {}),
+        Full::new(Bytes::from(body)).map_err(|never| match never {}),
         connection,
     )
     .boxed()
@@ -2107,14 +2165,12 @@ async fn spawn_request_body_echo_upstream() -> SocketAddr {
                 header_end = find_header_end(&request);
                 if let Some(end) = header_end {
                     let headers = String::from_utf8_lossy(&request[..end]);
-                    content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            let lower = line.to_ascii_lowercase();
-                            lower
-                                .strip_prefix("content-length:")
-                                .and_then(|value| value.trim().parse::<usize>().ok())
-                        });
+                    content_length = headers.lines().find_map(|line| {
+                        let lower = line.to_ascii_lowercase();
+                        lower
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    });
                 }
             }
             if let (Some(end), Some(length)) = (header_end, content_length)
@@ -2131,7 +2187,11 @@ async fn spawn_request_body_echo_upstream() -> SocketAddr {
         } else {
             String::new()
         };
-        let status = if body_complete { "200 OK" } else { "400 Bad Request" };
+        let status = if body_complete {
+            "200 OK"
+        } else {
+            "400 Bad Request"
+        };
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
@@ -2316,10 +2376,9 @@ fn chunked_wire_complete(body: &[u8]) -> bool {
         let Ok(size_line) = std::str::from_utf8(&body[cursor..line_end]) else {
             return false;
         };
-        let Ok(size) = usize::from_str_radix(
-            size_line.split(';').next().unwrap_or_default().trim(),
-            16,
-        ) else {
+        let Ok(size) =
+            usize::from_str_radix(size_line.split(';').next().unwrap_or_default().trim(), 16)
+        else {
             return false;
         };
         cursor = line_end + 2;

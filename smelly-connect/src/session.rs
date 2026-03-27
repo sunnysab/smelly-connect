@@ -207,14 +207,25 @@ impl EasyConnectSession {
         })
     }
 
-    pub async fn icmp_ping(&self, target: IcmpKeepAliveTarget) -> Result<(), Error> {
-        let ip = resolve_keepalive_target(&self.resolver, &target)
+    pub async fn resolve_icmp_target(
+        &self,
+        target: IcmpKeepAliveTarget,
+    ) -> Result<Ipv4Addr, Error> {
+        resolve_keepalive_target(&self.resolver, &target)
             .await
-            .map_err(Error::Resolve)?;
+            .map_err(Error::Resolve)
+    }
+
+    pub async fn icmp_ping_ip(&self, target: Ipv4Addr) -> Result<(), Error> {
         self.transport
-            .icmp_ping(ip)
+            .icmp_ping(target)
             .await
             .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string())))
+    }
+
+    pub async fn icmp_ping(&self, target: IcmpKeepAliveTarget) -> Result<(), Error> {
+        let ip = self.resolve_icmp_target(target).await?;
+        self.icmp_ping_ip(ip).await
     }
 
     pub async fn connect_tcp<T>(&self, target: T) -> Result<VpnStream, Error>
@@ -401,7 +412,9 @@ pub mod tests {
         )
     }
 
-    pub fn fake_session_without_match_with_transport(transport: TransportStack) -> EasyConnectSession {
+    pub fn fake_session_without_match_with_transport(
+        transport: TransportStack,
+    ) -> EasyConnectSession {
         EasyConnectSession::new(
             Ipv4Addr::new(10, 0, 0, 8),
             ResourceSet::default(),
@@ -499,7 +512,10 @@ pub mod tests {
 
         let transport = TransportStack::new(|_| async {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            Err(io::Error::new(io::ErrorKind::TimedOut, "forced slow connect"))
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "forced slow connect",
+            ))
         });
 
         EasyConnectSession::new(
@@ -540,6 +556,79 @@ pub mod tests {
             Ipv4Addr::new(10, 0, 0, 8),
             ResourceSet::default(),
             SessionResolver::new(HashMap::new(), None, HashMap::new()),
+            transport,
+        )
+    }
+
+    pub fn session_with_delayed_icmp_result(
+        success: bool,
+        delay: Duration,
+        counter: Arc<AtomicUsize>,
+    ) -> EasyConnectSession {
+        let transport = ready_transport().with_icmp_pinger(move |_| {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(delay).await;
+                if success {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("forced delayed icmp failure"))
+                }
+            }
+        });
+
+        EasyConnectSession::new(
+            Ipv4Addr::new(10, 0, 0, 8),
+            ResourceSet::default(),
+            SessionResolver::new(HashMap::new(), None, HashMap::new()),
+            transport,
+        )
+    }
+
+    pub fn session_with_failing_domain_match_and_delayed_icmp(
+        host: &str,
+        ip: Ipv4Addr,
+        delay: Duration,
+        counter: Arc<AtomicUsize>,
+    ) -> EasyConnectSession {
+        let mut resources = ResourceSet::default();
+        resources.domain_rules.insert(
+            host.to_string(),
+            DomainRule {
+                port_min: 1,
+                port_max: 65535,
+                protocol: "all".to_string(),
+            },
+        );
+        resources.ip_rules.push(IpRule {
+            ip_min: IpAddr::V4(ip),
+            ip_max: IpAddr::V4(ip),
+            port_min: 1,
+            port_max: 65535,
+            protocol: "all".to_string(),
+        });
+        resources
+            .static_dns
+            .insert(host.to_string(), IpAddr::V4(ip));
+
+        let mut system = HashMap::new();
+        system.insert(host.to_string(), IpAddr::V4(ip));
+
+        let transport = EasyConnectSession::failing_transport("forced live connect failure")
+            .with_icmp_pinger(move |_| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(delay).await;
+                    Err(io::Error::other("forced delayed icmp failure"))
+                }
+            });
+
+        EasyConnectSession::new(
+            ip,
+            resources,
+            SessionResolver::new(HashMap::new(), None, system),
             transport,
         )
     }

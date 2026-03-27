@@ -1,6 +1,5 @@
 use crate::cli::ProxyCommand;
 use std::path::Path;
-use std::time::Duration;
 
 pub async fn run_proxy(
     config_path: impl AsRef<Path>,
@@ -11,7 +10,8 @@ pub async fn run_proxy(
         .await
         .map_err(|err| err.to_string())?;
     let stats = crate::runtime::RuntimeStats::default();
-    let connect_timeout = Duration::from_secs(config.pool.connect_timeout_secs.max(1));
+    let upstream_tcp_connect_timeout = config.upstream_tcp_connect_timeout();
+    let udp_associate_idle_timeout = config.udp_associate_idle_timeout();
     let ready = pool.ready_count().await;
     tracing::info!(
         ready,
@@ -29,7 +29,7 @@ pub async fn run_proxy(
             listen_http,
             pool,
             stats,
-            connect_timeout,
+            upstream_tcp_connect_timeout,
         )));
     }
     if config.proxy.socks5.enabled {
@@ -40,7 +40,8 @@ pub async fn run_proxy(
             listen_socks5,
             pool,
             stats,
-            connect_timeout,
+            upstream_tcp_connect_timeout,
+            udp_associate_idle_timeout,
         )));
     }
     #[cfg(feature = "management-api")]

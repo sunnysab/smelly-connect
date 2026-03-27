@@ -29,6 +29,13 @@ async fn socks5_proxy_supports_udp_associate() {
 }
 
 #[tokio::test]
+async fn socks5_udp_associate_closes_after_idle_timeout() {
+    smelly_connect_cli::proxy::socks5::proxy_socks5_udp_associate_idle_timeout_for_test()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn socks5_proxy_returns_failure_when_no_ready_session_exists() {
     let result = smelly_connect_cli::proxy::socks5::proxy_socks5_no_ready_session_for_test()
         .await
@@ -83,33 +90,37 @@ async fn socks5_proxy_returns_failure_reply_on_upstream_timeout() {
 
 #[tokio::test]
 async fn socks5_proxy_rejects_unsupported_auth_methods() {
-    let result = smelly_connect_cli::proxy::socks5::proxy_socks5_rejects_unsupported_methods_for_test()
-        .await
-        .unwrap();
+    let result =
+        smelly_connect_cli::proxy::socks5::proxy_socks5_rejects_unsupported_methods_for_test()
+            .await
+            .unwrap();
     assert_eq!(result.reply_code, 0xff);
 }
 
 #[tokio::test]
 async fn socks5_proxy_rejects_unsupported_commands_with_reply() {
-    let result = smelly_connect_cli::proxy::socks5::proxy_socks5_rejects_unsupported_command_for_test()
-        .await
-        .unwrap();
+    let result =
+        smelly_connect_cli::proxy::socks5::proxy_socks5_rejects_unsupported_command_for_test()
+            .await
+            .unwrap();
     assert_eq!(result.reply_code, 0x07);
 }
 
 #[tokio::test]
 async fn socks5_proxy_rejects_unsupported_address_types_with_reply() {
-    let result = smelly_connect_cli::proxy::socks5::proxy_socks5_rejects_unsupported_atyp_for_test()
-        .await
-        .unwrap();
+    let result =
+        smelly_connect_cli::proxy::socks5::proxy_socks5_rejects_unsupported_atyp_for_test()
+            .await
+            .unwrap();
     assert_eq!(result.reply_code, 0x08);
 }
 
 #[tokio::test]
 async fn socks5_allow_all_connect_failure_does_not_mark_live_session_open() {
-    let result = smelly_connect_cli::proxy::socks5::proxy_socks5_allow_all_failure_does_not_open_for_test()
-        .await
-        .unwrap();
+    let result =
+        smelly_connect_cli::proxy::socks5::proxy_socks5_allow_all_failure_does_not_open_for_test()
+            .await
+            .unwrap();
     assert_eq!(result.reply_code, 0x03);
     assert!(result.state_summary.contains("Ready"));
     assert!(result.selectable_after_failure);

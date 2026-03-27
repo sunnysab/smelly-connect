@@ -5,12 +5,16 @@ default_keepalive_host = "jwxt.sit.edu.cn"
 [pool]
 prewarm = 2
 connect_timeout_secs = 20
+session_connect_timeout_secs = 7
 healthcheck_interval_secs = 60
 selection = "round_robin"
 failure_threshold = 3
 backoff_base_secs = 30
 backoff_max_secs = 600
 allow_request_triggered_probe = true
+
+[proxy]
+upstream_tcp_connect_timeout_secs = 3
 
 [[accounts]]
 name = "acct-01"
@@ -29,6 +33,7 @@ listen = "127.0.0.1:8080"
 [proxy.socks5]
 enabled = true
 listen = "127.0.0.1:1080"
+udp_associate_idle_timeout_secs = 90
 
 [routing]
 allow_all = false

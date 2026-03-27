@@ -1,22 +1,22 @@
-use std::net::SocketAddr as StdSocketAddr;
 #[cfg(any(test, debug_assertions))]
 use std::future::Future;
 #[cfg(any(test, debug_assertions))]
 use std::io;
+use std::net::SocketAddr as StdSocketAddr;
 #[cfg(any(test, debug_assertions))]
 use std::net::SocketAddr;
 #[cfg(any(test, debug_assertions))]
 use std::sync::Arc;
 use std::time::Duration;
 
-use fast_socks5::{new_udp_header, parse_udp_request};
-use fast_socks5::server::Socks5ServerProtocol;
 #[cfg(any(test, debug_assertions))]
 use fast_socks5::client::Socks5Datagram;
+use fast_socks5::server::Socks5ServerProtocol;
 use fast_socks5::{ReplyError, Socks5Command};
+use fast_socks5::{new_udp_header, parse_udp_request};
+use tokio::io::{AsyncRead, AsyncWrite, copy_bidirectional};
 #[cfg(any(test, debug_assertions))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::io::{AsyncRead, AsyncWrite, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 #[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
@@ -151,9 +151,7 @@ pub async fn proxy_socks5_ipv6_for_test() -> Result<Socks5ProxyTestResult, Strin
             let selected = Arc::clone(&selected);
             async move {
                 if host != "::1" {
-                    return Err(io::Error::other(format!(
-                        "unexpected ipv6 host {host}"
-                    )));
+                    return Err(io::Error::other(format!("unexpected ipv6 host {host}")));
                 }
                 *selected.lock().await = Some(account_name);
                 TcpStream::connect(upstream).await
@@ -180,8 +178,7 @@ pub async fn proxy_socks5_ipv6_for_test() -> Result<Socks5ProxyTestResult, Strin
 
     client
         .write_all(&[
-            0x05, 0x01, 0x00, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01,
-            0xbb,
+            0x05, 0x01, 0x00, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xbb,
         ])
         .await
         .map_err(|err| err.to_string())?;
@@ -222,7 +219,8 @@ pub async fn proxy_socks5_udp_associate_for_test() -> Result<Socks5ProxyTestResu
         std::net::Ipv4Addr::LOCALHOST,
     );
     let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
-    let addr = spawn_live_test_socks5(pool, RuntimeStats::default(), DEFAULT_CONNECT_TIMEOUT).await?;
+    let addr = spawn_live_test_socks5(pool, RuntimeStats::default(), DEFAULT_CONNECT_TIMEOUT, None)
+        .await?;
 
     let control = TcpStream::connect(addr)
         .await
@@ -249,6 +247,86 @@ pub async fn proxy_socks5_udp_associate_for_test() -> Result<Socks5ProxyTestResu
         used_pool_selection: true,
         echoed_bytes: echoed[..n].to_vec(),
     })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_udp_associate_idle_timeout_for_test() -> Result<(), String> {
+    let upstream = spawn_udp_echo_upstream().await;
+    let session = smelly_connect::session::tests::session_with_domain_match(
+        "udp.test",
+        std::net::Ipv4Addr::LOCALHOST,
+    );
+    let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+    let addr = spawn_live_test_socks5(
+        pool,
+        RuntimeStats::default(),
+        DEFAULT_CONNECT_TIMEOUT,
+        Some(Duration::from_millis(50)),
+    )
+    .await?;
+
+    let mut control = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    control
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut method_reply = [0_u8; 2];
+    control
+        .read_exact(&mut method_reply)
+        .await
+        .map_err(|err| err.to_string())?;
+    if method_reply != [0x05, 0x00] {
+        return Err(format!("unexpected method reply: {method_reply:?}"));
+    }
+
+    control
+        .write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .await
+        .map_err(|err| err.to_string())?;
+    let reply = read_socks5_reply(&mut control).await?;
+    if reply[1] != 0x00 {
+        return Err(format!("unexpected socks5 reply code: {}", reply[1]));
+    }
+    let bind_addr = parse_reply_addr(&reply)?;
+
+    let udp_client = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut packet = new_udp_header(upstream).map_err(|err| err.to_string())?;
+    packet.extend_from_slice(b"ping");
+    udp_client
+        .send_to(&packet, bind_addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut echoed = [0_u8; 64];
+    let (n, _) = tokio::time::timeout(
+        Duration::from_millis(100),
+        udp_client.recv_from(&mut echoed),
+    )
+    .await
+    .map_err(|_| "udp associate did not echo before idle timeout".to_string())?
+    .map_err(|err| err.to_string())?;
+    let (_, _, data) = parse_udp_request(&echoed[..n])
+        .await
+        .map_err(|err| err.to_string())?;
+    if data != b"ping" {
+        return Err(format!("unexpected echoed payload: {data:?}"));
+    }
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let mut eof = [0_u8; 1];
+    let read = tokio::time::timeout(Duration::from_millis(100), control.read(&mut eof))
+        .await
+        .map_err(|_| "control connection did not close after idle timeout".to_string())?
+        .map_err(|err| err.to_string())?;
+    if read != 0 {
+        return Err(format!(
+            "expected closed control connection, read {read} bytes"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -409,8 +487,8 @@ pub async fn proxy_socks5_timeout_reply_for_test() -> Result<Socks5FailureResult
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_socks5_rejects_unsupported_methods_for_test(
-) -> Result<Socks5FailureResult, String> {
+pub async fn proxy_socks5_rejects_unsupported_methods_for_test()
+-> Result<Socks5FailureResult, String> {
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
     let addr = spawn_test_socks5(pool, |_account_name, _host, _port| async move {
         Err(io::Error::other("unexpected connector use"))
@@ -435,8 +513,8 @@ pub async fn proxy_socks5_rejects_unsupported_methods_for_test(
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_socks5_rejects_unsupported_command_for_test(
-) -> Result<Socks5FailureResult, String> {
+pub async fn proxy_socks5_rejects_unsupported_command_for_test()
+-> Result<Socks5FailureResult, String> {
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
     let addr = spawn_test_socks5(pool, |_account_name, _host, _port| async move {
         Err(io::Error::other("unexpected connector use"))
@@ -470,8 +548,8 @@ pub async fn proxy_socks5_rejects_unsupported_command_for_test(
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_socks5_rejects_unsupported_atyp_for_test(
-) -> Result<Socks5FailureResult, String> {
+pub async fn proxy_socks5_rejects_unsupported_atyp_for_test() -> Result<Socks5FailureResult, String>
+{
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
     let addr = spawn_test_socks5(pool, |_account_name, _host, _port| async move {
         Err(io::Error::other("unexpected connector use"))
@@ -505,6 +583,7 @@ pub async fn serve_socks5(
     pool: SessionPool,
     stats: RuntimeStats,
     connect_timeout: Duration,
+    udp_associate_idle_timeout: Option<Duration>,
 ) -> Result<(), String> {
     let listener = TcpListener::bind(listen)
         .await
@@ -520,7 +599,15 @@ pub async fn serve_socks5(
         let pool = pool.clone();
         let stats = stats.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_live_client(stream, pool, stats, connect_timeout).await {
+            if let Err(err) = handle_live_client(
+                stream,
+                pool,
+                stats,
+                connect_timeout,
+                udp_associate_idle_timeout,
+            )
+            .await
+            {
                 tracing::warn!(
                     protocol = tracing::field::display("socks5"),
                     error = %err,
@@ -544,7 +631,9 @@ pub async fn proxy_socks5_live_failure_for_test() -> Result<(), String> {
         let Ok((stream, _)) = listener.accept().await else {
             return;
         };
-        if let Err(err) = handle_live_client(stream, pool, stats, DEFAULT_CONNECT_TIMEOUT).await {
+        if let Err(err) =
+            handle_live_client(stream, pool, stats, DEFAULT_CONNECT_TIMEOUT, None).await
+        {
             tracing::warn!(
                 protocol = tracing::field::display("socks5"),
                 error = %err,
@@ -566,8 +655,8 @@ pub async fn proxy_socks5_live_failure_for_test() -> Result<(), String> {
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_socks5_allow_all_failure_does_not_open_for_test(
-) -> Result<Socks5LiveFailureRecoveryTestResult, String> {
+pub async fn proxy_socks5_allow_all_failure_does_not_open_for_test()
+-> Result<Socks5LiveFailureRecoveryTestResult, String> {
     let session = smelly_connect::session::tests::fake_session_without_match_with_transport(
         smelly_connect::session::EasyConnectSession::failing_transport(
             "forced allow-all target failure",
@@ -575,8 +664,13 @@ pub async fn proxy_socks5_allow_all_failure_does_not_open_for_test(
     )
     .with_allow_all_routes(true);
     let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
-    let addr = spawn_live_test_socks5(pool.clone(), RuntimeStats::default(), DEFAULT_CONNECT_TIMEOUT)
-        .await?;
+    let addr = spawn_live_test_socks5(
+        pool.clone(),
+        RuntimeStats::default(),
+        DEFAULT_CONNECT_TIMEOUT,
+        None,
+    )
+    .await?;
 
     let result = request_connect_failure(addr).await?;
     Ok(Socks5LiveFailureRecoveryTestResult {
@@ -658,6 +752,7 @@ async fn spawn_live_test_socks5(
     pool: SessionPool,
     stats: RuntimeStats,
     connect_timeout: Duration,
+    udp_associate_idle_timeout: Option<Duration>,
 ) -> Result<SocketAddr, String> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -671,7 +766,14 @@ async fn spawn_live_test_socks5(
             let pool = pool.clone();
             let stats = stats.clone();
             tokio::spawn(async move {
-                let _ = handle_live_client(stream, pool, stats, connect_timeout).await;
+                let _ = handle_live_client(
+                    stream,
+                    pool,
+                    stats,
+                    connect_timeout,
+                    udp_associate_idle_timeout,
+                )
+                .await;
             });
         }
     });
@@ -759,7 +861,8 @@ where
         .await
         .map_err(|err| err.to_string())?;
     if cmd != Socks5Command::TCPConnect {
-        proto.reply_error(&ReplyError::CommandNotSupported)
+        proto
+            .reply_error(&ReplyError::CommandNotSupported)
             .await
             .map_err(|err| err.to_string())?;
         return Ok(());
@@ -773,7 +876,8 @@ where
                 protocol = tracing::field::display("socks5"),
                 "no ready session"
             );
-            proto.reply_error(&ReplyError::NetworkUnreachable)
+            proto
+                .reply_error(&ReplyError::NetworkUnreachable)
                 .await
                 .map_err(|err| err.to_string())?;
             return Ok(());
@@ -791,7 +895,8 @@ where
     let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
         Err(err) => {
-            proto.reply_error(&map_socks5_reply_error(&err))
+            proto
+                .reply_error(&map_socks5_reply_error(&err))
                 .await
                 .map_err(|reply_err| reply_err.to_string())?;
             return Ok(());
@@ -810,6 +915,7 @@ async fn handle_live_client(
     pool: SessionPool,
     stats: RuntimeStats,
     connect_timeout: Duration,
+    udp_associate_idle_timeout: Option<Duration>,
 ) -> Result<(), String> {
     let (proto, cmd, target_addr) = Socks5ServerProtocol::accept_no_auth(client)
         .await
@@ -824,7 +930,8 @@ async fn handle_live_client(
                 protocol = tracing::field::display("socks5"),
                 "no ready session"
             );
-            proto.reply_error(&ReplyError::NetworkUnreachable)
+            proto
+                .reply_error(&ReplyError::NetworkUnreachable)
                 .await
                 .map_err(|err| err.to_string())?;
             return Ok(());
@@ -851,7 +958,8 @@ async fn handle_live_client(
                         format!("{err:?}"),
                     )
                     .await;
-                    proto.reply_error(&map_socks5_reply_error(&err))
+                    proto
+                        .reply_error(&map_socks5_reply_error(&err))
                         .await
                         .map_err(|reply_err| reply_err.to_string())?;
                     return Ok(());
@@ -872,10 +980,7 @@ async fn handle_live_client(
                 account = %account_name,
                 "udp associate accepted"
             );
-            let udp_socket = session
-                .bind_udp()
-                .await
-                .map_err(|err| format!("{err:?}"))?;
+            let udp_socket = session.bind_udp().await.map_err(|err| format!("{err:?}"))?;
             stats.record_connect_success();
             let connection = stats.open_connection(ProxyProtocol::Socks5);
             let bind_addr = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -886,10 +991,18 @@ async fn handle_live_client(
                 .reply_success(reply_addr)
                 .await
                 .map_err(|err| err.to_string())?;
-            relay_udp_associate(client, bind_addr, udp_socket, Some(&connection)).await
+            relay_udp_associate(
+                client,
+                bind_addr,
+                udp_socket,
+                udp_associate_idle_timeout,
+                Some(&connection),
+            )
+            .await
         }
         _ => {
-            proto.reply_error(&ReplyError::CommandNotSupported)
+            proto
+                .reply_error(&ReplyError::CommandNotSupported)
                 .await
                 .map_err(|err| err.to_string())?;
             Ok(())
@@ -916,6 +1029,7 @@ async fn relay_udp_associate(
     mut control: TcpStream,
     inbound: UdpSocket,
     outbound: smelly_connect::session::SessionUdpSocket,
+    udp_associate_idle_timeout: Option<Duration>,
     connection: Option<&ConnectionGuard>,
 ) -> Result<(), String> {
     let mut client_addr = None::<StdSocketAddr>;
@@ -925,6 +1039,12 @@ async fn relay_udp_associate(
 
     loop {
         tokio::select! {
+            _ = async {
+                match udp_associate_idle_timeout {
+                    Some(timeout) => tokio::time::sleep(timeout).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => return Ok(()),
             read = tokio::io::AsyncReadExt::read(&mut control, &mut control_buf) => {
                 match read.map_err(|err| err.to_string())? {
                     0 => return Ok(()),
@@ -1029,6 +1149,24 @@ async fn read_socks5_reply(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(any(test, debug_assertions))]
+fn parse_reply_addr(reply: &[u8]) -> Result<SocketAddr, String> {
+    if reply.len() < 10 {
+        return Err(format!("reply too short: {}", reply.len()));
+    }
+    match reply[3] {
+        0x01 => {
+            if reply.len() != 10 {
+                return Err(format!("unexpected ipv4 reply length: {}", reply.len()));
+            }
+            let ip = std::net::Ipv4Addr::new(reply[4], reply[5], reply[6], reply[7]);
+            let port = u16::from_be_bytes([reply[8], reply[9]]);
+            Ok(SocketAddr::from((ip, port)))
+        }
+        atyp => Err(format!("unsupported reply atyp: {atyp}")),
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
 async fn spawn_udp_echo_upstream() -> SocketAddr {
     let socket = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
@@ -1053,7 +1191,9 @@ async fn connect_session_with_timeout<Fut>(
     fut: Fut,
 ) -> Result<smelly_connect::transport::VpnStream, UpstreamConnectError>
 where
-    Fut: std::future::Future<Output = Result<smelly_connect::transport::VpnStream, smelly_connect::Error>>,
+    Fut: std::future::Future<
+            Output = Result<smelly_connect::transport::VpnStream, smelly_connect::Error>,
+        >,
 {
     match tokio::time::timeout(timeout, fut).await {
         Ok(Ok(value)) => Ok(value),

@@ -2,6 +2,7 @@ use serde::Deserialize;
 #[cfg(any(test, debug_assertions))]
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::cli::ProxyCommand;
 
@@ -30,6 +31,7 @@ pub struct VpnConfig {
 pub struct PoolConfig {
     pub prewarm: usize,
     pub connect_timeout_secs: u64,
+    pub session_connect_timeout_secs: Option<u64>,
     pub healthcheck_interval_secs: u64,
     pub selection: String,
     pub failure_threshold: u32,
@@ -43,6 +45,7 @@ impl Default for PoolConfig {
         Self {
             prewarm: 1,
             connect_timeout_secs: 20,
+            session_connect_timeout_secs: None,
             healthcheck_interval_secs: 60,
             selection: "round_robin".to_string(),
             failure_threshold: 3,
@@ -62,14 +65,24 @@ pub struct AccountConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProxyConfig {
+    #[serde(default)]
+    pub upstream_tcp_connect_timeout_secs: Option<u64>,
     pub http: ListenerConfig,
-    pub socks5: ListenerConfig,
+    pub socks5: Socks5Config,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListenerConfig {
     pub enabled: bool,
     pub listen: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Socks5Config {
+    pub enabled: bool,
+    pub listen: String,
+    #[serde(default)]
+    pub udp_associate_idle_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -192,6 +205,34 @@ impl LoggingLevel {
             Self::Info => "info",
             Self::Debug => "debug",
         }
+    }
+}
+
+impl AppConfig {
+    pub fn session_connect_timeout(&self) -> Duration {
+        Duration::from_secs(
+            self.pool
+                .session_connect_timeout_secs
+                .unwrap_or(self.pool.connect_timeout_secs)
+                .max(1),
+        )
+    }
+
+    pub fn upstream_tcp_connect_timeout(&self) -> Duration {
+        Duration::from_secs(
+            self.proxy
+                .upstream_tcp_connect_timeout_secs
+                .unwrap_or(self.pool.connect_timeout_secs)
+                .max(1),
+        )
+    }
+
+    pub fn udp_associate_idle_timeout(&self) -> Option<Duration> {
+        self.proxy
+            .socks5
+            .udp_associate_idle_timeout_secs
+            .filter(|secs| *secs > 0)
+            .map(Duration::from_secs)
     }
 }
 

@@ -10,8 +10,60 @@ fn parses_sample_config() {
         toml::from_str(include_str!("fixtures/config.sample.toml")).unwrap();
     assert_eq!(cfg.accounts.len(), 2);
     assert_eq!(cfg.pool.prewarm, 2);
+    assert_eq!(
+        cfg.session_connect_timeout(),
+        std::time::Duration::from_secs(7)
+    );
+    assert_eq!(
+        cfg.upstream_tcp_connect_timeout(),
+        std::time::Duration::from_secs(3)
+    );
+    assert_eq!(
+        cfg.udp_associate_idle_timeout(),
+        Some(std::time::Duration::from_secs(90))
+    );
     assert!(!cfg.management.enabled);
     assert_eq!(cfg.management.listen, "127.0.0.1:9090");
+}
+
+#[test]
+fn legacy_connect_timeout_still_applies_when_split_fields_are_absent() {
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+
+        [pool]
+        prewarm = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+        selection = "round_robin"
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        cfg.session_connect_timeout(),
+        std::time::Duration::from_secs(20)
+    );
+    assert_eq!(
+        cfg.upstream_tcp_connect_timeout(),
+        std::time::Duration::from_secs(20)
+    );
+    assert_eq!(cfg.udp_associate_idle_timeout(), None);
 }
 
 #[test]
@@ -60,7 +112,10 @@ fn parses_local_routing_overrides_from_config() {
     assert_eq!(cfg.routing.domain_rules[0].domain, "*.foo.edu.cn");
     assert_eq!(cfg.routing.ip_rules.len(), 1);
     assert_eq!(cfg.routing.ip_rules[0].ip_min, "42.62.107.1");
-    assert_eq!(cfg.routing.ip_rules[0].ip_max.as_deref(), Some("42.62.107.254"));
+    assert_eq!(
+        cfg.routing.ip_rules[0].ip_max.as_deref(),
+        Some("42.62.107.254")
+    );
 }
 
 #[test]
