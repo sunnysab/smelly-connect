@@ -10,7 +10,7 @@ default_keepalive_host = "jwxt.sit.edu.cn"
 prewarm = 2
 # Timeout for establishing a session for one account.
 connect_timeout_secs = 20
-# Fixed-delay retry / healthcheck interval for failed accounts.
+# Probe interval used for pool health checks.
 healthcheck_interval_secs = 60
 # Current implementation supports round_robin only.
 selection = "round_robin"
@@ -42,6 +42,7 @@ enabled = true
 listen = "127.0.0.1:1080"
 
 [routing]
+# Bypass route filtering and allow all destinations through the VPN.
 allow_all = false
 
 [[routing.domain_rules]]
@@ -58,10 +59,13 @@ port_max = 65535
 protocol = "all"
 
 [management]
+# Optional local management/status API.
 enabled = false
 listen = "127.0.0.1:9090"
 
 [logging]
+# stdout | file | stdout+file | off
 mode = "stdout"
+# error | warn | info | debug
 level = "info"
 file = "smelly-connect.log"

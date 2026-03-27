@@ -7,6 +7,10 @@ prewarm = 2
 connect_timeout_secs = 20
 healthcheck_interval_secs = 60
 selection = "round_robin"
+failure_threshold = 3
+backoff_base_secs = 30
+backoff_max_secs = 600
+allow_request_triggered_probe = true
 
 [[accounts]]
 name = "acct-01"
@@ -26,6 +30,9 @@ listen = "127.0.0.1:8080"
 enabled = true
 listen = "127.0.0.1:1080"
 
+[routing]
+allow_all = false
+
 [[routing.domain_rules]]
 domain = "*.foo.edu.cn"
 port_min = 443
@@ -38,3 +45,12 @@ ip_max = "42.62.107.254"
 port_min = 1
 port_max = 65535
 protocol = "all"
+
+[management]
+enabled = false
+listen = "127.0.0.1:9090"
+
+[logging]
+mode = "stdout"
+level = "info"
+file = "smelly-connect.log"
