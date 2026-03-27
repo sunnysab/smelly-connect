@@ -87,6 +87,7 @@ struct PoolState {
 #[derive(Clone)]
 pub struct SessionPool {
     inner: Arc<Mutex<PoolState>>,
+    healthcheck_interval: Duration,
     #[cfg(any(test, debug_assertions))]
     retry_delay: Duration,
     connect_timeout: Duration,
@@ -253,6 +254,7 @@ impl SessionPool {
         }
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
@@ -288,6 +290,7 @@ impl SessionPool {
             .collect();
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
@@ -333,6 +336,7 @@ impl SessionPool {
             .collect();
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
@@ -370,6 +374,7 @@ impl SessionPool {
             .collect();
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
@@ -438,6 +443,7 @@ impl SessionPool {
         }
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
@@ -476,6 +482,7 @@ impl SessionPool {
         }
         Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
@@ -512,6 +519,7 @@ impl SessionPool {
                 }],
                 cursor: 0,
             })),
+            healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_millis(100),
             connect_timeout: Duration::from_secs(20),
@@ -553,14 +561,20 @@ impl SessionPool {
             });
         }
 
+        let keepalive_target = cfg
+            .vpn
+            .default_keepalive_host
+            .clone()
+            .or_else(|| Some(cfg.vpn.server.clone()));
         let pool = Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            healthcheck_interval: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
             connect_timeout: cfg.session_connect_timeout(),
             local_route_overrides: build_local_route_overrides(&cfg.routing)?,
             allow_all_routes: cfg.routing.allow_all,
-            keepalive_target: Some(cfg.vpn.server.clone()),
+            keepalive_target,
             server: Some(cfg.vpn.server.clone()),
             allow_request_triggered_probe: cfg.pool.allow_request_triggered_probe,
         };
@@ -583,6 +597,7 @@ impl SessionPool {
                 }
             }
         }
+        pool.spawn_background_healthcheck_task();
         Ok(pool)
     }
 
@@ -758,6 +773,63 @@ impl SessionPool {
         });
     }
 
+    fn spawn_background_healthcheck_task(&self) {
+        let interval = self.healthcheck_interval;
+        let pool = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                pool.run_periodic_healthcheck_once().await;
+            }
+        });
+    }
+
+    async fn collect_periodic_probe_targets(&self) -> Vec<(String, Session)> {
+        if self.keepalive_target.is_none() {
+            return Vec::new();
+        }
+
+        self.refresh_time_based_states().await;
+        let mut state = self.inner.lock().await;
+        let mut sessions = Vec::new();
+        for node in &mut state.nodes {
+            if node.live_probe_in_flight {
+                continue;
+            }
+            let Some(session) = (match &node.state {
+                AccountState::Ready(session) | AccountState::Suspect(session) => {
+                    session.session().cloned()
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+            node.live_probe_in_flight = true;
+            sessions.push((node.name.clone(), session));
+        }
+        sessions
+    }
+
+    async fn run_periodic_healthcheck_once(&self) {
+        let Some(target) = self.keepalive_target.clone() else {
+            return;
+        };
+
+        for (account_name, session) in self.collect_periodic_probe_targets().await {
+            let result = probe_live_session_health(
+                &session,
+                smelly_connect::session::IcmpKeepAliveTarget::from(target.clone()),
+            )
+            .await;
+            if result.is_ok() {
+                self.clear_live_session_probe(&account_name).await;
+            } else {
+                self.report_live_session_unhealthy(&account_name, "background healthcheck failed")
+                    .await;
+            }
+        }
+    }
+
     async fn claim_live_session_probe(&self, account_name: &str) -> bool {
         let mut state = self.inner.lock().await;
         let Some(node) = state
@@ -889,6 +961,7 @@ impl SessionPool {
                 ],
                 cursor: 0,
             })),
+            healthcheck_interval: Duration::from_secs(60),
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -925,6 +998,7 @@ impl SessionPool {
                 }],
                 cursor: 0,
             })),
+            healthcheck_interval: Duration::from_secs(60),
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -1031,6 +1105,16 @@ impl SessionPool {
     #[cfg(any(test, debug_assertions))]
     pub async fn next_account_name(&self) -> Result<String, PoolError> {
         Ok(self.next_session().await?.account_name().to_string())
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub async fn run_periodic_healthcheck_once_for_test(&self) {
+        self.run_periodic_healthcheck_once().await;
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub async fn keepalive_target_for_test(&self) -> Option<String> {
+        self.keepalive_target.clone()
     }
 
     pub async fn next_session(&self) -> Result<PooledSession, PoolError> {

@@ -345,3 +345,59 @@ async fn concurrent_live_session_failures_share_one_vpn_probe() {
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn periodic_health_probe_marks_dead_live_session_open_without_request_failure() {
+    let session = smelly_connect::session::tests::session_with_icmp_result(false);
+    let pool =
+        smelly_connect_cli::pool::SessionPool::from_live_sessions_with_keepalive_target_for_test(
+            vec![("acct-01", session)],
+            "10.0.0.1",
+        )
+        .await;
+
+    pool.run_periodic_healthcheck_once_for_test().await;
+
+    assert!(pool.state_summary_for_test().await.contains("Open"));
+    assert!(!pool.has_selectable_nodes_for_test().await);
+}
+
+#[tokio::test]
+async fn pool_prefers_default_keepalive_host_over_vpn_server() {
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+        default_keepalive_host = "jwxt.sit.edu.cn"
+        [pool]
+        prewarm = 0
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+        selection = "round_robin"
+        failure_threshold = 3
+        backoff_base_secs = 30
+        backoff_max_secs = 600
+        allow_request_triggered_probe = true
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+    )
+    .unwrap();
+
+    let pool = smelly_connect_cli::pool::SessionPool::from_config_allow_empty(&cfg)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        pool.keepalive_target_for_test().await.as_deref(),
+        Some("jwxt.sit.edu.cn")
+    );
+}
