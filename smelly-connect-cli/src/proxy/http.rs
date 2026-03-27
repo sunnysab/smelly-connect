@@ -4,15 +4,17 @@ use std::future::Future;
 use std::io;
 #[cfg(any(test, debug_assertions))]
 use std::net::SocketAddr;
+use std::pin::Pin;
 #[cfg(any(test, debug_assertions))]
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::{CONNECTION, EXPECT, HOST, PROXY_AUTHORIZATION};
 use http::{HeaderValue, Method, Request, Response, StatusCode, Uri};
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
-use hyper::body::Incoming;
+use hyper::body::{Body as HyperBody, Frame, Incoming};
 use hyper::server::conn::http1 as hyper_server_http1;
 use hyper::service::service_fn;
 use hyper::upgrade;
@@ -21,6 +23,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirec
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 #[cfg(any(test, debug_assertions))]
 use tokio::time::Instant;
 
@@ -29,7 +32,7 @@ use crate::pool::SessionPool;
 use crate::runtime::RuntimeSnapshot;
 use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 
-type ProxyBody = BoxBody<Bytes, Infallible>;
+type ProxyBody = BoxBody<Bytes, io::Error>;
 
 #[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
@@ -43,6 +46,14 @@ pub struct HttpProxyTestResult {
 #[derive(Debug, Clone)]
 pub struct HttpBodyTestResult {
     pub body: String,
+}
+
+#[cfg(any(test, debug_assertions))]
+#[derive(Debug, Clone)]
+pub struct StreamingResponseTestResult {
+    pub first_chunk_latency: Duration,
+    pub first_chunk: String,
+    pub full_body: String,
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -81,6 +92,153 @@ enum UpstreamConnectError {
     TimedOut,
     Failed(String),
     RouteRejected,
+}
+
+enum ResponseBodyKind {
+    None,
+    ContentLength(usize),
+    Chunked,
+    ReadToEnd,
+}
+
+struct CountedBody<B> {
+    inner: B,
+    connection: Option<ConnectionGuard>,
+}
+
+impl<B> CountedBody<B> {
+    fn new(inner: B, connection: Option<ConnectionGuard>) -> Self {
+        Self { inner, connection }
+    }
+}
+
+impl<B> HyperBody for CountedBody<B>
+where
+    B: HyperBody<Data = Bytes, Error = io::Error> + Unpin,
+{
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match Pin::new(&mut self.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref()
+                    && let Some(connection) = &self.connection
+                {
+                    connection.add_upstream_to_client_bytes(data.len() as u64);
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            other => other,
+        }
+    }
+}
+
+struct ChannelBody {
+    rx: mpsc::Receiver<Result<Bytes, io::Error>>,
+}
+
+impl ChannelBody {
+    fn new(rx: mpsc::Receiver<Result<Bytes, io::Error>>) -> Self {
+        Self { rx }
+    }
+}
+
+impl HyperBody for ChannelBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match self.rx.poll_recv(cx) {
+            Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(Frame::data(chunk)))),
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+struct ChunkedResponseDecoder {
+    state: ChunkedState,
+}
+
+impl ChunkedResponseDecoder {
+    fn new() -> Self {
+        Self {
+            state: ChunkedState::SizeLine(Vec::new()),
+        }
+    }
+
+    fn feed(&mut self, input: &[u8]) -> io::Result<Vec<Bytes>> {
+        let mut idx = 0usize;
+        let mut decoded = Vec::new();
+        while idx < input.len() {
+            match &mut self.state {
+                ChunkedState::SizeLine(buffer) => {
+                    buffer.push(input[idx]);
+                    idx += 1;
+                    if buffer.ends_with(b"\r\n") {
+                        let line = std::str::from_utf8(&buffer[..buffer.len() - 2]).map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size line")
+                        })?;
+                        let size_text = line.split(';').next().unwrap_or_default().trim();
+                        let size = usize::from_str_radix(size_text, 16).map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size")
+                        })?;
+                        self.state = if size == 0 {
+                            ChunkedState::Trailers(Vec::new())
+                        } else {
+                            ChunkedState::Data(size)
+                        };
+                    }
+                }
+                ChunkedState::Data(remaining) => {
+                    let take = (*remaining).min(input.len() - idx);
+                    if take > 0 {
+                        decoded.push(Bytes::copy_from_slice(&input[idx..idx + take]));
+                        *remaining -= take;
+                        idx += take;
+                    }
+                    if *remaining == 0 {
+                        self.state = ChunkedState::DataCrLf(0);
+                    }
+                }
+                ChunkedState::DataCrLf(seen) => {
+                    let expected = if *seen == 0 { b'\r' } else { b'\n' };
+                    if input[idx] != expected {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid chunk delimiter",
+                        ));
+                    }
+                    *seen += 1;
+                    idx += 1;
+                    if *seen == 2 {
+                        self.state = ChunkedState::SizeLine(Vec::new());
+                    }
+                }
+                ChunkedState::Trailers(buffer) => {
+                    buffer.push(input[idx]);
+                    idx += 1;
+                    if buffer == b"\r\n" || buffer.ends_with(b"\r\n\r\n") {
+                        self.state = ChunkedState::Done;
+                    }
+                }
+                ChunkedState::Done => break,
+            }
+        }
+        Ok(decoded)
+    }
+
+    fn is_done(&self) -> bool {
+        matches!(self.state, ChunkedState::Done)
+    }
 }
 
 impl UpstreamConnectError {
@@ -392,6 +550,59 @@ pub async fn proxy_http_strips_proxy_authorization_for_test(
         .unwrap_or_default()
         .to_string();
     Ok(HttpBodyTestResult { body })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_streams_response_body_for_test(
+) -> Result<StreamingResponseTestResult, String> {
+    let upstream = spawn_slow_streaming_response_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
+        TcpStream::connect(upstream).await
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"GET http://intranet.zju.edu.cn/stream HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let started = Instant::now();
+    let first_chunk = tokio::time::timeout(Duration::from_millis(150), async {
+        let mut response = vec![0_u8; 128];
+        let n = client
+            .read(&mut response)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok::<Vec<u8>, String>(response[..n].to_vec())
+    })
+    .await
+    .map_err(|_| "proxy did not stream first response chunk in time".to_string())??;
+    let first_chunk_latency = started.elapsed();
+
+    let mut response = first_chunk;
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let full_body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    let first_chunk = full_body.chars().take(5).collect();
+
+    Ok(StreamingResponseTestResult {
+        first_chunk_latency,
+        first_chunk,
+        full_body,
+    })
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -1027,7 +1238,7 @@ where
         Err(err) => return gateway_error_response(&err),
     };
     let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
-    forward_request(request, uri, upstream, connection.as_ref()).await
+    forward_request(request, uri, upstream, connection).await
 }
 
 async fn handle_live_request(
@@ -1115,11 +1326,11 @@ async fn handle_live_request(
     };
     stats.record_connect_success();
     let connection = stats.open_connection(ProxyProtocol::Http);
-    forward_request(request, uri, upstream, Some(&connection)).await
+    forward_request(request, uri, upstream, Some(connection)).await
 }
 
 fn empty_response(status: StatusCode) -> Response<ProxyBody> {
-    let mut response = Response::new(Empty::<Bytes>::new().boxed());
+    let mut response = Response::new(empty_body());
     *response.status_mut() = status;
     response
         .headers_mut()
@@ -1128,7 +1339,7 @@ fn empty_response(status: StatusCode) -> Response<ProxyBody> {
 }
 
 fn connect_established_response() -> Response<ProxyBody> {
-    let mut response = Response::new(Empty::<Bytes>::new().boxed());
+    let mut response = Response::new(empty_body());
     *response.status_mut() = StatusCode::OK;
     response
 }
@@ -1187,7 +1398,7 @@ async fn forward_request(
     request: Request<Incoming>,
     uri: Uri,
     mut upstream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    connection: Option<&ConnectionGuard>,
+    connection: Option<ConnectionGuard>,
 ) -> Response<ProxyBody> {
     let (parts, mut body) = request.into_parts();
     let mut upstream_request = format!(
@@ -1211,7 +1422,7 @@ async fn forward_request(
     upstream_request.push_str("Connection: close\r\n\r\n");
 
     record_client_to_upstream(
-        connection,
+        connection.as_ref(),
         estimate_request_size(
             &parts.method,
             &uri,
@@ -1251,12 +1462,12 @@ async fn forward_request(
                 {
                     return empty_response(StatusCode::BAD_GATEWAY);
                 }
-                record_client_to_upstream(connection, prefix.len() + data.len() + 2);
+                record_client_to_upstream(connection.as_ref(), prefix.len() + data.len() + 2);
             } else {
                 if upstream.write_all(data).await.is_err() {
                     return empty_response(StatusCode::BAD_GATEWAY);
                 }
-                record_client_to_upstream(connection, data.len());
+                record_client_to_upstream(connection.as_ref(), data.len());
             }
         }
     }
@@ -1264,10 +1475,10 @@ async fn forward_request(
         if upstream.write_all(b"0\r\n\r\n").await.is_err() {
             return empty_response(StatusCode::BAD_GATEWAY);
         }
-        record_client_to_upstream(connection, 5);
+        record_client_to_upstream(connection.as_ref(), 5);
     }
 
-    match read_upstream_response(&mut upstream, connection).await {
+    match read_upstream_response(upstream, connection).await {
         Ok(response) => response,
         Err(_) => empty_response(StatusCode::BAD_GATEWAY),
     }
@@ -1317,11 +1528,11 @@ fn estimate_request_size(
 }
 
 async fn read_upstream_response(
-    upstream: &mut (impl AsyncRead + Unpin),
-    connection: Option<&ConnectionGuard>,
+    mut upstream: impl AsyncRead + Unpin + Send + 'static,
+    connection: Option<ConnectionGuard>,
 ) -> Result<Response<ProxyBody>, String> {
     let mut buffer = Vec::with_capacity(1024);
-    let header_end = read_headers(upstream, &mut buffer)
+    let header_end = read_headers(&mut upstream, &mut buffer)
         .await
         .map_err(|err| err.to_string())?;
     let header_bytes = &buffer[..header_end];
@@ -1334,45 +1545,15 @@ async fn read_upstream_response(
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or_else(|| format!("invalid status line: {status_line}"))?;
     let header_lines: Vec<&str> = lines.collect();
-    let mut body = buffer[header_end..].to_vec();
-    if has_chunked_transfer_encoding(&header_lines) {
-        let mut tracker = ChunkedBodyTracker::new();
-        if !tracker.feed(&body).map_err(|err| err.to_string())? {
-            let mut chunk = [0_u8; 8192];
-            loop {
-                let n = upstream.read(&mut chunk).await.map_err(|err| err.to_string())?;
-                if n == 0 {
-                    return Err("connection closed before chunked response completed".to_string());
-                }
-                body.extend_from_slice(&chunk[..n]);
-                if tracker.feed(&chunk[..n]).map_err(|err| err.to_string())? {
-                    break;
-                }
-            }
-        }
-    } else if let Some(content_length) = parse_content_length(&header_lines) {
-        while body.len() < content_length {
-            let mut chunk = [0_u8; 8192];
-            let n = upstream.read(&mut chunk).await.map_err(|err| err.to_string())?;
-            if n == 0 {
-                return Err("connection closed before response body completed".to_string());
-            }
-            body.extend_from_slice(&chunk[..n]);
-        }
-        body.truncate(content_length);
-    } else if !(100..200).contains(&status_code) && status_code != 204 && status_code != 304 {
-        upstream
-            .read_to_end(&mut body)
-            .await
-            .map_err(|err| err.to_string())?;
-    }
-
-    record_upstream_to_client(connection, body.len() as u64);
+    let body_kind = response_body_kind(status_code, &header_lines);
+    let initial_body = buffer[header_end..].to_vec();
     let mut builder = Response::builder().status(status_code);
     for header in header_lines {
         if let Some((name, value)) = header.split_once(':') {
             if name.trim().eq_ignore_ascii_case("connection")
                 || name.trim().eq_ignore_ascii_case("keep-alive")
+                || (matches!(body_kind, ResponseBodyKind::Chunked)
+                    && name.trim().eq_ignore_ascii_case("transfer-encoding"))
             {
                 continue;
             }
@@ -1380,9 +1561,8 @@ async fn read_upstream_response(
         }
     }
     builder = builder.header(CONNECTION, "close");
-    builder
-        .body(Full::new(Bytes::from(body)).boxed())
-        .map_err(|err| err.to_string())
+    let body = build_response_body(upstream, body_kind, initial_body, connection)?;
+    builder.body(body).map_err(|err| err.to_string())
 }
 
 fn http_version_text(version: http::Version) -> &'static str {
@@ -1399,12 +1579,6 @@ fn http_version_text(version: http::Version) -> &'static str {
 fn record_client_to_upstream(connection: Option<&ConnectionGuard>, bytes: usize) {
     if let Some(connection) = connection {
         connection.add_client_to_upstream_bytes(bytes as u64);
-    }
-}
-
-fn record_upstream_to_client(connection: Option<&ConnectionGuard>, bytes: u64) {
-    if let Some(connection) = connection {
-        connection.add_upstream_to_client_bytes(bytes);
     }
 }
 
@@ -1457,6 +1631,211 @@ where
     }
 }
 
+fn build_response_body(
+    upstream: impl AsyncRead + Unpin + Send + 'static,
+    body_kind: ResponseBodyKind,
+    initial_body: Vec<u8>,
+    connection: Option<ConnectionGuard>,
+) -> Result<ProxyBody, String> {
+    match body_kind {
+        ResponseBodyKind::None => Ok(empty_body()),
+        ResponseBodyKind::ContentLength(length) => {
+            if initial_body.len() >= length {
+                let body = initial_body[..length].to_vec();
+                Ok(full_body(body, connection))
+            } else {
+                let (tx, rx) = mpsc::channel(1);
+                stream_content_length_body(upstream, initial_body, length, tx);
+                Ok(CountedBody::new(ChannelBody::new(rx), connection).boxed())
+            }
+        }
+        ResponseBodyKind::Chunked => {
+            let (tx, rx) = mpsc::channel(1);
+            stream_chunked_body(upstream, initial_body, tx);
+            Ok(CountedBody::new(ChannelBody::new(rx), connection).boxed())
+        }
+        ResponseBodyKind::ReadToEnd => {
+            let (tx, rx) = mpsc::channel(1);
+            stream_read_to_end_body(upstream, initial_body, tx);
+            Ok(CountedBody::new(ChannelBody::new(rx), connection).boxed())
+        }
+    }
+}
+
+fn stream_content_length_body(
+    upstream: impl AsyncRead + Unpin + Send + 'static,
+    initial_body: Vec<u8>,
+    length: usize,
+    tx: mpsc::Sender<Result<Bytes, io::Error>>,
+) {
+    tokio::spawn(async move {
+        let mut upstream = upstream;
+        let mut remaining = length;
+        if !initial_body.is_empty() {
+            let initial_len = remaining.min(initial_body.len());
+            let initial = initial_body[..initial_len].to_vec();
+            if tx.send(Ok(Bytes::from(initial))).await.is_err() {
+                return;
+            }
+            remaining -= initial_len;
+        }
+        if remaining == 0 {
+            return;
+        }
+        let mut chunk = [0_u8; 8192];
+        while remaining > 0 {
+            let limit = remaining.min(chunk.len());
+            let n = match upstream.read(&mut chunk[..limit]).await {
+                Ok(n) => n,
+                Err(err) => {
+                    let _ = tx.send(Err(err)).await;
+                    return;
+                }
+            };
+            if n == 0 {
+                let _ = tx
+                    .send(Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "connection closed before response body completed",
+                    )))
+                    .await;
+                return;
+            }
+            remaining -= n;
+            if tx
+                .send(Ok(Bytes::copy_from_slice(&chunk[..n])))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+}
+
+fn stream_read_to_end_body(
+    upstream: impl AsyncRead + Unpin + Send + 'static,
+    initial_body: Vec<u8>,
+    tx: mpsc::Sender<Result<Bytes, io::Error>>,
+) {
+    tokio::spawn(async move {
+        if !initial_body.is_empty() && tx.send(Ok(Bytes::from(initial_body))).await.is_err() {
+            return;
+        }
+        let mut chunk = [0_u8; 8192];
+        let mut upstream = upstream;
+        loop {
+            let n = match upstream.read(&mut chunk).await {
+                Ok(n) => n,
+                Err(err) => {
+                    let _ = tx.send(Err(err)).await;
+                    return;
+                }
+            };
+            if n == 0 {
+                return;
+            }
+            if tx
+                .send(Ok(Bytes::copy_from_slice(&chunk[..n])))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+}
+
+fn stream_chunked_body(
+    upstream: impl AsyncRead + Unpin + Send + 'static,
+    initial_body: Vec<u8>,
+    tx: mpsc::Sender<Result<Bytes, io::Error>>,
+) {
+    tokio::spawn(async move {
+        let mut decoder = ChunkedResponseDecoder::new();
+        match decoder.feed(&initial_body) {
+            Ok(decoded) => {
+                for chunk in decoded {
+                    if tx.send(Ok(chunk)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(err) => {
+                let _ = tx.send(Err(err)).await;
+                return;
+            }
+        }
+        if decoder.is_done() {
+            return;
+        }
+
+        let mut chunk = [0_u8; 8192];
+        let mut upstream = upstream;
+        loop {
+            let n = match upstream.read(&mut chunk).await {
+                Ok(n) => n,
+                Err(err) => {
+                    let _ = tx.send(Err(err)).await;
+                    return;
+                }
+            };
+            if n == 0 {
+                let _ = tx
+                    .send(Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "connection closed before chunked response completed",
+                    )))
+                    .await;
+                return;
+            }
+            match decoder.feed(&chunk[..n]) {
+                Ok(decoded) => {
+                    for chunk in decoded {
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            return;
+                        }
+                    }
+                    if decoder.is_done() {
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(Err(err)).await;
+                    return;
+                }
+            }
+        }
+    });
+}
+
+fn empty_body() -> ProxyBody {
+    Empty::<Bytes>::new()
+        .map_err(|never| match never {})
+        .boxed()
+}
+
+fn full_body(body: Vec<u8>, connection: Option<ConnectionGuard>) -> ProxyBody {
+    CountedBody::new(
+        Full::new(Bytes::from(body))
+            .map_err(|never| match never {}),
+        connection,
+    )
+    .boxed()
+}
+
+fn response_body_kind(status_code: u16, header_lines: &[&str]) -> ResponseBodyKind {
+    if (100..200).contains(&status_code) || status_code == 204 || status_code == 304 {
+        ResponseBodyKind::None
+    } else if has_chunked_transfer_encoding(header_lines) {
+        ResponseBodyKind::Chunked
+    } else if let Some(content_length) = parse_content_length(header_lines) {
+        ResponseBodyKind::ContentLength(content_length)
+    } else {
+        ResponseBodyKind::ReadToEnd
+    }
+}
+
 async fn read_headers(
     stream: &mut (impl AsyncRead + Unpin),
     buffer: &mut Vec<u8>,
@@ -1505,82 +1884,12 @@ fn has_chunked_transfer_encoding(headers: &[&str]) -> bool {
     })
 }
 
-struct ChunkedBodyTracker {
-    state: ChunkedState,
-}
-
 enum ChunkedState {
     SizeLine(Vec<u8>),
     Data(usize),
     DataCrLf(usize),
     Trailers(Vec<u8>),
     Done,
-}
-
-impl ChunkedBodyTracker {
-    fn new() -> Self {
-        Self {
-            state: ChunkedState::SizeLine(Vec::new()),
-        }
-    }
-
-    fn feed(&mut self, input: &[u8]) -> io::Result<bool> {
-        let mut idx = 0usize;
-        while idx < input.len() {
-            match &mut self.state {
-                ChunkedState::SizeLine(buffer) => {
-                    buffer.push(input[idx]);
-                    idx += 1;
-                    if buffer.ends_with(b"\r\n") {
-                        let line = std::str::from_utf8(&buffer[..buffer.len() - 2]).map_err(|_| {
-                            io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size line")
-                        })?;
-                        let size_text = line.split(';').next().unwrap_or_default().trim();
-                        let size = usize::from_str_radix(size_text, 16).map_err(|_| {
-                            io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size")
-                        })?;
-                        self.state = if size == 0 {
-                            ChunkedState::Trailers(Vec::new())
-                        } else {
-                            ChunkedState::Data(size)
-                        };
-                    }
-                }
-                ChunkedState::Data(remaining) => {
-                    let take = (*remaining).min(input.len() - idx);
-                    *remaining -= take;
-                    idx += take;
-                    if *remaining == 0 {
-                        self.state = ChunkedState::DataCrLf(0);
-                    }
-                }
-                ChunkedState::DataCrLf(seen) => {
-                    let expected = if *seen == 0 { b'\r' } else { b'\n' };
-                    if input[idx] != expected {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "invalid chunk delimiter",
-                        ));
-                    }
-                    *seen += 1;
-                    idx += 1;
-                    if *seen == 2 {
-                        self.state = ChunkedState::SizeLine(Vec::new());
-                    }
-                }
-                ChunkedState::Trailers(buffer) => {
-                    buffer.push(input[idx]);
-                    idx += 1;
-                    if buffer == b"\r\n" || buffer.ends_with(b"\r\n\r\n") {
-                        self.state = ChunkedState::Done;
-                        return Ok(true);
-                    }
-                }
-                ChunkedState::Done => return Ok(true),
-            }
-        }
-        Ok(matches!(self.state, ChunkedState::Done))
-    }
 }
 
 fn split_host_port(target: &str, default_port: u16) -> Result<(&str, u16), String> {
@@ -1758,6 +2067,34 @@ async fn spawn_proxy_auth_capture_upstream() -> SocketAddr {
             body.len()
         );
         socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    addr
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_slow_streaming_response_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let n = socket.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                return;
+            }
+            request.extend_from_slice(&chunk[..n]);
+            if find_header_end(&request).is_some() {
+                break;
+            }
+        }
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        socket.write_all(b" world").await.unwrap();
     });
     addr
 }

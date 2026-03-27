@@ -59,6 +59,16 @@ async fn http_proxy_does_not_forward_proxy_authorization_header() {
 }
 
 #[tokio::test]
+async fn http_proxy_streams_upstream_response_without_full_buffering() {
+    let result = smelly_connect_cli::proxy::http::proxy_http_streams_response_body_for_test()
+        .await
+        .unwrap();
+    assert!(result.first_chunk_latency < std::time::Duration::from_millis(150));
+    assert_eq!(result.first_chunk, "hello");
+    assert_eq!(result.full_body, "hello world");
+}
+
+#[tokio::test]
 async fn http_connect_proxy_tunnels_bytes_through_selected_session() {
     let result = smelly_connect_cli::proxy::http::proxy_connect_for_test()
         .await
