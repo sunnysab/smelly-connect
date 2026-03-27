@@ -146,6 +146,14 @@ async fn timed_open_node_is_reported_as_recovering_not_down() {
 }
 
 #[tokio::test]
+async fn configured_capacity_is_reported_as_recovering_not_down() {
+    let pool = smelly_connect_cli::pool::SessionPool::from_test_accounts(2, 0).await;
+    let summary = pool.summary().await;
+    assert_eq!(summary.configured_nodes, 2);
+    assert_eq!(summary.status, smelly_connect_cli::pool::PoolHealthStatus::Recovering);
+}
+
+#[tokio::test]
 async fn normal_selection_uses_ready_and_suspect_but_excludes_open_and_half_open() {
     let pool = smelly_connect_cli::pool::SessionPool::from_mixed_state_pool_for_test().await;
     let picks = pool.collect_selected_accounts_for_test(4).await;

@@ -1479,7 +1479,11 @@ fn build_pool_summary(state: &PoolState) -> PoolSummary {
     let selectable_nodes = ready_nodes + suspect_nodes;
     let status = if selectable_nodes > 0 {
         PoolHealthStatus::Healthy
-    } else if half_open_nodes > 0 || connecting_nodes > 0 || timed_open_nodes > 0 {
+    } else if half_open_nodes > 0
+        || connecting_nodes > 0
+        || timed_open_nodes > 0
+        || configured_nodes > 0
+    {
         PoolHealthStatus::Recovering
     } else {
         PoolHealthStatus::Down

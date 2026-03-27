@@ -54,6 +54,20 @@ async fn management_health_reports_timed_open_pool_as_recovering() {
 }
 
 #[tokio::test]
+async fn management_health_reports_configured_capacity_as_recovering() {
+    let pool = smelly_connect_cli::pool::SessionPool::from_test_accounts(2, 0).await;
+    let stats = smelly_connect_cli::runtime::RuntimeStats::default();
+
+    let body = smelly_connect_cli::management::fetch_json_for_test(pool, stats, "/healthz")
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["status"], "recovering");
+    assert_eq!(json["pool"]["status"], "recovering");
+    assert_eq!(json["pool"]["configured_nodes"], 2);
+}
+
+#[tokio::test]
 async fn management_stats_endpoint_reports_connection_and_traffic_counters() {
     let pool = smelly_connect_cli::pool::SessionPool::from_named_ready_accounts(["acct-01"]).await;
     let stats = smelly_connect_cli::runtime::RuntimeStats::default();
