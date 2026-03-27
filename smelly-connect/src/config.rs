@@ -107,8 +107,10 @@ impl EasyConnectConfig {
         self,
         state: ControlPlaneState,
     ) -> Result<EasyConnectSession, Error> {
-        let token = crate::auth::control::request_token(&self.server, &state.authorized_twfid)?;
-        let server_addr = crate::auth::control::resolve_server_addr(&self.server)?;
+        let token =
+            crate::auth::control::request_token_async(&self.server, &state.authorized_twfid)
+                .await?;
+        let server_addr = crate::auth::control::resolve_server_addr_async(&self.server).await?;
         let (client_ip, request_ip_tunnel) = crate::auth::control::request_ip_via_tunnel_with_conn(
             server_addr,
             &token,

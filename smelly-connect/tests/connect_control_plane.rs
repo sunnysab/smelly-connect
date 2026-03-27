@@ -80,6 +80,98 @@ fn token_request_derives_token_from_tls_session_id() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn async_token_request_does_not_block_current_thread_runtime() {
+    use openssl::asn1::Asn1Time;
+    use openssl::bn::BigNum;
+    use openssl::hash::MessageDigest;
+    use openssl::nid::Nid;
+    use openssl::pkey::PKey;
+    use openssl::rsa::Rsa;
+    use openssl::ssl::{SslAcceptor, SslMethod, SslVersion};
+    use openssl::x509::{X509, X509NameBuilder};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = thread::spawn(move || {
+        let rsa = Rsa::generate(2048).unwrap();
+        let key = PKey::from_rsa(rsa).unwrap();
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_nid(Nid::COMMONNAME, "localhost")
+            .unwrap();
+        let name = name.build();
+        let mut cert = X509::builder().unwrap();
+        cert.set_version(2).unwrap();
+        let mut serial = BigNum::new().unwrap();
+        serial
+            .pseudo_rand(64, openssl::bn::MsbOption::MAYBE_ZERO, false)
+            .unwrap();
+        let serial = serial.to_asn1_integer().unwrap();
+        cert.set_serial_number(&serial).unwrap();
+        cert.set_subject_name(&name).unwrap();
+        cert.set_issuer_name(&name).unwrap();
+        cert.set_pubkey(&key).unwrap();
+        cert.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
+            .unwrap();
+        cert.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
+            .unwrap();
+        cert.sign(&key, MessageDigest::sha256()).unwrap();
+
+        let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
+        acceptor.set_private_key(&key).unwrap();
+        acceptor.set_certificate(&cert.build()).unwrap();
+        acceptor
+            .set_min_proto_version(Some(SslVersion::TLS1_2))
+            .unwrap();
+        acceptor
+            .set_max_proto_version(Some(SslVersion::TLS1_2))
+            .unwrap();
+        let acceptor = acceptor.build();
+
+        let (stream, _) = listener.accept().unwrap();
+        let mut stream = acceptor.accept(stream).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let mut buf = [0_u8; 256];
+        let _ = std::io::Read::read(&mut stream, &mut buf).unwrap();
+        std::io::Write::write_all(&mut stream, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+    });
+
+    let running = Arc::new(AtomicBool::new(true));
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let ticker_running = Arc::clone(&running);
+    let ticker_ticks = Arc::clone(&ticks);
+    let ticker = tokio::spawn(async move {
+        while ticker_running.load(Ordering::SeqCst) {
+            ticker_ticks.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+
+    let token = smelly_connect::auth::control::request_token_async(
+        &addr.to_string(),
+        "abcdefghijklmnop",
+    )
+    .await
+    .unwrap();
+
+    running.store(false, Ordering::SeqCst);
+    ticker.await.unwrap();
+
+    assert_eq!(token.as_bytes().len(), 48);
+    assert!(
+        ticks.load(Ordering::SeqCst) >= 5,
+        "ticker should continue advancing while token request awaits blocking work"
+    );
+    server.join().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn request_ip_uses_smelly_tls_data_plane() {
     use openssl::asn1::Asn1Time;
     use openssl::bn::BigNum;

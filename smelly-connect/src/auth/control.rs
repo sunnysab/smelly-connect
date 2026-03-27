@@ -62,6 +62,21 @@ pub fn request_token(server: &str, twfid: &str) -> Result<crate::protocol::Deriv
     })
 }
 
+pub async fn request_token_async(
+    server: &str,
+    twfid: &str,
+) -> Result<crate::protocol::DerivedToken, Error> {
+    let server = server.to_string();
+    let twfid = twfid.to_string();
+    tokio::task::spawn_blocking(move || request_token(&server, &twfid))
+        .await
+        .map_err(|err| {
+            Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!(
+                "token task join failed: {err}"
+            )))
+        })?
+}
+
 pub async fn request_ip_via_tunnel(
     addr: SocketAddr,
     token: &crate::protocol::DerivedToken,
@@ -181,8 +196,19 @@ pub(crate) fn resolve_server_addr(server: &str) -> Result<SocketAddr, Error> {
         .ok_or_else(|| {
             Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(
                 "no resolved address".to_string(),
-            ))
-        })
+        ))
+    })
+}
+
+pub(crate) async fn resolve_server_addr_async(server: &str) -> Result<SocketAddr, Error> {
+    let server = server.to_string();
+    tokio::task::spawn_blocking(move || resolve_server_addr(&server))
+        .await
+        .map_err(|err| {
+            Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!(
+                "server resolution task join failed: {err}"
+            )))
+        })?
 }
 
 async fn open_stream_tunnel(
