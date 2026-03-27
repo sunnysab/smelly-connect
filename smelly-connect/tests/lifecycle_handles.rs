@@ -61,3 +61,32 @@ async fn proxy_handle_supports_explicit_shutdown() {
         "proxy listener should be closed after shutdown"
     );
 }
+
+#[tokio::test]
+async fn dropping_last_session_clone_stops_session_owned_keepalive() {
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let session = smelly_connect::session::tests::session_with_owned_keepalive(
+        counter.clone(),
+        Duration::from_millis(20),
+    );
+    let clone = session.clone();
+
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    assert!(counter.load(Ordering::SeqCst) >= 2);
+
+    drop(session);
+    let before_clone_drop = counter.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let after_clone_drop = counter.load(Ordering::SeqCst);
+    assert!(
+        after_clone_drop > before_clone_drop,
+        "keepalive should continue while another session clone exists"
+    );
+
+    drop(clone);
+    let before_final_drop = counter.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    tokio::task::yield_now().await;
+    let after_final_drop = counter.load(Ordering::SeqCst);
+    assert_eq!(after_final_drop, before_final_drop);
+}

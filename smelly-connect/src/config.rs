@@ -1,4 +1,3 @@
-use std::future::pending;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -129,15 +128,9 @@ impl EasyConnectConfig {
             state.legacy_cipher_hint.as_deref(),
         )
         .await?;
-        tokio::spawn(async move {
-            let _request_ip_tunnel = request_ip_tunnel;
-            pending::<()>().await;
-        });
         let transport =
             crate::transport::netstack::build_transport_from_packet_device(device, client_ip)
-                .map_err(|err| {
-                    Error::Transport(crate::error::TransportError::ConnectFailed(err.to_string()))
-                })?;
+                .map_err(|err| Error::Transport(crate::error::TransportError::from_io(err)))?;
         let session = EasyConnectSession::new(
             client_ip,
             state.resources,
@@ -145,11 +138,12 @@ impl EasyConnectConfig {
             transport,
         )
         .with_legacy_data_plane(server_addr, token, state.legacy_cipher_hint);
-        if let Some(keepalive) = &self.icmp_keepalive {
-            std::mem::drop(
-                session.spawn_icmp_keepalive_task(keepalive.target.clone(), keepalive.interval),
-            );
-        }
-        Ok(session)
+        let keepalive = self
+            .icmp_keepalive
+            .as_ref()
+            .map(|keepalive| {
+                session.start_icmp_keepalive(keepalive.target.clone(), keepalive.interval)
+            });
+        Ok(session.with_runtime_resources(Some(request_ip_tunnel), keepalive))
     }
 }

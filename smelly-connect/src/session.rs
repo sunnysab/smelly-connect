@@ -16,6 +16,10 @@ use crate::target::TargetAddr;
 use crate::transport::device::PacketDevice;
 use crate::transport::{TransportStack, VpnStream, VpnUdpSocket};
 
+mod runtime;
+
+use runtime::SessionRuntime;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoutePlan {
     VpnResolved(SocketAddr),
@@ -106,6 +110,7 @@ pub struct EasyConnectSession {
     resolver: SessionResolver,
     transport: TransportStack,
     legacy_data_plane: Option<LegacyDataPlaneConfig>,
+    runtime: Arc<SessionRuntime>,
 }
 
 #[derive(Clone)]
@@ -131,6 +136,7 @@ impl EasyConnectSession {
             resolver,
             transport,
             legacy_data_plane: None,
+            runtime: Arc::new(SessionRuntime::default()),
         }
     }
 
@@ -145,6 +151,15 @@ impl EasyConnectSession {
             token,
             legacy_cipher_hint,
         });
+        self
+    }
+
+    pub(crate) fn with_runtime_resources(
+        mut self,
+        legacy_tunnel: Option<smelly_tls::TunnelConnection>,
+        keepalive: Option<KeepaliveHandle>,
+    ) -> Self {
+        self.runtime = Arc::new(SessionRuntime::new(legacy_tunnel, keepalive));
         self
     }
 
@@ -416,7 +431,7 @@ async fn resolve_keepalive_target(
     }
 }
 
-pub mod tests {
+    pub mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::net::UdpSocket;
@@ -581,6 +596,27 @@ pub mod tests {
             SessionResolver::new(HashMap::new(), None, system),
             transport,
         )
+    }
+
+    pub fn session_with_owned_keepalive(
+        counter: Arc<AtomicUsize>,
+        interval: Duration,
+    ) -> EasyConnectSession {
+        let transport = ready_transport().with_icmp_pinger(move |_| {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        });
+        let session = EasyConnectSession::new(
+            Ipv4Addr::new(10, 0, 0, 8),
+            ResourceSet::default(),
+            SessionResolver::new(HashMap::new(), None, HashMap::new()),
+            transport,
+        );
+        let keepalive = session.start_icmp_keepalive(IcmpKeepAliveTarget::Ip(Ipv4Addr::new(10, 0, 0, 8)), interval);
+        session.with_runtime_resources(None, Some(keepalive))
     }
 
     pub fn session_with_icmp_ping(counter: Arc<AtomicUsize>) -> EasyConnectSession {
