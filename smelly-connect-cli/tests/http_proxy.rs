@@ -17,6 +17,14 @@ async fn http_proxy_supports_origin_form_requests() {
 }
 
 #[tokio::test]
+async fn http_proxy_supports_ipv6_origin_form_host_headers() {
+    let result = smelly_connect_cli::proxy::http::proxy_http_origin_form_ipv6_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.body, "ok");
+}
+
+#[tokio::test]
 async fn http_proxy_completes_body_when_upstream_keeps_connection_alive() {
     let result = smelly_connect_cli::proxy::http::proxy_http_body_completes_for_keep_alive_upstream_for_test()
         .await

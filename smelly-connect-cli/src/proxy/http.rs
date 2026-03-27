@@ -340,6 +340,43 @@ pub async fn proxy_http_origin_form_for_test() -> Result<HttpBodyTestResult, Str
 }
 
 #[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_origin_form_ipv6_for_test() -> Result<HttpBodyTestResult, String> {
+    let upstream = spawn_http_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy(pool, move |_account_name, host, _port| async move {
+        if host != "::1" {
+            return Err(io::Error::other(format!(
+                "unexpected ipv6 host {host}"
+            )));
+        }
+        TcpStream::connect(upstream).await
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"GET /health HTTP/1.1\r\nHost: [::1]\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    Ok(HttpBodyTestResult { body })
+}
+
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_body_completes_for_keep_alive_upstream_for_test(
 ) -> Result<HttpBodyTestResult, String> {
     let upstream = spawn_keep_alive_http_upstream().await;
@@ -1939,6 +1976,22 @@ enum ChunkedState {
 }
 
 fn split_host_port(target: &str, default_port: u16) -> Result<(&str, u16), String> {
+    if let Some(rest) = target.strip_prefix('[') {
+        let end = rest
+            .find(']')
+            .ok_or_else(|| "invalid ipv6 host".to_string())?;
+        let host = &rest[..end];
+        let suffix = &rest[end + 1..];
+        if suffix.is_empty() {
+            return Ok((host, default_port));
+        }
+        let port = suffix
+            .strip_prefix(':')
+            .ok_or_else(|| "invalid ipv6 host".to_string())?
+            .parse()
+            .map_err(|_| "invalid port".to_string())?;
+        return Ok((host, port));
+    }
     if let Some((host, port)) = target.rsplit_once(':') {
         let port = port.parse().map_err(|_| "invalid port".to_string())?;
         Ok((host, port))
