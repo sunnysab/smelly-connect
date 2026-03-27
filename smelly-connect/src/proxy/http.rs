@@ -334,9 +334,13 @@ impl ChunkedBodyTracker {
                     buffer.push(input[idx]);
                     idx += 1;
                     if buffer.ends_with(b"\r\n") {
-                        let line = std::str::from_utf8(&buffer[..buffer.len() - 2]).map_err(|_| {
-                            io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size line")
-                        })?;
+                        let line =
+                            std::str::from_utf8(&buffer[..buffer.len() - 2]).map_err(|_| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "invalid chunk size line",
+                                )
+                            })?;
                         let size_text = line.split(';').next().unwrap_or_default().trim();
                         let size = usize::from_str_radix(size_text, 16).map_err(|_| {
                             io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size")

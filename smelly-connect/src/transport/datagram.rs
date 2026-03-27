@@ -7,7 +7,8 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 
 type SendToFuture<'a> = Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
-type RecvFromFuture<'a> = Pin<Box<dyn Future<Output = io::Result<(usize, SocketAddr)>> + Send + 'a>>;
+type RecvFromFuture<'a> =
+    Pin<Box<dyn Future<Output = io::Result<(usize, SocketAddr)>> + Send + 'a>>;
 
 pub trait AsyncDatagramSocket: Send + Sync + 'static {
     fn send_to<'a>(&'a self, data: &'a [u8], target: SocketAddr) -> SendToFuture<'a>;

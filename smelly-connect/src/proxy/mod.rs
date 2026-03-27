@@ -260,13 +260,14 @@ pub mod tests {
             let mut body_complete = false;
 
             loop {
-                let n = match tokio::time::timeout(Duration::from_millis(200), socket.read(&mut chunk))
-                    .await
-                {
-                    Ok(Ok(n)) => n,
-                    Ok(Err(err)) => panic!("upstream read failed: {err}"),
-                    Err(_) => break,
-                };
+                let n =
+                    match tokio::time::timeout(Duration::from_millis(200), socket.read(&mut chunk))
+                        .await
+                    {
+                        Ok(Ok(n)) => n,
+                        Ok(Err(err)) => panic!("upstream read failed: {err}"),
+                        Err(_) => break,
+                    };
                 if n == 0 {
                     break;
                 }
@@ -300,7 +301,11 @@ pub mod tests {
             } else {
                 String::new()
             };
-            let status = if body_complete { "200 OK" } else { "400 Bad Request" };
+            let status = if body_complete {
+                "200 OK"
+            } else {
+                "400 Bad Request"
+            };
             let response = format!(
                 "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -341,13 +346,14 @@ pub mod tests {
             let mut chunk = [0_u8; 1024];
 
             loop {
-                let n = match tokio::time::timeout(Duration::from_millis(200), socket.read(&mut chunk))
-                    .await
-                {
-                    Ok(Ok(n)) => n,
-                    Ok(Err(err)) => panic!("upstream read failed: {err}"),
-                    Err(_) => break,
-                };
+                let n =
+                    match tokio::time::timeout(Duration::from_millis(200), socket.read(&mut chunk))
+                        .await
+                    {
+                        Ok(Ok(n)) => n,
+                        Ok(Err(err)) => panic!("upstream read failed: {err}"),
+                        Err(_) => break,
+                    };
                 if n == 0 {
                     break;
                 }
@@ -455,10 +461,9 @@ pub mod tests {
             let Ok(size_line) = std::str::from_utf8(&body[cursor..line_end]) else {
                 return false;
             };
-            let Ok(size) = usize::from_str_radix(
-                size_line.split(';').next().unwrap_or_default().trim(),
-                16,
-            ) else {
+            let Ok(size) =
+                usize::from_str_radix(size_line.split(';').next().unwrap_or_default().trim(), 16)
+            else {
                 return false;
             };
             cursor = line_end + 2;

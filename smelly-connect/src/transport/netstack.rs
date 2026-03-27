@@ -634,7 +634,8 @@ impl AsyncDatagramSocket for SmolUdpSocket {
     fn recv_from<'a>(
         &'a self,
         buf: &'a mut [u8],
-    ) -> Pin<Box<dyn std::future::Future<Output = io::Result<(usize, SocketAddr)>> + Send + 'a>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = io::Result<(usize, SocketAddr)>> + Send + 'a>>
+    {
         Box::pin(async move {
             poll_fn(|cx| {
                 let mut state = self.stack.state.lock().expect("netstack mutex poisoned");
@@ -644,7 +645,9 @@ impl AsyncDatagramSocket for SmolUdpSocket {
                         .recv_slice(buf)
                         .map_err(|err| io::Error::other(err.to_string()))?;
                     self.stack.wake.notify_one();
-                    return Poll::Ready(socket_addr_from_endpoint(metadata.endpoint).map(|addr| (n, addr)));
+                    return Poll::Ready(
+                        socket_addr_from_endpoint(metadata.endpoint).map(|addr| (n, addr)),
+                    );
                 }
                 if !socket.is_open() {
                     return Poll::Ready(Err(io::Error::new(

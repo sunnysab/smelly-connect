@@ -13,8 +13,8 @@ pub mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
     use tokio::io::duplex;
-    use tokio::sync::mpsc;
     use tokio::net::UdpSocket;
+    use tokio::sync::mpsc;
 
     use crate::transport::device::PacketDevice;
     use crate::transport::stack::TransportStack;

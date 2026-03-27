@@ -10,8 +10,8 @@ async fn routing_rejects_non_resource_targets_by_default() {
 
 #[tokio::test]
 async fn allow_all_bypasses_target_not_allowed_for_domains_and_ips() {
-    let session = smelly_connect::session::tests::fake_session_without_match()
-        .with_allow_all_routes(true);
+    let session =
+        smelly_connect::session::tests::fake_session_without_match().with_allow_all_routes(true);
 
     let domain_route = session
         .plan_tcp_connect(("example.com", 443))
@@ -102,7 +102,10 @@ async fn routing_allows_direct_single_ip_resources() {
         smelly_connect::session::EasyConnectSession::failing_transport("unused"),
     );
 
-    let route = session.plan_tcp_connect(("210.35.66.210", 443)).await.unwrap();
+    let route = session
+        .plan_tcp_connect(("210.35.66.210", 443))
+        .await
+        .unwrap();
     assert!(matches!(
         route,
         smelly_connect::session::RoutePlan::VpnResolved(addr)
@@ -156,7 +159,10 @@ async fn local_route_overrides_allow_domain_and_ip_targets() {
         smelly_connect::session::RoutePlan::VpnResolved(_)
     ));
 
-    let ip_route = session.plan_tcp_connect(("42.62.107.8", 443)).await.unwrap();
+    let ip_route = session
+        .plan_tcp_connect(("42.62.107.8", 443))
+        .await
+        .unwrap();
     assert!(matches!(
         ip_route,
         smelly_connect::session::RoutePlan::VpnResolved(_)
