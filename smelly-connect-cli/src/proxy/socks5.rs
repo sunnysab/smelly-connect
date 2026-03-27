@@ -2,14 +2,17 @@
 use std::future::Future;
 #[cfg(any(test, debug_assertions))]
 use std::io;
-use std::net::Ipv4Addr;
 #[cfg(any(test, debug_assertions))]
 use std::net::SocketAddr;
 #[cfg(any(test, debug_assertions))]
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
+use fast_socks5::server::Socks5ServerProtocol;
+use fast_socks5::{ReplyError, Socks5Command};
+#[cfg(any(test, debug_assertions))]
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
@@ -21,9 +24,7 @@ use crate::pool::SessionPool;
 use crate::runtime::RuntimeSnapshot;
 use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 
-const SOCKS5_NETWORK_UNREACHABLE: u8 = 0x03;
-const SOCKS5_COMMAND_NOT_SUPPORTED: u8 = 0x07;
-const SOCKS5_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 0x08;
+#[cfg(any(test, debug_assertions))]
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
@@ -109,6 +110,80 @@ pub async fn proxy_socks5_for_test() -> Result<Socks5ProxyTestResult, String> {
         .read_exact(&mut connect_reply)
         .await
         .map_err(|err| err.to_string())?;
+    if connect_reply[1] != 0x00 {
+        return Err(format!(
+            "unexpected socks5 reply code: {}",
+            connect_reply[1]
+        ));
+    }
+
+    client
+        .write_all(b"ping")
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut echoed = [0_u8; 4];
+    client
+        .read_exact(&mut echoed)
+        .await
+        .map_err(|err| err.to_string())?;
+    let account_name = selected
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "no account selected".to_string())?;
+    Ok(Socks5ProxyTestResult {
+        account_name,
+        used_pool_selection: true,
+        echoed_bytes: echoed.to_vec(),
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_ipv6_for_test() -> Result<Socks5ProxyTestResult, String> {
+    let upstream = spawn_echo_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let selected = Arc::new(Mutex::new(None::<String>));
+    let addr = spawn_test_socks5(pool, {
+        let selected = Arc::clone(&selected);
+        move |account_name, host, _port| {
+            let selected = Arc::clone(&selected);
+            async move {
+                if host != "::1" {
+                    return Err(io::Error::other(format!(
+                        "unexpected ipv6 host {host}"
+                    )));
+                }
+                *selected.lock().await = Some(account_name);
+                TcpStream::connect(upstream).await
+            }
+        }
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut method_reply = [0_u8; 2];
+    client
+        .read_exact(&mut method_reply)
+        .await
+        .map_err(|err| err.to_string())?;
+    if method_reply != [0x05, 0x00] {
+        return Err(format!("unexpected method reply: {method_reply:?}"));
+    }
+
+    client
+        .write_all(&[
+            0x05, 0x01, 0x00, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01,
+            0xbb,
+        ])
+        .await
+        .map_err(|err| err.to_string())?;
+    let connect_reply = read_socks5_reply(&mut client).await?;
     if connect_reply[1] != 0x00 {
         return Err(format!(
             "unexpected socks5 reply code: {}",
@@ -377,14 +452,10 @@ pub async fn proxy_socks5_rejects_unsupported_atyp_for_test(
         .await
         .map_err(|err| err.to_string())?;
     client
-        .write_all(&[0x05, 0x01, 0x00, 0x04])
+        .write_all(&[0x05, 0x01, 0x00, 0x09])
         .await
         .map_err(|err| err.to_string())?;
-    let mut reply = [0_u8; 10];
-    client
-        .read_exact(&mut reply)
-        .await
-        .map_err(|err| err.to_string())?;
+    let reply = read_socks5_reply(&mut client).await?;
     Ok(Socks5FailureResult {
         reply_code: reply[1],
     })
@@ -587,7 +658,7 @@ async fn request_connect_failure(addr: SocketAddr) -> Result<Socks5FailureResult
 
 #[cfg(any(test, debug_assertions))]
 async fn handle_client<F, Fut>(
-    mut client: TcpStream,
+    client: TcpStream,
     pool: SessionPool,
     stats: Option<RuntimeStats>,
     connect_timeout: Duration,
@@ -597,77 +668,19 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    let mut greeting = [0_u8; 2];
-    client
-        .read_exact(&mut greeting)
+    let (proto, cmd, target_addr) = Socks5ServerProtocol::accept_no_auth(client)
+        .await
+        .map_err(|err| err.to_string())?
+        .read_command()
         .await
         .map_err(|err| err.to_string())?;
-    let methods_len = greeting[1] as usize;
-    let mut methods = vec![0_u8; methods_len];
-    client
-        .read_exact(&mut methods)
-        .await
-        .map_err(|err| err.to_string())?;
-    if !methods.contains(&0x00) {
-        client
-            .write_all(&[0x05, 0xff])
+    if cmd != Socks5Command::TCPConnect {
+        proto.reply_error(&ReplyError::CommandNotSupported)
             .await
             .map_err(|err| err.to_string())?;
         return Ok(());
     }
-    client
-        .write_all(&[0x05, 0x00])
-        .await
-        .map_err(|err| err.to_string())?;
-
-    let mut header = [0_u8; 4];
-    client
-        .read_exact(&mut header)
-        .await
-        .map_err(|err| err.to_string())?;
-    if header[1] != 0x01 {
-        write_socks5_failure_reply_with_code(&mut client, SOCKS5_COMMAND_NOT_SUPPORTED)
-            .await
-            .map_err(|err| err.to_string())?;
-        return Ok(());
-    }
-    let atyp = header[3];
-    if atyp != 0x01 && atyp != 0x03 {
-        write_socks5_failure_reply_with_code(&mut client, SOCKS5_ADDRESS_TYPE_NOT_SUPPORTED)
-            .await
-            .map_err(|err| err.to_string())?;
-        return Ok(());
-    }
-    let host = match atyp {
-        0x01 => {
-            let mut ip = [0_u8; 4];
-            client
-                .read_exact(&mut ip)
-                .await
-                .map_err(|err| err.to_string())?;
-            Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]).to_string()
-        }
-        0x03 => {
-            let mut len = [0_u8; 1];
-            client
-                .read_exact(&mut len)
-                .await
-                .map_err(|err| err.to_string())?;
-            let mut host = vec![0_u8; len[0] as usize];
-            client
-                .read_exact(&mut host)
-                .await
-                .map_err(|err| err.to_string())?;
-            String::from_utf8(host).map_err(|err| err.to_string())?
-        }
-        _ => return Err("unsupported atyp".to_string()),
-    };
-    let mut port_bytes = [0_u8; 2];
-    client
-        .read_exact(&mut port_bytes)
-        .await
-        .map_err(|err| err.to_string())?;
-    let port = u16::from_be_bytes(port_bytes);
+    let (host, port) = target_addr.into_string_and_port();
 
     let account_name = match pool.next_account_name().await {
         Ok(name) => name,
@@ -676,19 +689,7 @@ where
                 protocol = tracing::field::display("socks5"),
                 "no ready session"
             );
-            client
-                .write_all(&[
-                    0x05,
-                    SOCKS5_NETWORK_UNREACHABLE,
-                    0x00,
-                    0x01,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                ])
+            proto.reply_error(&ReplyError::NetworkUnreachable)
                 .await
                 .map_err(|err| err.to_string())?;
             return Ok(());
@@ -706,93 +707,39 @@ where
     let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
         Err(err) => {
-            write_socks5_failure_reply(&mut client, &err)
+            proto.reply_error(&map_socks5_reply_error(&err))
                 .await
                 .map_err(|reply_err| reply_err.to_string())?;
             return Ok(());
         }
     };
     let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Socks5));
+    let mut client = proto
+        .reply_success("127.0.0.1:0".parse().unwrap())
+        .await
+        .map_err(|err| err.to_string())?;
     relay_tunnel(&mut client, &mut upstream, connection.as_ref()).await
 }
 
 async fn handle_live_client(
-    mut client: TcpStream,
+    client: TcpStream,
     pool: SessionPool,
     stats: RuntimeStats,
     connect_timeout: Duration,
 ) -> Result<(), String> {
-    let mut greeting = [0_u8; 2];
-    client
-        .read_exact(&mut greeting)
+    let (proto, cmd, target_addr) = Socks5ServerProtocol::accept_no_auth(client)
+        .await
+        .map_err(|err| err.to_string())?
+        .read_command()
         .await
         .map_err(|err| err.to_string())?;
-    let methods_len = greeting[1] as usize;
-    let mut methods = vec![0_u8; methods_len];
-    client
-        .read_exact(&mut methods)
-        .await
-        .map_err(|err| err.to_string())?;
-    if !methods.contains(&0x00) {
-        client
-            .write_all(&[0x05, 0xff])
+    if cmd != Socks5Command::TCPConnect {
+        proto.reply_error(&ReplyError::CommandNotSupported)
             .await
             .map_err(|err| err.to_string())?;
         return Ok(());
     }
-    client
-        .write_all(&[0x05, 0x00])
-        .await
-        .map_err(|err| err.to_string())?;
-
-    let mut header = [0_u8; 4];
-    client
-        .read_exact(&mut header)
-        .await
-        .map_err(|err| err.to_string())?;
-    if header[1] != 0x01 {
-        write_socks5_failure_reply_with_code(&mut client, SOCKS5_COMMAND_NOT_SUPPORTED)
-            .await
-            .map_err(|err| err.to_string())?;
-        return Ok(());
-    }
-    let atyp = header[3];
-    if atyp != 0x01 && atyp != 0x03 {
-        write_socks5_failure_reply_with_code(&mut client, SOCKS5_ADDRESS_TYPE_NOT_SUPPORTED)
-            .await
-            .map_err(|err| err.to_string())?;
-        return Ok(());
-    }
-    let host = match atyp {
-        0x01 => {
-            let mut ip = [0_u8; 4];
-            client
-                .read_exact(&mut ip)
-                .await
-                .map_err(|err| err.to_string())?;
-            Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]).to_string()
-        }
-        0x03 => {
-            let mut len = [0_u8; 1];
-            client
-                .read_exact(&mut len)
-                .await
-                .map_err(|err| err.to_string())?;
-            let mut host = vec![0_u8; len[0] as usize];
-            client
-                .read_exact(&mut host)
-                .await
-                .map_err(|err| err.to_string())?;
-            String::from_utf8(host).map_err(|err| err.to_string())?
-        }
-        _ => return Err("unsupported atyp".to_string()),
-    };
-    let mut port_bytes = [0_u8; 2];
-    client
-        .read_exact(&mut port_bytes)
-        .await
-        .map_err(|err| err.to_string())?;
-    let port = u16::from_be_bytes(port_bytes);
+    let (host, port) = target_addr.into_string_and_port();
 
     let (account_name, session) = match pool.next_live_session().await {
         Ok(ready) => ready,
@@ -801,19 +748,7 @@ async fn handle_live_client(
                 protocol = tracing::field::display("socks5"),
                 "no ready session"
             );
-            client
-                .write_all(&[
-                    0x05,
-                    SOCKS5_NETWORK_UNREACHABLE,
-                    0x00,
-                    0x01,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                ])
+            proto.reply_error(&ReplyError::NetworkUnreachable)
                 .await
                 .map_err(|err| err.to_string())?;
             return Ok(());
@@ -839,7 +774,7 @@ async fn handle_live_client(
                 pool.report_live_session_failure(&account_name, err.label())
                     .await;
             }
-            write_socks5_failure_reply(&mut client, &err)
+            proto.reply_error(&map_socks5_reply_error(&err))
                 .await
                 .map_err(|reply_err| reply_err.to_string())?;
             return Ok(());
@@ -847,6 +782,10 @@ async fn handle_live_client(
     };
     stats.record_connect_success();
     let connection = stats.open_connection(ProxyProtocol::Socks5);
+    let mut client = proto
+        .reply_success("127.0.0.1:0".parse().unwrap())
+        .await
+        .map_err(|err| err.to_string())?;
     relay_tunnel(&mut client, &mut upstream, Some(&connection)).await
 }
 
@@ -855,10 +794,6 @@ async fn relay_tunnel(
     upstream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     connection: Option<&ConnectionGuard>,
 ) -> Result<(), String> {
-    client
-        .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
-        .await
-        .map_err(|err| err.to_string())?;
     let (client_to_upstream, upstream_to_client) = copy_bidirectional(client, upstream)
         .await
         .map_err(|err| err.to_string())?;
@@ -869,33 +804,11 @@ async fn relay_tunnel(
     Ok(())
 }
 
-async fn write_socks5_failure_reply(
-    client: &mut TcpStream,
-    _err: &UpstreamConnectError,
-) -> io::Result<()> {
-    write_socks5_failure_reply_with_code(client, SOCKS5_NETWORK_UNREACHABLE).await
+fn map_socks5_reply_error(_err: &UpstreamConnectError) -> ReplyError {
+    ReplyError::NetworkUnreachable
 }
 
-async fn write_socks5_failure_reply_with_code(
-    client: &mut TcpStream,
-    code: u8,
-) -> io::Result<()> {
-    client
-        .write_all(&[
-            0x05,
-            code,
-            0x00,
-            0x01,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ])
-        .await
-}
-
+#[cfg(any(test, debug_assertions))]
 async fn connect_with_timeout<T, E, Fut>(
     timeout: Duration,
     fut: Fut,
@@ -909,6 +822,37 @@ where
         Ok(Err(err)) => Err(UpstreamConnectError::Failed(format!("{err:?}"))),
         Err(_) => Err(UpstreamConnectError::TimedOut),
     }
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn read_socks5_reply(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+    let mut header = [0_u8; 4];
+    stream
+        .read_exact(&mut header)
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut reply = header.to_vec();
+    let remaining = match header[3] {
+        0x01 => 6,
+        0x04 => 18,
+        0x03 => {
+            let mut len = [0_u8; 1];
+            stream
+                .read_exact(&mut len)
+                .await
+                .map_err(|err| err.to_string())?;
+            reply.extend_from_slice(&len);
+            len[0] as usize + 2
+        }
+        atyp => return Err(format!("unexpected reply atyp: {atyp}")),
+    };
+    let mut tail = vec![0_u8; remaining];
+    stream
+        .read_exact(&mut tail)
+        .await
+        .map_err(|err| err.to_string())?;
+    reply.extend_from_slice(&tail);
+    Ok(reply)
 }
 
 async fn connect_session_with_timeout<Fut>(
