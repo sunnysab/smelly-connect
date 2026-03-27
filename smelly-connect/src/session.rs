@@ -527,6 +527,23 @@ pub mod tests {
         )
     }
 
+    pub fn session_with_icmp_result(success: bool) -> EasyConnectSession {
+        let transport = ready_transport().with_icmp_pinger(move |_| async move {
+            if success {
+                Ok(())
+            } else {
+                Err(io::Error::other("forced icmp failure"))
+            }
+        });
+
+        EasyConnectSession::new(
+            Ipv4Addr::new(10, 0, 0, 8),
+            ResourceSet::default(),
+            SessionResolver::new(HashMap::new(), None, HashMap::new()),
+            transport,
+        )
+    }
+
     fn ready_session(host: &str, ip: Ipv4Addr) -> EasyConnectSession {
         let mut resources = ResourceSet::default();
         resources.domain_rules.insert(

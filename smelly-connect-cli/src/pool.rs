@@ -380,6 +380,16 @@ impl SessionPool {
     }
 
     #[cfg(any(test, debug_assertions))]
+    pub async fn from_live_sessions_with_keepalive_target_for_test(
+        entries: Vec<(&str, Session)>,
+        keepalive_target: &str,
+    ) -> Self {
+        let mut pool = Self::from_live_sessions_for_test(entries).await;
+        pool.keepalive_target = Some(keepalive_target.to_string());
+        pool
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub async fn from_test_outcomes<const N: usize>(
         outcomes: [Result<&str, &str>; N],
         prewarm: usize,

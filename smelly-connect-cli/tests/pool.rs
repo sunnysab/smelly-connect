@@ -230,3 +230,43 @@ async fn live_session_failure_opens_node_and_request_triggered_probe_can_recover
     let recovered = pool.try_request_triggered_probe_for_test().await.unwrap();
     assert_eq!(recovered.account_name(), "acct-01");
 }
+
+#[tokio::test]
+async fn successful_vpn_probe_keeps_live_session_selectable() {
+    let session = smelly_connect::session::tests::session_with_icmp_result(true);
+    let pool = smelly_connect_cli::pool::SessionPool::from_live_sessions_with_keepalive_target_for_test(
+        vec![("acct-01", session.clone())],
+        "vpn1.sit.edu.cn",
+    )
+    .await;
+
+    pool.report_live_session_unhealthy_if_probe_fails(
+        "acct-01",
+        &session,
+        "forced target failure",
+    )
+    .await;
+
+    assert!(pool.state_summary_for_test().await.contains("Ready"));
+    assert!(pool.has_selectable_nodes_for_test().await);
+}
+
+#[tokio::test]
+async fn repeated_vpn_probe_failures_mark_live_session_open() {
+    let session = smelly_connect::session::tests::session_with_icmp_result(false);
+    let pool = smelly_connect_cli::pool::SessionPool::from_live_sessions_with_keepalive_target_for_test(
+        vec![("acct-01", session.clone())],
+        "vpn1.sit.edu.cn",
+    )
+    .await;
+
+    pool.report_live_session_unhealthy_if_probe_fails(
+        "acct-01",
+        &session,
+        "forced target failure",
+    )
+    .await;
+
+    assert!(pool.state_summary_for_test().await.contains("Open"));
+    assert!(!pool.has_selectable_nodes_for_test().await);
+}
