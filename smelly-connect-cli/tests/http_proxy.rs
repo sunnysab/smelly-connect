@@ -9,6 +9,14 @@ async fn http_proxy_uses_pool_and_forwards_requests() {
 }
 
 #[tokio::test]
+async fn http_proxy_supports_origin_form_requests() {
+    let result = smelly_connect_cli::proxy::http::proxy_http_origin_form_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.body, "ok");
+}
+
+#[tokio::test]
 async fn http_proxy_completes_body_when_upstream_keeps_connection_alive() {
     let result = smelly_connect_cli::proxy::http::proxy_http_body_completes_for_keep_alive_upstream_for_test()
         .await

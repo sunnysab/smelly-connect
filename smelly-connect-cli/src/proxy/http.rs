@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 #[cfg(any(test, debug_assertions))]
 use std::future::Future;
 use std::io;
@@ -7,9 +8,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(any(test, debug_assertions))]
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
+use bytes::Bytes;
+use http::header::{CONNECTION, EXPECT, HOST, PROXY_AUTHORIZATION};
+use http::{HeaderValue, Method, Request, Response, StatusCode, Uri};
+use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
+use hyper::body::Incoming;
+use hyper::server::conn::http1 as hyper_server_http1;
+use hyper::service::service_fn;
+use hyper::upgrade;
+use hyper_util::rt::TokioIo;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
@@ -20,6 +28,8 @@ use crate::pool::SessionPool;
 #[cfg(any(test, debug_assertions))]
 use crate::runtime::RuntimeSnapshot;
 use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
+
+type ProxyBody = BoxBody<Bytes, Infallible>;
 
 #[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
@@ -54,13 +64,6 @@ pub struct TimeoutTestResult {
     pub elapsed: Duration,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum RequestBodyKind {
-    None,
-    ContentLength(usize),
-    Chunked,
-}
-
 #[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
 pub struct LiveFailureRecoveryTestResult {
@@ -70,6 +73,7 @@ pub struct LiveFailureRecoveryTestResult {
     pub recovered_account: String,
 }
 
+#[cfg(any(test, debug_assertions))]
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
@@ -136,6 +140,38 @@ pub async fn proxy_http_for_test() -> Result<HttpProxyTestResult, String> {
         account_name,
         used_pool_selection: true,
     })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_origin_form_for_test() -> Result<HttpBodyTestResult, String> {
+    let upstream = spawn_http_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
+        TcpStream::connect(upstream).await
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"GET /health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    Ok(HttpBodyTestResult { body })
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -727,6 +763,12 @@ pub async fn proxy_http_live_failure_for_test() -> Result<(), String> {
                 error = %err,
                 "live proxy request failed"
             );
+        } else {
+            tracing::warn!(
+                protocol = tracing::field::display("http"),
+                error = "connection closed before request completed",
+                "live proxy request failed"
+            );
         }
     });
 
@@ -740,17 +782,6 @@ pub async fn proxy_http_live_failure_for_test() -> Result<(), String> {
     let _ = client.shutdown().await;
     tokio::time::sleep(Duration::from_millis(20)).await;
     Ok(())
-}
-
-#[cfg(any(test, debug_assertions))]
-struct ForwardRequest<'a> {
-    method: &'a str,
-    target: &'a str,
-    version: &'a str,
-    headers: Vec<&'a str>,
-    leftover: Vec<u8>,
-    body_kind: RequestBodyKind,
-    expect_continue: bool,
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -874,7 +905,7 @@ async fn request_connect_status(addr: SocketAddr) -> Result<NoReadySessionResult
 
 #[cfg(any(test, debug_assertions))]
 async fn handle_client<F, Fut>(
-    mut client: TcpStream,
+    client: TcpStream,
     pool: SessionPool,
     stats: Option<RuntimeStats>,
     connect_timeout: Duration,
@@ -884,25 +915,61 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    let mut buffer = Vec::with_capacity(1024);
-    let header_end = read_headers(&mut client, &mut buffer)
+    let io = TokioIo::new(client);
+    hyper_server_http1::Builder::new()
+        .half_close(true)
+        .serve_connection(
+            io,
+            service_fn(move |request| {
+                let pool = pool.clone();
+                let stats = stats.clone();
+                let connector = connector.clone();
+                async move {
+                    Ok::<_, Infallible>(
+                        handle_test_request(request, pool, stats, connect_timeout, connector).await,
+                    )
+                }
+            }),
+        )
+        .with_upgrades()
         .await
-        .map_err(|err| err.to_string())?;
-    let header_bytes = &buffer[..header_end];
-    let leftover = buffer[header_end..].to_vec();
-    let header_text = String::from_utf8_lossy(header_bytes);
-    let mut lines = header_text.split("\r\n").filter(|line| !line.is_empty());
-    let request_line = lines
-        .next()
-        .ok_or_else(|| "missing request line".to_string())?;
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default();
-    let target = parts.next().unwrap_or_default();
-    let version = parts.next().unwrap_or("HTTP/1.1");
-    let headers: Vec<&str> = lines.collect();
-    let body_kind = parse_request_body_kind(&headers);
-    let expect_continue = has_expect_100_continue(&headers);
+        .map_err(|err| err.to_string())
+}
 
+async fn handle_live_client(
+    client: TcpStream,
+    pool: SessionPool,
+    stats: RuntimeStats,
+    connect_timeout: Duration,
+) -> Result<(), String> {
+    let io = TokioIo::new(client);
+    hyper_server_http1::Builder::new()
+        .half_close(true)
+        .serve_connection(
+            io,
+            service_fn(move |request| {
+                let pool = pool.clone();
+                let stats = stats.clone();
+                async move { Ok::<_, Infallible>(handle_live_request(request, pool, stats, connect_timeout).await) }
+            }),
+        )
+        .with_upgrades()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn handle_test_request<F, Fut>(
+    request: Request<Incoming>,
+    pool: SessionPool,
+    stats: Option<RuntimeStats>,
+    connect_timeout: Duration,
+    connector: F,
+) -> Response<ProxyBody>
+where
+    F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
+{
     let account_name = match pool.next_account_name().await {
         Ok(name) => name,
         Err(_) => {
@@ -910,33 +977,43 @@ where
                 protocol = tracing::field::display("http"),
                 "no ready session"
             );
-            client
-                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .await
-                .map_err(|err| err.to_string())?;
-            return Ok(());
+            return empty_response(StatusCode::SERVICE_UNAVAILABLE);
         }
     };
 
-    if method.eq_ignore_ascii_case("CONNECT") {
+    if request.method() == Method::CONNECT {
+        let (host, port, target) = match resolve_connect_target(&request) {
+            Ok(target) => target,
+            Err(_) => return empty_response(StatusCode::BAD_REQUEST),
+        };
         tracing::info!(
             protocol = tracing::field::display("connect"),
             target = %target,
             account = %account_name,
             "request accepted"
         );
-        return handle_connect(
-            account_name,
-            connector,
-            client,
-            target,
-            leftover,
-            connect_timeout,
-            stats.as_ref(),
-        )
-        .await;
+        let on_upgrade = upgrade::on(request);
+        let upstream = connector(account_name, host, port);
+        let upstream = match connect_with_timeout(connect_timeout, upstream).await {
+            Ok(upstream) => upstream,
+            Err(err) => return gateway_error_response(&err),
+        };
+        let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
+        tokio::spawn(async move {
+            let Ok(upgraded) = on_upgrade.await else {
+                return;
+            };
+            let mut client = TokioIo::new(upgraded);
+            let mut upstream = upstream;
+            let _ = relay_upgraded_tunnel(&mut client, &mut upstream, connection.as_ref()).await;
+        });
+        return connect_established_response();
     }
 
+    let (host, port, target, uri) = match resolve_forward_target(&request) {
+        Ok(target) => target,
+        Err(_) => return empty_response(StatusCode::BAD_REQUEST),
+    };
     tracing::info!(
         protocol = tracing::field::display("http"),
         target = %target,
@@ -944,50 +1021,21 @@ where
         "request accepted"
     );
 
-    handle_forward(
-        account_name,
-        connector,
-        client,
-        connect_timeout,
-        stats.as_ref(),
-        ForwardRequest {
-            method,
-            target,
-            version,
-            headers,
-            leftover,
-            body_kind,
-            expect_continue,
-        },
-    )
-    .await
+    let upstream = connector(account_name, host, port);
+    let upstream = match connect_with_timeout(connect_timeout, upstream).await {
+        Ok(upstream) => upstream,
+        Err(err) => return gateway_error_response(&err),
+    };
+    let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
+    forward_request(request, uri, upstream, connection.as_ref()).await
 }
 
-async fn handle_live_client(
-    mut client: TcpStream,
+async fn handle_live_request(
+    request: Request<Incoming>,
     pool: SessionPool,
     stats: RuntimeStats,
     connect_timeout: Duration,
-) -> Result<(), String> {
-    let mut buffer = Vec::with_capacity(1024);
-    let header_end = read_headers(&mut client, &mut buffer)
-        .await
-        .map_err(|err| err.to_string())?;
-    let header_bytes = &buffer[..header_end];
-    let leftover = buffer[header_end..].to_vec();
-    let header_text = String::from_utf8_lossy(header_bytes);
-    let mut lines = header_text.split("\r\n").filter(|line| !line.is_empty());
-    let request_line = lines
-        .next()
-        .ok_or_else(|| "missing request line".to_string())?;
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default();
-    let target = parts.next().unwrap_or_default();
-    let version = parts.next().unwrap_or("HTTP/1.1");
-    let headers: Vec<&str> = lines.collect();
-    let body_kind = parse_request_body_kind(&headers);
-    let expect_continue = has_expect_100_continue(&headers);
-
+)-> Response<ProxyBody> {
     let (account_name, session) = match pool.next_live_session().await {
         Ok(ready) => ready,
         Err(_) => {
@@ -995,26 +1043,24 @@ async fn handle_live_client(
                 protocol = tracing::field::display("http"),
                 "no ready session"
             );
-            client
-                .write_all(
-                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .await
-                .map_err(|err| err.to_string())?;
-            return Ok(());
+            return empty_response(StatusCode::SERVICE_UNAVAILABLE);
         }
     };
 
-    if method.eq_ignore_ascii_case("CONNECT") {
+    if request.method() == Method::CONNECT {
+        let (host, port, target) = match resolve_connect_target(&request) {
+            Ok(target) => target,
+            Err(_) => return empty_response(StatusCode::BAD_REQUEST),
+        };
         tracing::info!(
             protocol = tracing::field::display("connect"),
             target = %target,
             account = %account_name,
             "request accepted"
         );
-        let (host, port) = split_host_port(target, 443)?;
-        let upstream = session.connect_tcp((host, port));
-        let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
+        let on_upgrade = upgrade::on(request);
+        let upstream = session.connect_tcp((host.as_str(), port));
+        let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
             Ok(upstream) => upstream,
             Err(err) => {
                 if !matches!(
@@ -1025,31 +1071,26 @@ async fn handle_live_client(
                     pool.report_live_session_failure(&account_name, err.label())
                         .await;
                 }
-                write_gateway_error_response(&mut client, &err).await?;
-                return Ok(());
+                return gateway_error_response(&err);
             }
         };
         stats.record_connect_success();
         let connection = stats.open_connection(ProxyProtocol::Http);
-        client
-            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            .await
-            .map_err(|err| err.to_string())?;
-        if !leftover.is_empty() {
-            upstream
-                .write_all(&leftover)
-                .await
-                .map_err(|err| err.to_string())?;
-            record_client_to_upstream(Some(&connection), leftover.len());
-        }
-        let (client_to_upstream, upstream_to_client) =
-            copy_bidirectional(&mut client, &mut upstream)
-                .await
-                .map_err(|err| err.to_string())?;
-        record_tunnel_transfer(Some(&connection), client_to_upstream, upstream_to_client);
-        return Ok(());
+        tokio::spawn(async move {
+            let Ok(upgraded) = on_upgrade.await else {
+                return;
+            };
+            let mut client = TokioIo::new(upgraded);
+            let mut upstream = upstream;
+            let _ = relay_upgraded_tunnel(&mut client, &mut upstream, Some(&connection)).await;
+        });
+        return connect_established_response();
     }
 
+    let (host, port, target, uri) = match resolve_forward_target(&request) {
+        Ok(target) => target,
+        Err(_) => return empty_response(StatusCode::BAD_REQUEST),
+    };
     tracing::info!(
         protocol = tracing::field::display("http"),
         target = %target,
@@ -1057,9 +1098,8 @@ async fn handle_live_client(
         "request accepted"
     );
 
-    let (host, port, path) = parse_absolute_target(target)?;
     let upstream = session.connect_tcp((host.as_str(), port));
-    let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
+    let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
         Err(err) => {
             if !matches!(
@@ -1070,140 +1110,174 @@ async fn handle_live_client(
                 pool.report_live_session_failure(&account_name, err.label())
                     .await;
             }
-            write_gateway_error_response(&mut client, &err).await?;
-            return Ok(());
+            return gateway_error_response(&err);
         }
     };
     stats.record_connect_success();
     let connection = stats.open_connection(ProxyProtocol::Http);
-
-    let mut upstream_request = format!("{method} {path} {version}\r\n");
-    for header in &headers {
-        let lower = header.to_ascii_lowercase();
-        if lower.starts_with("proxy-connection:")
-            || lower.starts_with("proxy-authorization:")
-            || lower.starts_with("connection:")
-            || lower.starts_with("keep-alive:")
-            || lower.starts_with("expect:")
-        {
-            continue;
-        }
-        upstream_request.push_str(header);
-        upstream_request.push_str("\r\n");
-    }
-    upstream_request.push_str("Connection: close\r\n");
-    upstream_request.push_str("\r\n");
-
-    relay_forward_stream(
-        &mut client,
-        &mut upstream,
-        &upstream_request,
-        &leftover,
-        body_kind,
-        expect_continue,
-        Some(&connection),
-    )
-    .await
+    forward_request(request, uri, upstream, Some(&connection)).await
 }
 
-#[cfg(any(test, debug_assertions))]
-async fn handle_connect<F, Fut>(
-    account_name: String,
-    connector: F,
-    mut client: TcpStream,
-    target: &str,
-    leftover: Vec<u8>,
-    connect_timeout: Duration,
-    stats: Option<&RuntimeStats>,
-) -> Result<(), String>
-where
-    F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
-{
-    let (host, port) = split_host_port(target, 443)?;
-    let upstream = connector(account_name, host.to_string(), port);
-    let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
-        Ok(upstream) => upstream,
-        Err(err) => {
-            write_gateway_error_response(&mut client, &err).await?;
-            return Ok(());
+fn empty_response(status: StatusCode) -> Response<ProxyBody> {
+    let mut response = Response::new(Empty::<Bytes>::new().boxed());
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert(CONNECTION, HeaderValue::from_static("close"));
+    response
+}
+
+fn connect_established_response() -> Response<ProxyBody> {
+    let mut response = Response::new(Empty::<Bytes>::new().boxed());
+    *response.status_mut() = StatusCode::OK;
+    response
+}
+
+fn gateway_error_response(err: &UpstreamConnectError) -> Response<ProxyBody> {
+    let status = match err {
+        UpstreamConnectError::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+        UpstreamConnectError::Failed(_) | UpstreamConnectError::RouteRejected => {
+            StatusCode::BAD_GATEWAY
         }
     };
-    let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
-    relay_connect_tunnel(&mut client, &mut upstream, &leftover, connection.as_ref()).await
+    empty_response(status)
 }
 
-#[cfg(any(test, debug_assertions))]
-async fn handle_forward<F, Fut>(
-    account_name: String,
-    connector: F,
-    mut client: TcpStream,
-    connect_timeout: Duration,
-    stats: Option<&RuntimeStats>,
-    request: ForwardRequest<'_>,
-) -> Result<(), String>
-where
-    F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
-{
-    let (host, port, path) = parse_absolute_target(request.target)?;
-    let upstream = connector(account_name, host.clone(), port);
-    let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
-        Ok(upstream) => upstream,
-        Err(err) => {
-            write_gateway_error_response(&mut client, &err).await?;
-            return Ok(());
-        }
-    };
-    let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
+fn resolve_forward_target(
+    request: &Request<Incoming>,
+) -> Result<(String, u16, String, Uri), String> {
+    let authority = request
+        .uri()
+        .authority()
+        .map(|authority| authority.as_str().to_string())
+        .or_else(|| {
+            request
+                .headers()
+                .get(HOST)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.to_string())
+        })
+        .ok_or_else(|| "missing host".to_string())?;
+    let (host, port) = split_host_port(&authority, 80)?;
+    let path_and_query = request
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    let uri = path_and_query.parse::<Uri>().map_err(|err| err.to_string())?;
+    let target = format!("{host}:{port}{path_and_query}");
+    Ok((host.to_string(), port, target, uri))
+}
 
-    let mut upstream_request = format!("{} {path} {}\r\n", request.method, request.version);
-    for header in request.headers {
-        let lower = header.to_ascii_lowercase();
-        if lower.starts_with("proxy-connection:")
-            || lower.starts_with("proxy-authorization:")
-            || lower.starts_with("connection:")
-            || lower.starts_with("keep-alive:")
-            || lower.starts_with("expect:")
-        {
+fn resolve_connect_target(request: &Request<Incoming>) -> Result<(String, u16, String), String> {
+    let target = request
+        .uri()
+        .authority()
+        .map(|authority| authority.as_str().to_string())
+        .or_else(|| {
+            let path = request.uri().path();
+            (!path.is_empty() && path != "/").then(|| path.to_string())
+        })
+        .ok_or_else(|| "missing connect authority".to_string())?;
+    let (host, port) = split_host_port(&target, 443)?;
+    Ok((host.to_string(), port, target))
+}
+
+async fn forward_request(
+    request: Request<Incoming>,
+    uri: Uri,
+    mut upstream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    connection: Option<&ConnectionGuard>,
+) -> Response<ProxyBody> {
+    let (parts, mut body) = request.into_parts();
+    let mut upstream_request = format!(
+        "{} {} {}\r\n",
+        parts.method,
+        uri,
+        http_version_text(parts.version)
+    );
+    let mut forwarded_headers = http::HeaderMap::new();
+    for (name, value) in &parts.headers {
+        if should_strip_request_header(name) {
             continue;
         }
-        upstream_request.push_str(header);
+        forwarded_headers.insert(name.clone(), value.clone());
+        upstream_request.push_str(name.as_str());
+        upstream_request.push_str(": ");
+        upstream_request.push_str(&String::from_utf8_lossy(value.as_bytes()));
         upstream_request.push_str("\r\n");
     }
-    upstream_request.push_str("Connection: close\r\n");
-    upstream_request.push_str("\r\n");
+    forwarded_headers.insert(CONNECTION, HeaderValue::from_static("close"));
+    upstream_request.push_str("Connection: close\r\n\r\n");
 
-    relay_forward_stream(
-        &mut client,
-        &mut upstream,
-        &upstream_request,
-        &request.leftover,
-        request.body_kind,
-        request.expect_continue,
-        connection.as_ref(),
-    )
-    .await
+    record_client_to_upstream(
+        connection,
+        estimate_request_size(
+            &parts.method,
+            &uri,
+            parts.version,
+            &forwarded_headers,
+            0,
+        ),
+    );
+
+    if upstream
+        .write_all(upstream_request.as_bytes())
+        .await
+        .is_err()
+    {
+        return empty_response(StatusCode::BAD_GATEWAY);
+    }
+
+    let chunked_request = forwarded_headers
+        .get(http::header::TRANSFER_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        });
+
+    while let Some(frame) = body.frame().await {
+        let Ok(frame) = frame else {
+            return empty_response(StatusCode::BAD_GATEWAY);
+        };
+        if let Some(data) = frame.data_ref() {
+            if chunked_request {
+                let prefix = format!("{:X}\r\n", data.len());
+                if upstream.write_all(prefix.as_bytes()).await.is_err()
+                    || upstream.write_all(data).await.is_err()
+                    || upstream.write_all(b"\r\n").await.is_err()
+                {
+                    return empty_response(StatusCode::BAD_GATEWAY);
+                }
+                record_client_to_upstream(connection, prefix.len() + data.len() + 2);
+            } else {
+                if upstream.write_all(data).await.is_err() {
+                    return empty_response(StatusCode::BAD_GATEWAY);
+                }
+                record_client_to_upstream(connection, data.len());
+            }
+        }
+    }
+    if chunked_request {
+        if upstream.write_all(b"0\r\n\r\n").await.is_err() {
+            return empty_response(StatusCode::BAD_GATEWAY);
+        }
+        record_client_to_upstream(connection, 5);
+    }
+
+    match read_upstream_response(&mut upstream, connection).await {
+        Ok(response) => response,
+        Err(_) => empty_response(StatusCode::BAD_GATEWAY),
+    }
 }
 
-#[cfg(any(test, debug_assertions))]
-async fn relay_connect_tunnel(
-    client: &mut TcpStream,
+async fn relay_upgraded_tunnel(
+    client: &mut (impl AsyncRead + AsyncWrite + Unpin),
     upstream: &mut (impl AsyncRead + AsyncWrite + Unpin),
-    leftover: &[u8],
     connection: Option<&ConnectionGuard>,
 ) -> Result<(), String> {
-    client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await
-        .map_err(|err| err.to_string())?;
-    if !leftover.is_empty() {
-        upstream
-            .write_all(leftover)
-            .await
-            .map_err(|err| err.to_string())?;
-        record_client_to_upstream(connection, leftover.len());
-    }
     let (client_to_upstream, upstream_to_client) = copy_bidirectional(client, upstream)
         .await
         .map_err(|err| err.to_string())?;
@@ -1211,101 +1285,114 @@ async fn relay_connect_tunnel(
     Ok(())
 }
 
-#[cfg(any(test, debug_assertions))]
-async fn relay_forward_stream(
-    client: &mut TcpStream,
-    upstream: &mut (impl AsyncRead + AsyncWrite + Unpin),
-    upstream_request: &str,
-    leftover: &[u8],
-    body_kind: RequestBodyKind,
-    expect_continue: bool,
-    connection: Option<&ConnectionGuard>,
-) -> Result<(), String> {
-    upstream
-        .write_all(upstream_request.as_bytes())
-        .await
-        .map_err(|err| err.to_string())?;
-    record_client_to_upstream(connection, upstream_request.len());
-    if !leftover.is_empty() {
-        upstream
-            .write_all(leftover)
-            .await
-            .map_err(|err| err.to_string())?;
-        record_client_to_upstream(connection, leftover.len());
-    }
-    if expect_continue {
-        client
-            .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
-            .await
-            .map_err(|err| err.to_string())?;
-    }
-    stream_remaining_request_body(client, upstream, leftover, body_kind, connection).await?;
-    let upstream_to_client = tokio::io::copy(upstream, client)
-        .await
-        .map_err(|err| err.to_string())?;
-    record_upstream_to_client(connection, upstream_to_client);
-    Ok(())
+fn should_strip_request_header(name: &http::header::HeaderName) -> bool {
+    let lower = name.as_str();
+    lower.eq_ignore_ascii_case("proxy-connection")
+        || name == PROXY_AUTHORIZATION
+        || name == CONNECTION
+        || lower.eq_ignore_ascii_case("keep-alive")
+        || name == EXPECT
 }
 
-async fn stream_remaining_request_body(
-    client: &mut TcpStream,
-    upstream: &mut (impl AsyncWrite + Unpin),
-    leftover: &[u8],
-    body_kind: RequestBodyKind,
+fn estimate_request_size(
+    method: &Method,
+    uri: &Uri,
+    version: http::Version,
+    headers: &http::HeaderMap<HeaderValue>,
+    body_len: usize,
+) -> usize {
+    let request_line = format!(
+        "{} {} {}\r\n",
+        method.as_str(),
+        uri,
+        http_version_text(version)
+    );
+    request_line.len()
+        + headers
+            .iter()
+            .map(|(name, value)| name.as_str().len() + 2 + value.as_bytes().len() + 2)
+            .sum::<usize>()
+        + 2
+        + body_len
+}
+
+async fn read_upstream_response(
+    upstream: &mut (impl AsyncRead + Unpin),
     connection: Option<&ConnectionGuard>,
-) -> Result<(), String> {
-    match body_kind {
-        RequestBodyKind::None => Ok(()),
-        RequestBodyKind::ContentLength(content_length) => {
-            if leftover.len() >= content_length {
-                return Ok(());
-            }
-
-            let mut remaining = content_length - leftover.len();
-            let mut buffer = [0_u8; 8192];
-            while remaining > 0 {
-                let limit = remaining.min(buffer.len());
-                let n = client
-                    .read(&mut buffer[..limit])
-                    .await
-                    .map_err(|err| err.to_string())?;
-                if n == 0 {
-                    return Err("connection closed before request body completed".to_string());
-                }
-                upstream
-                    .write_all(&buffer[..n])
-                    .await
-                    .map_err(|err| err.to_string())?;
-                record_client_to_upstream(connection, n);
-                remaining -= n;
-            }
-            Ok(())
-        }
-        RequestBodyKind::Chunked => {
-            let mut tracker = ChunkedBodyTracker::new();
-            if tracker.feed(leftover).map_err(|err| err.to_string())? {
-                return Ok(());
-            }
-
-            let mut buffer = [0_u8; 8192];
+) -> Result<Response<ProxyBody>, String> {
+    let mut buffer = Vec::with_capacity(1024);
+    let header_end = read_headers(upstream, &mut buffer)
+        .await
+        .map_err(|err| err.to_string())?;
+    let header_bytes = &buffer[..header_end];
+    let header_text = String::from_utf8_lossy(header_bytes);
+    let mut lines = header_text.split("\r\n").filter(|line| !line.is_empty());
+    let status_line = lines.next().ok_or_else(|| "missing status line".to_string())?;
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+    let header_lines: Vec<&str> = lines.collect();
+    let mut body = buffer[header_end..].to_vec();
+    if has_chunked_transfer_encoding(&header_lines) {
+        let mut tracker = ChunkedBodyTracker::new();
+        if !tracker.feed(&body).map_err(|err| err.to_string())? {
+            let mut chunk = [0_u8; 8192];
             loop {
-                let n = client
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|err| err.to_string())?;
+                let n = upstream.read(&mut chunk).await.map_err(|err| err.to_string())?;
                 if n == 0 {
-                    return Err("connection closed before chunked request body completed".to_string());
+                    return Err("connection closed before chunked response completed".to_string());
                 }
-                upstream
-                    .write_all(&buffer[..n])
-                    .await
-                    .map_err(|err| err.to_string())?;
-                record_client_to_upstream(connection, n);
-                if tracker.feed(&buffer[..n]).map_err(|err| err.to_string())? {
-                    return Ok(());
+                body.extend_from_slice(&chunk[..n]);
+                if tracker.feed(&chunk[..n]).map_err(|err| err.to_string())? {
+                    break;
                 }
             }
         }
+    } else if let Some(content_length) = parse_content_length(&header_lines) {
+        while body.len() < content_length {
+            let mut chunk = [0_u8; 8192];
+            let n = upstream.read(&mut chunk).await.map_err(|err| err.to_string())?;
+            if n == 0 {
+                return Err("connection closed before response body completed".to_string());
+            }
+            body.extend_from_slice(&chunk[..n]);
+        }
+        body.truncate(content_length);
+    } else if !(100..200).contains(&status_code) && status_code != 204 && status_code != 304 {
+        upstream
+            .read_to_end(&mut body)
+            .await
+            .map_err(|err| err.to_string())?;
+    }
+
+    record_upstream_to_client(connection, body.len() as u64);
+    let mut builder = Response::builder().status(status_code);
+    for header in header_lines {
+        if let Some((name, value)) = header.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("connection")
+                || name.trim().eq_ignore_ascii_case("keep-alive")
+            {
+                continue;
+            }
+            builder = builder.header(name.trim(), value.trim());
+        }
+    }
+    builder = builder.header(CONNECTION, "close");
+    builder
+        .body(Full::new(Bytes::from(body)).boxed())
+        .map_err(|err| err.to_string())
+}
+
+fn http_version_text(version: http::Version) -> &'static str {
+    match version {
+        http::Version::HTTP_09 => "HTTP/0.9",
+        http::Version::HTTP_10 => "HTTP/1.0",
+        http::Version::HTTP_11 => "HTTP/1.1",
+        http::Version::HTTP_2 => "HTTP/2.0",
+        http::Version::HTTP_3 => "HTTP/3.0",
+        _ => "HTTP/1.1",
     }
 }
 
@@ -1332,6 +1419,7 @@ fn record_tunnel_transfer(
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn connect_with_timeout<T, E, Fut>(
     timeout: Duration,
     fut: Fut,
@@ -1369,28 +1457,10 @@ where
     }
 }
 
-async fn write_gateway_error_response(
-    client: &mut TcpStream,
-    err: &UpstreamConnectError,
-) -> Result<(), String> {
-    let status = match err {
-        UpstreamConnectError::TimedOut => "504 Gateway Timeout",
-        UpstreamConnectError::Failed(message) => {
-            let _ = message;
-            "502 Bad Gateway"
-        }
-        UpstreamConnectError::RouteRejected => "502 Bad Gateway",
-    };
-    client
-        .write_all(
-            format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .as_bytes(),
-        )
-        .await
-        .map_err(|err| err.to_string())
-}
-
-async fn read_headers(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> io::Result<usize> {
+async fn read_headers(
+    stream: &mut (impl AsyncRead + Unpin),
+    buffer: &mut Vec<u8>,
+) -> io::Result<usize> {
     let mut chunk = [0_u8; 1024];
     loop {
         let n = stream.read(&mut chunk).await?;
@@ -1433,27 +1503,6 @@ fn has_chunked_transfer_encoding(headers: &[&str]) -> bool {
                     .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
         })
     })
-}
-
-fn has_expect_100_continue(headers: &[&str]) -> bool {
-    headers.iter().any(|header| {
-        header.split_once(':').is_some_and(|(name, value)| {
-            name.eq_ignore_ascii_case("expect")
-                && value
-                    .split(',')
-                    .any(|token| token.trim().eq_ignore_ascii_case("100-continue"))
-        })
-    })
-}
-
-fn parse_request_body_kind(headers: &[&str]) -> RequestBodyKind {
-    if has_chunked_transfer_encoding(headers) {
-        RequestBodyKind::Chunked
-    } else if let Some(content_length) = parse_content_length(headers) {
-        RequestBodyKind::ContentLength(content_length)
-    } else {
-        RequestBodyKind::None
-    }
 }
 
 struct ChunkedBodyTracker {
@@ -1532,17 +1581,6 @@ impl ChunkedBodyTracker {
         }
         Ok(matches!(self.state, ChunkedState::Done))
     }
-}
-
-fn parse_absolute_target(target: &str) -> Result<(String, u16, String), String> {
-    let without_scheme = target
-        .strip_prefix("http://")
-        .ok_or_else(|| "unsupported scheme".to_string())?;
-    let mut parts = without_scheme.splitn(2, '/');
-    let authority = parts.next().unwrap_or_default();
-    let path = format!("/{}", parts.next().unwrap_or_default());
-    let (host, port) = split_host_port(authority, 80)?;
-    Ok((host.to_string(), port, path))
 }
 
 fn split_host_port(target: &str, default_port: u16) -> Result<(&str, u16), String> {
