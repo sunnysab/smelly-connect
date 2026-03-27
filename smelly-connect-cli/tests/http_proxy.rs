@@ -179,6 +179,14 @@ async fn http_connect_timeout_does_not_mark_live_session_open() {
 }
 
 #[tokio::test]
+async fn http_immediate_transport_timeout_returns_gateway_timeout() {
+    let result = smelly_connect_cli::proxy::http::proxy_http_immediate_timeout_status_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.status_code, 504);
+}
+
+#[tokio::test]
 async fn http_live_connect_failure_returns_without_waiting_for_vpn_probe() {
     let result =
         smelly_connect_cli::proxy::http::proxy_http_live_connect_failure_does_not_wait_for_probe_for_test()

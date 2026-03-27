@@ -44,6 +44,21 @@ async fn session_connect_tcp_returns_async_stream() {
 }
 
 #[tokio::test]
+async fn session_connect_tcp_preserves_timeout_as_structured_transport_error() {
+    let session = smelly_connect::session::tests::session_with_immediate_timeout_domain_match(
+        "jwxt.sit.edu.cn",
+        "10.0.0.8".parse().unwrap(),
+    );
+    match session.connect_tcp(("jwxt.sit.edu.cn", 443)).await {
+        Err(smelly_connect::Error::Transport(
+            smelly_connect::error::TransportError::ConnectTimedOut,
+        )) => {}
+        Err(other) => panic!("unexpected error: {other:?}"),
+        Ok(_) => panic!("expected timeout error"),
+    }
+}
+
+#[tokio::test]
 async fn session_bind_udp_returns_datagram_handle() {
     let harness = smelly_connect::session::tests::login_harness();
     let session = harness.ready_session().await;

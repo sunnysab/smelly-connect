@@ -1,4 +1,5 @@
 use std::fmt::{Display, Formatter};
+use std::io;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -52,7 +53,9 @@ pub enum TunnelBootstrapError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportError {
+    ConnectTimedOut,
     ConnectFailed(String),
+    ConnectionClosed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,3 +88,16 @@ impl Display for CaptchaError {
 }
 
 impl std::error::Error for CaptchaError {}
+
+impl TransportError {
+    pub fn from_io(err: io::Error) -> Self {
+        match err.kind() {
+            io::ErrorKind::TimedOut => Self::ConnectTimedOut,
+            io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::UnexpectedEof => Self::ConnectionClosed,
+            _ => Self::ConnectFailed(err.to_string()),
+        }
+    }
+}

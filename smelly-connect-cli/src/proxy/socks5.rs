@@ -681,6 +681,18 @@ pub async fn proxy_socks5_allow_all_failure_does_not_open_for_test()
 }
 
 #[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_live_timeout_reply_for_test() -> Result<Socks5FailureResult, String> {
+    let session = smelly_connect::session::tests::session_with_immediate_timeout_domain_match(
+        "libdb.zju.edu.cn",
+        std::net::Ipv4Addr::new(10, 0, 0, 8),
+    );
+    let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+    let addr = spawn_live_test_socks5(pool, RuntimeStats::default(), DEFAULT_CONNECT_TIMEOUT, None)
+        .await?;
+    request_connect_failure(addr).await
+}
+
+#[cfg(any(test, debug_assertions))]
 async fn spawn_test_socks5<F, Fut>(pool: SessionPool, connector: F) -> Result<SocketAddr, String>
 where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
@@ -1098,7 +1110,11 @@ async fn relay_udp_associate(
 }
 
 fn map_socks5_reply_error(_err: &UpstreamConnectError) -> ReplyError {
-    ReplyError::NetworkUnreachable
+    match _err {
+        UpstreamConnectError::TimedOut => ReplyError::ConnectionTimeout,
+        UpstreamConnectError::RouteRejected => ReplyError::ConnectionNotAllowed,
+        UpstreamConnectError::Failed => ReplyError::NetworkUnreachable,
+    }
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -1201,10 +1217,8 @@ where
             smelly_connect::error::RouteDecisionError::TargetNotAllowed,
         ))) => Err(UpstreamConnectError::RouteRejected),
         Ok(Err(smelly_connect::Error::Transport(
-            smelly_connect::error::TransportError::ConnectFailed(message),
-        ))) if message.to_ascii_lowercase().contains("timed out") => {
-            Err(UpstreamConnectError::TimedOut)
-        }
+            smelly_connect::error::TransportError::ConnectTimedOut,
+        ))) => Err(UpstreamConnectError::TimedOut),
         Ok(Err(_err)) => Err(UpstreamConnectError::Failed),
         Err(_) => Err(UpstreamConnectError::TimedOut),
     }

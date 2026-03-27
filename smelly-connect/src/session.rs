@@ -220,7 +220,7 @@ impl EasyConnectSession {
         self.transport
             .icmp_ping(target)
             .await
-            .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string())))
+            .map_err(|err| Error::Transport(TransportError::from_io(err)))
     }
 
     pub async fn icmp_ping(&self, target: IcmpKeepAliveTarget) -> Result<(), Error> {
@@ -238,7 +238,7 @@ impl EasyConnectSession {
                 .transport
                 .connect(addr)
                 .await
-                .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string()))),
+                .map_err(|err| Error::Transport(TransportError::from_io(err))),
         }
     }
 
@@ -247,7 +247,7 @@ impl EasyConnectSession {
             .transport
             .bind_udp()
             .await
-            .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string())))?;
+            .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
         Ok(SessionUdpSocket {
             session: self.clone(),
             socket,
@@ -386,20 +386,20 @@ impl SessionUdpSocket {
         self.socket
             .send_to(data, addr)
             .await
-            .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string())))
+            .map_err(|err| Error::Transport(TransportError::from_io(err)))
     }
 
     pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), Error> {
         self.socket
             .recv_from(buf)
             .await
-            .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string())))
+            .map_err(|err| Error::Transport(TransportError::from_io(err)))
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr, Error> {
         self.socket
             .local_addr()
-            .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string())))
+            .map_err(|err| Error::Transport(TransportError::from_io(err)))
     }
 }
 
@@ -533,6 +533,45 @@ pub mod tests {
             Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "forced slow connect",
+            ))
+        });
+
+        EasyConnectSession::new(
+            ip,
+            resources,
+            SessionResolver::new(HashMap::new(), None, system),
+            transport,
+        )
+    }
+
+    pub fn session_with_immediate_timeout_domain_match(host: &str, ip: Ipv4Addr) -> EasyConnectSession {
+        let mut resources = ResourceSet::default();
+        resources.domain_rules.insert(
+            host.to_string(),
+            DomainRule {
+                port_min: 1,
+                port_max: 65535,
+                protocol: "all".to_string(),
+            },
+        );
+        resources.ip_rules.push(IpRule {
+            ip_min: IpAddr::V4(ip),
+            ip_max: IpAddr::V4(ip),
+            port_min: 1,
+            port_max: 65535,
+            protocol: "all".to_string(),
+        });
+        resources
+            .static_dns
+            .insert(host.to_string(), IpAddr::V4(ip));
+
+        let mut system = HashMap::new();
+        system.insert(host.to_string(), IpAddr::V4(ip));
+
+        let transport = TransportStack::new(|_| async {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "forced immediate timeout",
             ))
         });
 

@@ -1050,6 +1050,53 @@ pub async fn proxy_http_timeout_does_not_open_for_test()
 }
 
 #[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_immediate_timeout_status_for_test() -> Result<NoReadySessionResult, String> {
+    let session = smelly_connect::session::tests::session_with_immediate_timeout_domain_match(
+        "jwxt.sit.edu.cn",
+        std::net::Ipv4Addr::new(10, 0, 0, 8),
+    );
+    let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|err| err.to_string())?;
+    let addr = listener.local_addr().map_err(|err| err.to_string())?;
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let _ = handle_live_client(
+            stream,
+            pool,
+            RuntimeStats::default(),
+            DEFAULT_CONNECT_TIMEOUT,
+        )
+        .await;
+    });
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"CONNECT jwxt.sit.edu.cn:443 HTTP/1.1\r\nHost: jwxt.sit.edu.cn:443\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let status_line = response.lines().next().unwrap_or_default().to_string();
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+    Ok(NoReadySessionResult { status_code })
+}
+
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_allow_all_failure_does_not_open_for_test()
 -> Result<LiveFailureRecoveryTestResult, String> {
     let session = smelly_connect::session::tests::fake_session_without_match_with_transport(
@@ -1804,10 +1851,8 @@ where
             smelly_connect::error::RouteDecisionError::TargetNotAllowed,
         ))) => Err(UpstreamConnectError::RouteRejected),
         Ok(Err(smelly_connect::Error::Transport(
-            smelly_connect::error::TransportError::ConnectFailed(message),
-        ))) if message.to_ascii_lowercase().contains("timed out") => {
-            Err(UpstreamConnectError::TimedOut)
-        }
+            smelly_connect::error::TransportError::ConnectTimedOut,
+        ))) => Err(UpstreamConnectError::TimedOut),
         Ok(Err(_err)) => Err(UpstreamConnectError::Failed),
         Err(_) => Err(UpstreamConnectError::TimedOut),
     }

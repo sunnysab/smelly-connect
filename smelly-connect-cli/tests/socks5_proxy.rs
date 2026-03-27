@@ -85,7 +85,15 @@ async fn socks5_proxy_returns_failure_reply_on_upstream_timeout() {
     let result = smelly_connect_cli::proxy::socks5::proxy_socks5_timeout_reply_for_test()
         .await
         .unwrap();
-    assert_eq!(result.reply_code, 0x03);
+    assert_eq!(result.reply_code, 0x06);
+}
+
+#[tokio::test]
+async fn socks5_live_immediate_transport_timeout_returns_timeout_reply() {
+    let result = smelly_connect_cli::proxy::socks5::proxy_socks5_live_timeout_reply_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.reply_code, 0x06);
 }
 
 #[tokio::test]
