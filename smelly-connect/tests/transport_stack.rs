@@ -18,6 +18,13 @@ async fn stack_can_create_outbound_tcp_stream_handle() {
     let _stream = harness.connect(("10.0.0.8", 443)).await.unwrap();
 }
 
+#[tokio::test]
+async fn stack_can_create_outbound_udp_socket_handle() {
+    let harness = smelly_connect::transport::tests::stack_harness();
+    let socket = harness.bind_udp().await.unwrap();
+    assert!(socket.local_addr().unwrap().port() > 0);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn packet_device_builds_real_smoltcp_transport() {
     let harness = smelly_connect::transport::tests::packet_harness();
@@ -34,6 +41,14 @@ async fn session_connect_tcp_returns_async_stream() {
     let harness = smelly_connect::session::tests::login_harness();
     let session = harness.ready_session().await;
     let _stream = session.connect_tcp(("10.0.0.8", 443)).await.unwrap();
+}
+
+#[tokio::test]
+async fn session_bind_udp_returns_datagram_handle() {
+    let harness = smelly_connect::session::tests::login_harness();
+    let session = harness.ready_session().await;
+    let socket = session.bind_udp().await.unwrap();
+    assert!(socket.local_addr().unwrap().port() > 0);
 }
 
 #[tokio::test]

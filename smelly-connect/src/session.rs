@@ -14,7 +14,7 @@ use crate::resource::{DomainRule, IpRule, ResourceSet};
 use crate::runtime::tasks::keepalive::KeepaliveHandle;
 use crate::target::TargetAddr;
 use crate::transport::device::PacketDevice;
-use crate::transport::{TransportStack, VpnStream};
+use crate::transport::{TransportStack, VpnStream, VpnUdpSocket};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoutePlan {
@@ -25,6 +25,12 @@ pub enum RoutePlan {
 pub enum IcmpKeepAliveTarget {
     Ip(Ipv4Addr),
     Host(String),
+}
+
+#[derive(Clone)]
+pub struct SessionUdpSocket {
+    session: EasyConnectSession,
+    socket: VpnUdpSocket,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -205,6 +211,18 @@ impl EasyConnectSession {
         }
     }
 
+    pub async fn bind_udp(&self) -> Result<SessionUdpSocket, Error> {
+        let socket = self
+            .transport
+            .bind_udp()
+            .await
+            .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string())))?;
+        Ok(SessionUdpSocket {
+            session: self.clone(),
+            socket,
+        })
+    }
+
     pub async fn start_http_proxy(&self, bind: SocketAddr) -> Result<ProxyHandle, Error> {
         crate::integration::http_proxy::start_http_proxy(self.clone(), bind)
             .await
@@ -262,6 +280,14 @@ impl EasyConnectSession {
     where
         T: Into<TargetAddr>,
     {
+        let addr = self.plan_socket_addr(target).await?;
+        Ok(RoutePlan::VpnResolved(addr))
+    }
+
+    async fn plan_socket_addr<T>(&self, target: T) -> Result<SocketAddr, Error>
+    where
+        T: Into<TargetAddr>,
+    {
         let target = target.into();
         let host = target.host().to_string();
         let port = target.port();
@@ -283,10 +309,10 @@ impl EasyConnectSession {
             .await
             .map_err(Error::Resolve)?;
 
-        Ok(RoutePlan::VpnResolved(SocketAddr::new(ip, port)))
+        Ok(SocketAddr::new(ip, port))
     }
 
-    fn plan_ip(&self, ip: Ipv4Addr, port: u16) -> Result<RoutePlan, Error> {
+    fn plan_ip(&self, ip: Ipv4Addr, port: u16) -> Result<SocketAddr, Error> {
         if !self.allow_all_routes
             && !self.resources.matches_ip(IpAddr::V4(ip), port)
             && !self.local_route_overrides.matches_ip(IpAddr::V4(ip), port)
@@ -294,14 +320,37 @@ impl EasyConnectSession {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
 
-        Ok(RoutePlan::VpnResolved(SocketAddr::new(
-            IpAddr::V4(ip),
-            port,
-        )))
+        Ok(SocketAddr::new(IpAddr::V4(ip), port))
     }
 
     pub fn failing_transport(message: &'static str) -> TransportStack {
         TransportStack::new(move |_| async move { Err(io::Error::other(message)) })
+    }
+}
+
+impl SessionUdpSocket {
+    pub async fn send_to<T>(&self, data: &[u8], target: T) -> Result<usize, Error>
+    where
+        T: Into<TargetAddr>,
+    {
+        let addr = self.session.plan_socket_addr(target).await?;
+        self.socket
+            .send_to(data, addr)
+            .await
+            .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string())))
+    }
+
+    pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), Error> {
+        self.socket
+            .recv_from(buf)
+            .await
+            .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string())))
+    }
+
+    pub fn local_addr(&self) -> Result<SocketAddr, Error> {
+        self.socket
+            .local_addr()
+            .map_err(|err| Error::Transport(TransportError::ConnectFailed(err.to_string())))
     }
 }
 
@@ -321,6 +370,7 @@ async fn resolve_keepalive_target(
 pub mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::UdpSocket;
 
     pub fn fake_session_without_match() -> EasyConnectSession {
         EasyConnectSession::new(
@@ -484,6 +534,10 @@ pub mod tests {
         TransportStack::new(|_| async {
             let (client, _server) = duplex(1024);
             Ok(VpnStream::new(client))
+        })
+        .with_udp_binder(|| async {
+            let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+            Ok(VpnUdpSocket::new(socket))
         })
     }
 }

@@ -17,7 +17,7 @@ openssl = "0.10"
 openssl-sys = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 roxmltree = "0.20"
-smoltcp = { version = "0.13", default-features = false, features = ["std", "async", "medium-ip", "proto-ipv4", "proto-ipv4-fragmentation", "socket-tcp", "socket-icmp"] }
+smoltcp = { version = "0.13", default-features = false, features = ["std", "async", "medium-ip", "proto-ipv4", "proto-ipv4-fragmentation", "socket-tcp", "socket-icmp", "socket-udp"] }
 
 [dev-dependencies]
 trybuild = "1"

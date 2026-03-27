@@ -19,6 +19,16 @@ async fn socks5_proxy_supports_ipv6_targets() {
 }
 
 #[tokio::test]
+async fn socks5_proxy_supports_udp_associate() {
+    let result = smelly_connect_cli::proxy::socks5::proxy_socks5_udp_associate_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.account_name, "acct-01");
+    assert!(result.used_pool_selection);
+    assert_eq!(result.echoed_bytes, b"ping");
+}
+
+#[tokio::test]
 async fn socks5_proxy_returns_failure_when_no_ready_session_exists() {
     let result = smelly_connect_cli::proxy::socks5::proxy_socks5_no_ready_session_for_test()
         .await

@@ -1,16 +1,20 @@
+pub mod datagram;
 pub mod device;
 pub mod netstack;
 pub mod stack;
 pub mod stream;
 
+pub use datagram::VpnUdpSocket;
 pub use stack::TransportStack;
 pub use stream::VpnStream;
 
 pub mod tests {
     use std::io;
+    use std::net::{Ipv4Addr, SocketAddr};
 
     use tokio::io::duplex;
     use tokio::sync::mpsc;
+    use tokio::net::UdpSocket;
 
     use crate::transport::device::PacketDevice;
     use crate::transport::stack::TransportStack;
@@ -59,12 +63,20 @@ pub mod tests {
         {
             self.stack.connect(target).await
         }
+
+        pub async fn bind_udp(&self) -> io::Result<crate::transport::VpnUdpSocket> {
+            self.stack.bind_udp().await
+        }
     }
 
     pub fn stack_harness() -> StackHarness {
         let stack = TransportStack::new(|_| async {
             let (client, _server) = duplex(1024);
             Ok(crate::transport::VpnStream::new(client))
+        })
+        .with_udp_binder(|| async {
+            let socket = UdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
+            Ok(crate::transport::VpnUdpSocket::new(socket))
         });
         StackHarness { stack }
     }

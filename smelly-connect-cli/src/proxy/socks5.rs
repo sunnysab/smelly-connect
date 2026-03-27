@@ -1,3 +1,4 @@
+use std::net::SocketAddr as StdSocketAddr;
 #[cfg(any(test, debug_assertions))]
 use std::future::Future;
 #[cfg(any(test, debug_assertions))]
@@ -8,12 +9,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use fast_socks5::{new_udp_header, parse_udp_request};
 use fast_socks5::server::Socks5ServerProtocol;
+#[cfg(any(test, debug_assertions))]
+use fast_socks5::client::Socks5Datagram;
 use fast_socks5::{ReplyError, Socks5Command};
 #[cfg(any(test, debug_assertions))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::io::{AsyncRead, AsyncWrite, copy_bidirectional};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 #[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
 #[cfg(any(test, debug_assertions))]
@@ -209,6 +213,43 @@ pub async fn proxy_socks5_ipv6_for_test() -> Result<Socks5ProxyTestResult, Strin
         account_name,
         used_pool_selection: true,
         echoed_bytes: echoed.to_vec(),
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_udp_associate_for_test() -> Result<Socks5ProxyTestResult, String> {
+    let upstream = spawn_udp_echo_upstream().await;
+    let session = smelly_connect::session::tests::session_with_domain_match(
+        "udp.test",
+        std::net::Ipv4Addr::LOCALHOST,
+    );
+    let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+    let addr = spawn_live_test_socks5(pool, RuntimeStats::default(), DEFAULT_CONNECT_TIMEOUT).await?;
+
+    let control = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    let udp_socket = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(|err| err.to_string())?;
+    let datagram = Socks5Datagram::use_socket(control, udp_socket)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    datagram
+        .send_to(b"ping", ("udp.test", upstream.port()))
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut echoed = [0_u8; 64];
+    let (n, _) = datagram
+        .recv_from(&mut echoed)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    Ok(Socks5ProxyTestResult {
+        account_name: "acct-01".to_string(),
+        used_pool_selection: true,
+        echoed_bytes: echoed[..n].to_vec(),
     })
 }
 
@@ -595,6 +636,31 @@ where
 }
 
 #[cfg(any(test, debug_assertions))]
+async fn spawn_live_test_socks5(
+    pool: SessionPool,
+    stats: RuntimeStats,
+    connect_timeout: Duration,
+) -> Result<SocketAddr, String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|err| err.to_string())?;
+    let addr = listener.local_addr().map_err(|err| err.to_string())?;
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let pool = pool.clone();
+            let stats = stats.clone();
+            tokio::spawn(async move {
+                let _ = handle_live_client(stream, pool, stats, connect_timeout).await;
+            });
+        }
+    });
+    Ok(addr)
+}
+
+#[cfg(any(test, debug_assertions))]
 async fn request_no_ready_session(addr: SocketAddr) -> Result<Socks5FailureResult, String> {
     let mut client = TcpStream::connect(addr)
         .await
@@ -733,14 +799,6 @@ async fn handle_live_client(
         .read_command()
         .await
         .map_err(|err| err.to_string())?;
-    if cmd != Socks5Command::TCPConnect {
-        proto.reply_error(&ReplyError::CommandNotSupported)
-            .await
-            .map_err(|err| err.to_string())?;
-        return Ok(());
-    }
-    let (host, port) = target_addr.into_string_and_port();
-
     let (account_name, session) = match pool.next_live_session().await {
         Ok(ready) => ready,
         Err(_) => {
@@ -755,38 +813,72 @@ async fn handle_live_client(
         }
     };
 
-    tracing::info!(
-        protocol = tracing::field::display("socks5"),
-        target = %format!("{host}:{port}"),
-        account = %account_name,
-        "request accepted"
-    );
+    match cmd {
+        Socks5Command::TCPConnect => {
+            let (host, port) = target_addr.into_string_and_port();
+            tracing::info!(
+                protocol = tracing::field::display("socks5"),
+                target = %format!("{host}:{port}"),
+                account = %account_name,
+                "request accepted"
+            );
 
-    let upstream = session.connect_tcp((host.as_str(), port));
-    let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
-        Ok(upstream) => upstream,
-        Err(err) => {
-            if !matches!(
-                err,
-                UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
-            ) {
-                stats.record_connect_failure();
-                pool.report_live_session_failure(&account_name, err.label())
-                    .await;
-            }
-            proto.reply_error(&map_socks5_reply_error(&err))
+            let upstream = session.connect_tcp((host.as_str(), port));
+            let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
+                Ok(upstream) => upstream,
+                Err(err) => {
+                    if !matches!(
+                        err,
+                        UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
+                    ) {
+                        stats.record_connect_failure();
+                        pool.report_live_session_failure(&account_name, err.label())
+                            .await;
+                    }
+                    proto.reply_error(&map_socks5_reply_error(&err))
+                        .await
+                        .map_err(|reply_err| reply_err.to_string())?;
+                    return Ok(());
+                }
+            };
+            stats.record_connect_success();
+            let connection = stats.open_connection(ProxyProtocol::Socks5);
+            let mut client = proto
+                .reply_success("127.0.0.1:0".parse().unwrap())
                 .await
-                .map_err(|reply_err| reply_err.to_string())?;
-            return Ok(());
+                .map_err(|err| err.to_string())?;
+            relay_tunnel(&mut client, &mut upstream, Some(&connection)).await
         }
-    };
-    stats.record_connect_success();
-    let connection = stats.open_connection(ProxyProtocol::Socks5);
-    let mut client = proto
-        .reply_success("127.0.0.1:0".parse().unwrap())
-        .await
-        .map_err(|err| err.to_string())?;
-    relay_tunnel(&mut client, &mut upstream, Some(&connection)).await
+        Socks5Command::UDPAssociate => {
+            tracing::info!(
+                protocol = tracing::field::display("socks5"),
+                target = %target_addr,
+                account = %account_name,
+                "udp associate accepted"
+            );
+            let udp_socket = session
+                .bind_udp()
+                .await
+                .map_err(|err| format!("{err:?}"))?;
+            stats.record_connect_success();
+            let connection = stats.open_connection(ProxyProtocol::Socks5);
+            let bind_addr = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .map_err(|err| err.to_string())?;
+            let reply_addr = bind_addr.local_addr().map_err(|err| err.to_string())?;
+            let client = proto
+                .reply_success(reply_addr)
+                .await
+                .map_err(|err| err.to_string())?;
+            relay_udp_associate(client, bind_addr, udp_socket, Some(&connection)).await
+        }
+        _ => {
+            proto.reply_error(&ReplyError::CommandNotSupported)
+                .await
+                .map_err(|err| err.to_string())?;
+            Ok(())
+        }
+    }
 }
 
 async fn relay_tunnel(
@@ -802,6 +894,71 @@ async fn relay_tunnel(
         connection.add_upstream_to_client_bytes(upstream_to_client);
     }
     Ok(())
+}
+
+async fn relay_udp_associate(
+    mut control: TcpStream,
+    inbound: UdpSocket,
+    outbound: smelly_connect::session::SessionUdpSocket,
+    connection: Option<&ConnectionGuard>,
+) -> Result<(), String> {
+    let mut client_addr = None::<StdSocketAddr>;
+    let mut client_buf = vec![0_u8; 65_536];
+    let mut upstream_buf = vec![0_u8; 65_536];
+    let mut control_buf = [0_u8; 1];
+
+    loop {
+        tokio::select! {
+            read = tokio::io::AsyncReadExt::read(&mut control, &mut control_buf) => {
+                match read.map_err(|err| err.to_string())? {
+                    0 => return Ok(()),
+                    _ => return Err("unexpected control data on udp associate connection".to_string()),
+                }
+            }
+            recv = inbound.recv_from(&mut client_buf) => {
+                let (n, addr) = recv.map_err(|err| err.to_string())?;
+                if let Some(expected) = client_addr {
+                    if addr != expected {
+                        continue;
+                    }
+                } else {
+                    client_addr = Some(addr);
+                }
+
+                let (frag, target_addr, data) =
+                    parse_udp_request(&client_buf[..n]).await.map_err(|err| err.to_string())?;
+                if frag != 0 {
+                    continue;
+                }
+
+                let (host, port) = target_addr.into_string_and_port();
+                let sent = match outbound.send_to(data, (host, port)).await {
+                    Ok(sent) => sent,
+                    Err(smelly_connect::Error::RouteDecision(_)) => continue,
+                    Err(smelly_connect::Error::Resolve(_)) => continue,
+                    Err(err) => return Err(format!("{err:?}")),
+                };
+                if let Some(connection) = connection {
+                    connection.add_client_to_upstream_bytes(sent as u64);
+                }
+            }
+            recv = outbound.recv_from(&mut upstream_buf) => {
+                let Some(client_addr) = client_addr else {
+                    continue;
+                };
+                let (n, remote_addr) = recv.map_err(|err| format!("{err:?}"))?;
+                let mut packet = new_udp_header(remote_addr).map_err(|err| err.to_string())?;
+                packet.extend_from_slice(&upstream_buf[..n]);
+                inbound
+                    .send_to(&packet, client_addr)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                if let Some(connection) = connection {
+                    connection.add_upstream_to_client_bytes(n as u64);
+                }
+            }
+        }
+    }
 }
 
 fn map_socks5_reply_error(_err: &UpstreamConnectError) -> ReplyError {
@@ -853,6 +1010,26 @@ async fn read_socks5_reply(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
         .map_err(|err| err.to_string())?;
     reply.extend_from_slice(&tail);
     Ok(reply)
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_udp_echo_upstream() -> SocketAddr {
+    let socket = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let addr = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0_u8; 2048];
+        loop {
+            let Ok((n, peer)) = socket.recv_from(&mut buf).await else {
+                break;
+            };
+            if socket.send_to(&buf[..n], peer).await.is_err() {
+                break;
+            }
+        }
+    });
+    addr
 }
 
 async fn connect_session_with_timeout<Fut>(

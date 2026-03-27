@@ -12,14 +12,18 @@ use smoltcp::socket::icmp::{
     self, PacketBuffer as IcmpPacketBuffer, PacketMetadata as IcmpPacketMetadata,
 };
 use smoltcp::socket::tcp::{self, SocketBuffer};
+use smoltcp::socket::udp::{
+    self, PacketBuffer as UdpPacketBuffer, PacketMetadata as UdpPacketMetadata,
+};
 use smoltcp::time::{Duration as SmolDuration, Instant};
 use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, Ipv4Cidr};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Notify, mpsc};
 
 use crate::TargetAddr;
+use crate::transport::datagram::AsyncDatagramSocket;
 use crate::transport::device::PacketDevice;
-use crate::transport::{TransportStack, VpnStream};
+use crate::transport::{TransportStack, VpnStream, VpnUdpSocket};
 
 const TCP_BUFFER_SIZE: usize = 64 * 1024;
 const TCP_KEEPALIVE_SECS: u64 = 30;
@@ -27,6 +31,8 @@ const TCP_TIMEOUT_SECS: u64 = 120;
 const ICMP_BUFFER_SIZE: usize = 256;
 const ICMP_KEEPALIVE_IDENT: u16 = 0x534d;
 const ICMP_PING_TIMEOUT_MILLIS: u64 = 5_000;
+const UDP_PACKET_CAPACITY: usize = 32;
+const UDP_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Clone)]
 struct SmolStack {
@@ -36,6 +42,7 @@ struct SmolStack {
 struct SmolStackInner {
     state: Mutex<NetstackState>,
     wake: Notify,
+    local_ip: Ipv4Addr,
 }
 
 struct NetstackState {
@@ -66,6 +73,12 @@ struct SmolTcpStream {
     handle: SocketHandle,
 }
 
+struct SmolUdpSocket {
+    stack: Arc<SmolStackInner>,
+    handle: SocketHandle,
+    local_addr: SocketAddr,
+}
+
 pub fn build_transport_from_packet_device(
     mut device: PacketDevice,
     local_ip: Ipv4Addr,
@@ -75,14 +88,20 @@ pub fn build_transport_from_packet_device(
         .ok_or_else(|| io::Error::other("missing inbound rx"))?;
     let outbound_tx = device.outbound_sender();
     let stack = SmolStack::new(local_ip, inbound_rx, outbound_tx);
+    let connect_stack = stack.clone();
+    let udp_stack = stack.clone();
     let ping_stack = stack.clone();
 
     Ok(TransportStack::new(move |target: TargetAddr| {
-        let stack = stack.clone();
+        let stack = connect_stack.clone();
         async move {
             let addr = socket_addr_from_target(target)?;
             stack.connect(addr).await
         }
+    })
+    .with_udp_binder(move || {
+        let stack = udp_stack.clone();
+        async move { stack.bind_udp().await }
     })
     .with_icmp_pinger(move |target| {
         let stack = ping_stack.clone();
@@ -118,6 +137,7 @@ impl SmolStack {
                 next_icmp_seq: 1,
             }),
             wake: Notify::new(),
+            local_ip,
         });
 
         let driver = Arc::clone(&inner);
@@ -241,6 +261,31 @@ impl SmolStack {
 
         self.inner.remove_socket(handle);
         result
+    }
+
+    async fn bind_udp(&self) -> io::Result<VpnUdpSocket> {
+        let (handle, local_addr) = {
+            let mut state = self.inner.state.lock().expect("netstack mutex poisoned");
+            let socket = udp_socket();
+            let handle = state.sockets.add(socket);
+            state.active_handles.insert(handle);
+            let local_port = state.next_local_port();
+            state
+                .sockets
+                .get_mut::<udp::Socket<'static>>(handle)
+                .bind(local_port)
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            (
+                handle,
+                SocketAddr::new(IpAddr::V4(self.inner.local_ip), local_port),
+            )
+        };
+        self.inner.wake.notify_one();
+        Ok(VpnUdpSocket::new(SmolUdpSocket {
+            stack: Arc::clone(&self.inner),
+            handle,
+            local_addr,
+        }))
     }
 }
 
@@ -531,6 +576,85 @@ impl Drop for SmolTcpStream {
     }
 }
 
+impl AsyncDatagramSocket for SmolUdpSocket {
+    fn send_to<'a>(
+        &'a self,
+        data: &'a [u8],
+        target: SocketAddr,
+    ) -> Pin<Box<dyn std::future::Future<Output = io::Result<usize>> + Send + 'a>> {
+        Box::pin(async move {
+            if !matches!(target.ip(), IpAddr::V4(_)) {
+                return Err(io::Error::other("ipv6 unsupported"));
+            }
+            poll_fn(|cx| {
+                let mut state = self.stack.state.lock().expect("netstack mutex poisoned");
+                let socket = state.sockets.get_mut::<udp::Socket<'static>>(self.handle);
+                if socket.can_send() {
+                    let target = match target {
+                        SocketAddr::V4(addr) => addr,
+                        SocketAddr::V6(_) => {
+                            return Poll::Ready(Err(io::Error::other("ipv6 unsupported")));
+                        }
+                    };
+                    socket
+                        .send_slice(data, target)
+                        .map_err(|err| io::Error::other(err.to_string()))?;
+                    self.stack.wake.notify_one();
+                    return Poll::Ready(Ok(data.len()));
+                }
+                if !socket.is_open() {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "udp socket closed",
+                    )));
+                }
+                socket.register_send_waker(cx.waker());
+                Poll::Pending
+            })
+            .await
+        })
+    }
+
+    fn recv_from<'a>(
+        &'a self,
+        buf: &'a mut [u8],
+    ) -> Pin<Box<dyn std::future::Future<Output = io::Result<(usize, SocketAddr)>> + Send + 'a>> {
+        Box::pin(async move {
+            poll_fn(|cx| {
+                let mut state = self.stack.state.lock().expect("netstack mutex poisoned");
+                let socket = state.sockets.get_mut::<udp::Socket<'static>>(self.handle);
+                if socket.can_recv() {
+                    let (n, metadata) = socket
+                        .recv_slice(buf)
+                        .map_err(|err| io::Error::other(err.to_string()))?;
+                    self.stack.wake.notify_one();
+                    return Poll::Ready(socket_addr_from_endpoint(metadata.endpoint).map(|addr| (n, addr)));
+                }
+                if !socket.is_open() {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "udp socket closed",
+                    )));
+                }
+                socket.register_recv_waker(cx.waker());
+                Poll::Pending
+            })
+            .await
+        })
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.local_addr)
+    }
+}
+
+impl Drop for SmolUdpSocket {
+    fn drop(&mut self) {
+        self.stack.remove_socket(self.handle);
+        self.stack.wake.notify_one();
+    }
+}
+
 fn socket_addr_from_target(target: TargetAddr) -> io::Result<SocketAddr> {
     let ip = target
         .host()
@@ -555,4 +679,22 @@ fn icmp_socket() -> icmp::Socket<'static> {
     let rx = IcmpPacketBuffer::new(vec![IcmpPacketMetadata::EMPTY], vec![0; ICMP_BUFFER_SIZE]);
     let tx = IcmpPacketBuffer::new(vec![IcmpPacketMetadata::EMPTY], vec![0; ICMP_BUFFER_SIZE]);
     icmp::Socket::new(rx, tx)
+}
+
+fn udp_socket() -> udp::Socket<'static> {
+    let rx = UdpPacketBuffer::new(
+        vec![UdpPacketMetadata::EMPTY; UDP_PACKET_CAPACITY],
+        vec![0; UDP_BUFFER_SIZE],
+    );
+    let tx = UdpPacketBuffer::new(
+        vec![UdpPacketMetadata::EMPTY; UDP_PACKET_CAPACITY],
+        vec![0; UDP_BUFFER_SIZE],
+    );
+    udp::Socket::new(rx, tx)
+}
+
+fn socket_addr_from_endpoint(endpoint: smoltcp::wire::IpEndpoint) -> io::Result<SocketAddr> {
+    match endpoint.addr {
+        IpAddress::Ipv4(ip) => Ok(SocketAddr::new(IpAddr::V4(ip.into()), endpoint.port)),
+    }
 }
