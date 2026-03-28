@@ -107,6 +107,12 @@ fn change_cipher_spec_and_finished_handshake_have_expected_shape() {
     assert_eq!(&finished[4..], &verify_data);
 }
 
+#[test]
+fn short_key_block_returns_error_instead_of_panicking() {
+    let err = smelly_tls::split_key_block_for_test(&[0_u8; 71]).unwrap_err();
+    assert!(err.to_string().contains("short tls10 key block"));
+}
+
 fn reference_tls10_prf(secret: &[u8], label: &[u8], seed: &[u8], len: usize) -> Vec<u8> {
     use hmac::Hmac;
     use md5::Md5;
