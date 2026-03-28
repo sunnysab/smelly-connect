@@ -36,6 +36,7 @@ struct ForwardRequest<'a> {
 pub struct ProxyHandle {
     local_addr: SocketAddr,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub type HttpProxyHandle = ProxyHandle;
@@ -46,10 +47,26 @@ impl ProxyHandle {
     }
 
     pub async fn shutdown(mut self) -> io::Result<()> {
+        self.signal_shutdown();
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+        Ok(())
+    }
+
+    fn signal_shutdown(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        Ok(())
+    }
+}
+
+impl Drop for ProxyHandle {
+    fn drop(&mut self) {
+        self.signal_shutdown();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -61,7 +78,7 @@ pub async fn start_http_proxy(
     let local_addr = listener.local_addr()?;
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = &mut shutdown_rx => break,
@@ -79,6 +96,7 @@ pub async fn start_http_proxy(
     Ok(ProxyHandle {
         local_addr,
         shutdown_tx: Some(shutdown_tx),
+        task: Some(task),
     })
 }
 
