@@ -8,6 +8,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
+use crate::error::CliError;
+
 #[derive(Debug, Deserialize)]
 struct HealthResponse {
     status: String,
@@ -48,11 +50,21 @@ pub async fn run_status() -> Result<(), String> {
 }
 
 pub async fn run_status_with_config(config_path: impl AsRef<Path>) -> Result<String, String> {
-    let config = crate::config::load(config_path)?;
+    run_status_with_config_typed(config_path)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+pub async fn run_status_with_config_typed(
+    config_path: impl AsRef<Path>,
+) -> Result<String, CliError> {
+    let config = crate::config::load_typed(config_path)?;
     if !config.management.enabled {
-        return Err("management API is disabled in config".to_string());
+        return Err(CliError::Command(
+            "management API is disabled in config".to_string(),
+        ));
     }
-    run_status_from_listen(&config.management.listen).await
+    run_status_from_listen_typed(&config.management.listen).await
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -94,13 +106,19 @@ pub async fn run_status_for_test(
 }
 
 async fn run_status_from_listen(listen: &str) -> Result<String, String> {
+    run_status_from_listen_typed(listen)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+async fn run_status_from_listen_typed(listen: &str) -> Result<String, CliError> {
     run_status_from_listen_with_label(listen, listen).await
 }
 
 async fn run_status_from_listen_with_label(
     connect_target: &str,
     display_target: &str,
-) -> Result<String, String> {
+) -> Result<String, CliError> {
     let connect_target = normalize_connect_target(connect_target);
     let health: HealthResponse = fetch_json(&connect_target, "/healthz").await?;
     let stats: RuntimeSnapshot = fetch_json(&connect_target, "/stats").await?;
@@ -121,35 +139,38 @@ fn normalize_connect_target(target: &str) -> String {
     SocketAddr::new(loopback_ip, addr.port()).to_string()
 }
 
-async fn fetch_json<T>(target: &str, path: &str) -> Result<T, String>
+async fn fetch_json<T>(target: &str, path: &str) -> Result<T, CliError>
 where
     T: for<'de> Deserialize<'de>,
 {
     let mut client = TcpStream::connect(target)
         .await
-        .map_err(|err| format!("management connect failed: {err}"))?;
+        .map_err(|err| CliError::Command(format!("management connect failed: {err}")))?;
     let request = format!("GET {path} HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n");
     client
         .write_all(request.as_bytes())
         .await
-        .map_err(|err| format!("management request failed: {err}"))?;
+        .map_err(|err| CliError::Command(format!("management request failed: {err}")))?;
     let mut response = Vec::new();
     client
         .read_to_end(&mut response)
         .await
-        .map_err(|err| format!("management read failed: {err}"))?;
-    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+        .map_err(|err| CliError::Command(format!("management read failed: {err}")))?;
+    let response = String::from_utf8(response).map_err(|err| CliError::Command(err.to_string()))?;
     let (headers, body) = response
         .split_once("\r\n\r\n")
-        .ok_or_else(|| "invalid management response".to_string())?;
+        .ok_or_else(|| CliError::Command("invalid management response".to_string()))?;
     let status_line = headers
         .lines()
         .next()
-        .ok_or_else(|| "missing management status line".to_string())?;
+        .ok_or_else(|| CliError::Command("missing management status line".to_string()))?;
     if !status_line.contains(" 200 ") {
-        return Err(format!("management request failed: {status_line}"));
+        return Err(CliError::Command(format!(
+            "management request failed: {status_line}"
+        )));
     }
-    serde_json::from_str(body).map_err(|err| format!("invalid management json: {err}"))
+    serde_json::from_str(body)
+        .map_err(|err| CliError::Command(format!("invalid management json: {err}")))
 }
 
 fn format_status(listen: &str, health: HealthResponse, stats: RuntimeSnapshot) -> String {
