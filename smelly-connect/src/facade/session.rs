@@ -1,1 +1,1 @@
-pub use crate::domain::session::Session;
+pub type Session = crate::session::EasyConnectSession;
