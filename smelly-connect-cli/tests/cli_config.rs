@@ -249,3 +249,9 @@ fn invalid_route_protocol_is_rejected() {
 
     assert!(cfg.is_err(), "invalid route protocol should be rejected");
 }
+
+#[test]
+fn missing_config_returns_typed_cli_error() {
+    let err = smelly_connect_cli::config::load_typed("/definitely/missing/config.toml").unwrap_err();
+    assert!(matches!(err, smelly_connect_cli::error::CliError::Config(_)));
+}
