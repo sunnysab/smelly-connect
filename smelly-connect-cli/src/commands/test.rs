@@ -7,6 +7,8 @@ use std::sync::atomic::AtomicUsize;
 #[cfg(any(test, debug_assertions))]
 use smelly_connect::test_support;
 
+use crate::error::CliError;
+
 #[cfg(any(test, debug_assertions))]
 pub async fn run_tcp_for_test(target: &str) -> Result<String, String> {
     let session = test_support::session::login_harness().ready_session().await;
@@ -63,19 +65,28 @@ pub async fn run_tcp_with_config(
     config_path: impl AsRef<Path>,
     target: &str,
 ) -> Result<String, String> {
-    let config = crate::config::load(config_path)?;
+    run_tcp_with_config_typed(config_path, target)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+pub async fn run_tcp_with_config_typed(
+    config_path: impl AsRef<Path>,
+    target: &str,
+) -> Result<String, CliError> {
+    let config = crate::config::load_typed(config_path)?;
     let pool = crate::pool::SessionPool::from_config(&config)
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| CliError::Command(err.to_string()))?;
     let (_account_name, session) = pool
         .next_live_session()
         .await
-        .map_err(|err| err.to_string())?;
-    let (host, port) = split_target(target)?;
+        .map_err(|err| CliError::Command(err.to_string()))?;
+    let (host, port) = split_target_typed(target)?;
     let _stream = session
         .connect_tcp((host.as_str(), port))
         .await
-        .map_err(|err| format!("{err:?}"))?;
+        .map_err(|err| CliError::Command(format!("{err:?}")))?;
     Ok(format!("tcp ok: {host}:{port}"))
 }
 
@@ -129,11 +140,15 @@ pub async fn run_http_with_config(
 }
 
 fn split_target(target: &str) -> Result<(String, u16), String> {
+    split_target_typed(target).map_err(|err| err.to_string())
+}
+
+fn split_target_typed(target: &str) -> Result<(String, u16), CliError> {
     let (host, port) = target
         .rsplit_once(':')
-        .ok_or_else(|| "missing :port".to_string())?;
+        .ok_or_else(|| CliError::Command("missing :port".to_string()))?;
     let port = port
         .parse::<u16>()
-        .map_err(|_| "invalid port".to_string())?;
+        .map_err(|_| CliError::Command("invalid port".to_string()))?;
     Ok((host.to_string(), port))
 }
