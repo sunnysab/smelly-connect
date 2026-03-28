@@ -1,1 +1,1 @@
-pub use crate::transport::netstack::build_transport_from_packet_device;
+// Intentionally empty placeholder module for future runtime-owned netstack helpers.

@@ -107,12 +107,6 @@ pub async fn run_status_for_test(
         .map_err(|err| err.to_string())
 }
 
-async fn run_status_from_listen(listen: &str) -> Result<String, String> {
-    run_status_from_listen_typed(listen)
-        .await
-        .map_err(|err| err.to_string())
-}
-
 async fn run_status_from_listen_typed(listen: &str) -> Result<String, CliError> {
     run_status_from_listen_with_label(listen, listen).await
 }

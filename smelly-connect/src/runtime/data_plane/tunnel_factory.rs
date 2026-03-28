@@ -1,1 +1,1 @@
-pub type TunnelConnection = smelly_tls::TunnelConnection;
+// Intentionally empty placeholder module for future tunnel factory helpers.

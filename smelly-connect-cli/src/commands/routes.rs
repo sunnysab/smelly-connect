@@ -60,12 +60,6 @@ pub async fn run_routes_for_test(listen: &str, routes_json: &str) -> Result<Stri
         .map_err(|err| err.to_string())
 }
 
-async fn run_routes_from_listen(listen: &str) -> Result<String, String> {
-    run_routes_from_listen_typed(listen)
-        .await
-        .map_err(|err| err.to_string())
-}
-
 async fn run_routes_from_listen_typed(listen: &str) -> Result<String, CliError> {
     run_routes_from_listen_with_label(listen, listen).await
 }

@@ -3,4 +3,4 @@ mod flow;
 mod types;
 
 pub use flow::run_control_plane;
-pub use types::{AuthenticatedSessionSeed, ControlPlaneState, TunnelBootstrap};
+pub use types::{AuthenticatedSessionSeed, ControlPlaneState};
