@@ -102,7 +102,9 @@ pub async fn run_status_for_test(
             let _ = stream.write_all(response.as_bytes()).await;
         }
     });
-    run_status_from_listen_with_label(&addr.to_string(), listen).await
+    run_status_from_listen_with_label(&addr.to_string(), listen)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 async fn run_status_from_listen(listen: &str) -> Result<String, String> {
