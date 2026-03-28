@@ -51,6 +51,13 @@ pub struct HttpBodyTestResult {
 
 #[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
+pub struct ReusedUpstreamTestResult {
+    pub body: String,
+    pub upstream_accepts: usize,
+}
+
+#[cfg(any(test, debug_assertions))]
+#[derive(Debug, Clone)]
 pub struct StreamingResponseTestResult {
     pub first_chunk_latency: Duration,
     pub first_chunk: String,
@@ -412,6 +419,42 @@ pub async fn proxy_http_body_completes_for_keep_alive_upstream_for_test()
         .unwrap_or_default()
         .to_string();
     Ok(HttpBodyTestResult { body })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_reuses_upstream_connection_for_test()
+-> Result<ReusedUpstreamTestResult, String> {
+    let (upstream, accepts) = spawn_reusable_keep_alive_http_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
+        TcpStream::connect(upstream).await
+    })
+    .await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            b"GET http://intranet.zju.edu.cn/first HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: keep-alive\r\n\r\nGET http://intranet.zju.edu.cn/second HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    Ok(ReusedUpstreamTestResult {
+        body,
+        upstream_accepts: accepts.load(std::sync::atomic::Ordering::SeqCst),
+    })
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -1508,6 +1551,7 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
+    let upstream_cache = Arc::new(tokio::sync::Mutex::new(None::<CachedUpstream<TcpStream>>));
     let io = TokioIo::new(client);
     hyper_server_http1::Builder::new()
         .half_close(true)
@@ -1517,9 +1561,18 @@ where
                 let pool = pool.clone();
                 let stats = stats.clone();
                 let connector = connector.clone();
+                let upstream_cache = Arc::clone(&upstream_cache);
                 async move {
                     Ok::<_, Infallible>(
-                        handle_test_request(request, pool, stats, connect_timeout, connector).await,
+                        handle_test_request(
+                            request,
+                            pool,
+                            stats,
+                            connect_timeout,
+                            connector,
+                            upstream_cache,
+                        )
+                        .await,
                     )
                 }
             }),
@@ -1535,6 +1588,7 @@ async fn handle_live_client(
     stats: RuntimeStats,
     connect_timeout: Duration,
 ) -> Result<(), String> {
+    let upstream_cache = Arc::new(tokio::sync::Mutex::new(None::<CachedUpstream<smelly_connect::transport::VpnStream>>));
     let io = TokioIo::new(client);
     hyper_server_http1::Builder::new()
         .half_close(true)
@@ -1543,9 +1597,11 @@ async fn handle_live_client(
             service_fn(move |request| {
                 let pool = pool.clone();
                 let stats = stats.clone();
+                let upstream_cache = Arc::clone(&upstream_cache);
                 async move {
                     Ok::<_, Infallible>(
-                        handle_live_request(request, pool, stats, connect_timeout).await,
+                        handle_live_request(request, pool, stats, connect_timeout, upstream_cache)
+                            .await,
                     )
                 }
             }),
@@ -1562,6 +1618,7 @@ async fn handle_test_request<F, Fut>(
     stats: Option<RuntimeStats>,
     connect_timeout: Duration,
     connector: F,
+    upstream_cache: Arc<tokio::sync::Mutex<Option<CachedUpstream<TcpStream>>>>,
 ) -> Response<ProxyBody>
 where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
@@ -1623,8 +1680,13 @@ where
         "request accepted"
     );
 
-    let upstream = connector(account_name, host, port);
-    let upstream = match connect_with_timeout(connect_timeout, upstream).await {
+    let wants_keep_alive = client_requests_keep_alive(&request);
+    let upstream = take_cached_upstream(&upstream_cache, &host, port).await;
+    let upstream = match upstream {
+        Some(upstream) => Ok(upstream),
+        None => connect_with_timeout(connect_timeout, connector(account_name, host.clone(), port)).await,
+    };
+    let upstream = match upstream {
         Ok(upstream) => upstream,
         Err(err) => {
             if let Some(stats) = &stats {
@@ -1634,7 +1696,15 @@ where
         }
     };
     let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
-    forward_request(request, uri, upstream, connection).await
+    if wants_keep_alive {
+        let (response, reusable) = forward_request_with_reuse(request, uri, upstream, connection).await;
+        if let Some(reusable) = reusable {
+            store_cached_upstream(&upstream_cache, host, port, reusable).await;
+        }
+        response
+    } else {
+        forward_request(request, uri, upstream, connection).await
+    }
 }
 
 async fn handle_live_request(
@@ -1642,6 +1712,7 @@ async fn handle_live_request(
     pool: SessionPool,
     stats: RuntimeStats,
     connect_timeout: Duration,
+    upstream_cache: Arc<tokio::sync::Mutex<Option<CachedUpstream<smelly_connect::transport::VpnStream>>>>,
 ) -> Response<ProxyBody> {
     let (account_name, session) = match pool.next_live_session().await {
         Ok(ready) => ready,
@@ -1708,8 +1779,13 @@ async fn handle_live_request(
         "request accepted"
     );
 
-    let upstream = session.connect_tcp((host.as_str(), port));
-    let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
+    let wants_keep_alive = client_requests_keep_alive(&request);
+    let upstream = take_cached_upstream(&upstream_cache, &host, port).await;
+    let upstream = match upstream {
+        Some(upstream) => Ok(upstream),
+        None => connect_session_with_timeout(connect_timeout, session.connect_tcp((host.as_str(), port))).await,
+    };
+    let upstream = match upstream {
         Ok(upstream) => upstream,
         Err(err) => {
             if !matches!(err, UpstreamConnectError::RouteRejected) {
@@ -1728,7 +1804,22 @@ async fn handle_live_request(
     };
     stats.record_connect_success();
     let connection = stats.open_connection(ProxyProtocol::Http);
-    forward_request(request, uri, upstream, Some(connection)).await
+    if wants_keep_alive {
+        let (response, reusable) =
+            forward_request_with_reuse(request, uri, upstream, Some(connection)).await;
+        if let Some(reusable) = reusable {
+            store_cached_upstream(&upstream_cache, host, port, reusable).await;
+        }
+        response
+    } else {
+        forward_request(request, uri, upstream, Some(connection)).await
+    }
+}
+
+struct CachedUpstream<S> {
+    host: String,
+    port: u16,
+    stream: S,
 }
 
 fn empty_response(status: StatusCode) -> Response<ProxyBody> {
@@ -1885,6 +1976,66 @@ async fn forward_request(
     }
 }
 
+async fn forward_request_with_reuse<S>(
+    request: Request<Incoming>,
+    uri: Uri,
+    mut upstream: S,
+    connection: Option<ConnectionGuard>,
+) -> (Response<ProxyBody>, Option<S>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (parts, mut body) = request.into_parts();
+    let mut upstream_request = format!(
+        "{} {} {}\r\n",
+        parts.method,
+        uri,
+        http_version_text(parts.version)
+    );
+    let mut forwarded_headers = http::HeaderMap::new();
+    for (name, value) in &parts.headers {
+        if should_strip_request_header(name) {
+            continue;
+        }
+        forwarded_headers.insert(name.clone(), value.clone());
+        upstream_request.push_str(name.as_str());
+        upstream_request.push_str(": ");
+        upstream_request.push_str(&String::from_utf8_lossy(value.as_bytes()));
+        upstream_request.push_str("\r\n");
+    }
+    upstream_request.push_str("\r\n");
+
+    record_client_to_upstream(
+        connection.as_ref(),
+        estimate_request_size(&parts.method, &uri, parts.version, &forwarded_headers, 0),
+    );
+
+    if upstream
+        .write_all(upstream_request.as_bytes())
+        .await
+        .is_err()
+    {
+        return (empty_response(StatusCode::BAD_GATEWAY), None);
+    }
+
+    while let Some(frame) = body.frame().await {
+        let Ok(frame) = frame else {
+            return (empty_response(StatusCode::BAD_GATEWAY), None);
+        };
+        if let Some(data) = frame.data_ref() {
+            if upstream.write_all(data).await.is_err() {
+                return (empty_response(StatusCode::BAD_GATEWAY), None);
+            }
+            record_client_to_upstream(connection.as_ref(), data.len());
+        }
+    }
+
+    match read_reusable_upstream_response(upstream, connection).await {
+        Ok(ok) => ok,
+        Err(_) => (empty_response(StatusCode::BAD_GATEWAY), None),
+    }
+}
+
 async fn relay_upgraded_tunnel(
     client: &mut (impl AsyncRead + AsyncWrite + Unpin),
     upstream: &mut (impl AsyncRead + AsyncWrite + Unpin),
@@ -1904,6 +2055,42 @@ fn should_strip_request_header(name: &http::header::HeaderName) -> bool {
         || name == CONNECTION
         || lower.eq_ignore_ascii_case("keep-alive")
         || name == EXPECT
+}
+
+fn client_requests_keep_alive(request: &Request<Incoming>) -> bool {
+    request
+        .headers()
+        .get(CONNECTION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("keep-alive"))
+        })
+}
+
+async fn take_cached_upstream<S>(
+    cache: &tokio::sync::Mutex<Option<CachedUpstream<S>>>,
+    host: &str,
+    port: u16,
+) -> Option<S> {
+    let mut cache = cache.lock().await;
+    let cached = cache.take()?;
+    if cached.host == host && cached.port == port {
+        Some(cached.stream)
+    } else {
+        None
+    }
+}
+
+async fn store_cached_upstream<S>(
+    cache: &tokio::sync::Mutex<Option<CachedUpstream<S>>>,
+    host: String,
+    port: u16,
+    stream: S,
+) {
+    let mut cache = cache.lock().await;
+    *cache = Some(CachedUpstream { host, port, stream });
 }
 
 fn estimate_request_size(
@@ -1966,6 +2153,104 @@ async fn read_upstream_response(
     builder = builder.header(CONNECTION, "close");
     let body = build_response_body(upstream, body_kind, initial_body, connection)?;
     builder.body(body).map_err(|err| err.to_string())
+}
+
+async fn read_reusable_upstream_response<S>(
+    mut upstream: S,
+    connection: Option<ConnectionGuard>,
+) -> Result<(Response<ProxyBody>, Option<S>), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut buffer = Vec::with_capacity(1024);
+    let header_end = read_headers(&mut upstream, &mut buffer)
+        .await
+        .map_err(|err| err.to_string())?;
+    let header_bytes = &buffer[..header_end];
+    let header_text = String::from_utf8_lossy(header_bytes);
+    let mut lines = header_text.split("\r\n").filter(|line| !line.is_empty());
+    let status_line = lines
+        .next()
+        .ok_or_else(|| "missing status line".to_string())?;
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+    let header_lines: Vec<&str> = lines.collect();
+    let body_kind = response_body_kind(status_code, &header_lines);
+    let initial_body = buffer[header_end..].to_vec();
+    let can_reuse =
+        response_allows_reuse(&header_lines) && matches!(body_kind, ResponseBodyKind::None | ResponseBodyKind::ContentLength(_));
+
+    if !can_reuse {
+        let mut builder = Response::builder().status(status_code);
+        for header in &header_lines {
+            if let Some((name, value)) = header.split_once(':') {
+                if name.trim().eq_ignore_ascii_case("connection")
+                    || name.trim().eq_ignore_ascii_case("keep-alive")
+                    || (matches!(body_kind, ResponseBodyKind::Chunked)
+                        && name.trim().eq_ignore_ascii_case("transfer-encoding"))
+                {
+                    continue;
+                }
+                builder = builder.header(name.trim(), value.trim());
+            }
+        }
+        builder = builder.header(CONNECTION, "close");
+        let body = build_response_body(upstream, body_kind, initial_body, connection)?;
+        let response = builder.body(body).map_err(|err| err.to_string())?;
+        return Ok((response, None));
+    }
+
+    let body = match body_kind {
+        ResponseBodyKind::None => Vec::new(),
+        ResponseBodyKind::ContentLength(length) => {
+            let mut body = initial_body;
+            while body.len() < length {
+                let mut chunk = [0_u8; 8192];
+                let n = upstream.read(&mut chunk).await.map_err(|err| err.to_string())?;
+                if n == 0 {
+                    return Err("connection closed before reusable response body completed".to_string());
+                }
+                body.extend_from_slice(&chunk[..n]);
+            }
+            body.truncate(length);
+            body
+        }
+        ResponseBodyKind::Chunked | ResponseBodyKind::ReadToEnd => unreachable!(),
+    };
+
+    if let Some(connection) = &connection {
+        connection.add_upstream_to_client_bytes(body.len() as u64);
+    }
+
+    let mut builder = Response::builder().status(status_code);
+    for header in &header_lines {
+        if let Some((name, value)) = header.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("connection")
+                || name.trim().eq_ignore_ascii_case("keep-alive")
+            {
+                continue;
+            }
+            builder = builder.header(name.trim(), value.trim());
+        }
+    }
+    let response = builder
+        .body(full_body(body, connection))
+        .map_err(|err| err.to_string())?;
+    Ok((response, Some(upstream)))
+}
+
+fn response_allows_reuse(header_lines: &[&str]) -> bool {
+    !header_lines.iter().any(|header| {
+        header.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("connection")
+                && value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("close"))
+        })
+    })
 }
 
 fn http_version_text(version: http::Version) -> &'static str {
@@ -2362,6 +2647,30 @@ async fn spawn_keep_alive_http_upstream() -> SocketAddr {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     });
     addr
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_reusable_keep_alive_http_upstream(
+) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let accepts_task = Arc::clone(&accepts);
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        accepts_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..2 {
+            let mut buf = [0_u8; 1024];
+            let _ = socket.read(&mut buf).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                )
+                .await
+                .unwrap();
+        }
+    });
+    (addr, accepts)
 }
 
 #[cfg(any(test, debug_assertions))]
