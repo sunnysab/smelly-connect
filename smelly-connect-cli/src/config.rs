@@ -283,7 +283,16 @@ pub fn merge_proxy_command(
     path: impl AsRef<Path>,
     command: &ProxyCommand,
 ) -> Result<AppConfig, String> {
-    let mut cfg = load(path)?;
+    let mut cfg = load_typed(path).map_err(|err| err.to_string())?;
+    apply_proxy_overrides(&mut cfg, command);
+    Ok(cfg)
+}
+
+pub fn merge_proxy_command_typed(
+    path: impl AsRef<Path>,
+    command: &ProxyCommand,
+) -> Result<AppConfig, CliError> {
+    let mut cfg = load_typed(path)?;
     apply_proxy_overrides(&mut cfg, command);
     Ok(cfg)
 }

@@ -1,14 +1,24 @@
 use crate::cli::ProxyCommand;
+use crate::error::CliError;
 use std::path::Path;
 
 pub async fn run_proxy(
     config_path: impl AsRef<Path>,
     command: &ProxyCommand,
 ) -> Result<(), String> {
-    let config = crate::config::merge_proxy_command(config_path, command)?;
+    run_proxy_typed(config_path, command)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+pub async fn run_proxy_typed(
+    config_path: impl AsRef<Path>,
+    command: &ProxyCommand,
+) -> Result<(), CliError> {
+    let config = crate::config::merge_proxy_command_typed(config_path, command)?;
     let pool = crate::pool::SessionPool::from_config_allow_empty(&config)
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| CliError::Command(err.to_string()))?;
     let stats = crate::runtime::RuntimeStats::default();
     let upstream_tcp_connect_timeout = config.upstream_tcp_connect_timeout();
     let udp_associate_idle_timeout = config.udp_associate_idle_timeout();
@@ -61,23 +71,29 @@ pub async fn run_proxy(
 
     #[cfg(not(feature = "management-api"))]
     if config.management.enabled {
-        return Err(
+        return Err(CliError::Command(
             "management api requested in config but this binary was built without the management-api feature"
                 .to_string(),
-        );
+        ));
     }
 
     if tasks.is_empty() {
-        return Err("no proxy listener enabled".to_string());
+        return Err(CliError::Command("no proxy listener enabled".to_string()));
     }
 
     let Some(result) = tasks.join_next().await else {
-        return Err("no proxy listener remained running".to_string());
+        return Err(CliError::Command(
+            "no proxy listener remained running".to_string(),
+        ));
     };
 
     match result {
-        Ok(Ok(())) => Err("proxy listener exited unexpectedly".to_string()),
-        Ok(Err(err)) => Err(err),
-        Err(err) => Err(format!("proxy listener task failed: {err}")),
+        Ok(Ok(())) => Err(CliError::Command(
+            "proxy listener exited unexpectedly".to_string(),
+        )),
+        Ok(Err(err)) => Err(CliError::Command(err)),
+        Err(err) => Err(CliError::Command(format!(
+            "proxy listener task failed: {err}"
+        ))),
     }
 }
