@@ -215,3 +215,11 @@ async fn http_allow_all_connect_failure_does_not_mark_live_session_open() {
     assert!(result.state_summary.contains("Ready"));
     assert!(result.selectable_after_failure);
 }
+
+#[tokio::test]
+async fn http_proxy_rejects_over_capacity_requests_quickly() {
+    let result = smelly_connect_cli::proxy::http::proxy_http_over_capacity_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.status_code, 503);
+}
