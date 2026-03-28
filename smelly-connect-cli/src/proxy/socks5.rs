@@ -5,7 +5,6 @@ use std::io;
 use std::net::SocketAddr as StdSocketAddr;
 #[cfg(any(test, debug_assertions))]
 use std::net::SocketAddr;
-#[cfg(any(test, debug_assertions))]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 #[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 #[cfg(any(test, debug_assertions))]
 use tokio::time::Instant;
 
@@ -30,6 +30,7 @@ use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 
 #[cfg(any(test, debug_assertions))]
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_MAX_IN_FLIGHT_CONNECTIONS: usize = 1024;
 
 #[derive(Debug, Clone)]
 enum UpstreamConnectError {
@@ -585,10 +586,30 @@ pub async fn serve_socks5(
     connect_timeout: Duration,
     udp_associate_idle_timeout: Option<Duration>,
 ) -> Result<(), String> {
+    serve_socks5_with_limit(
+        listen,
+        pool,
+        stats,
+        connect_timeout,
+        udp_associate_idle_timeout,
+        DEFAULT_MAX_IN_FLIGHT_CONNECTIONS,
+    )
+    .await
+}
+
+async fn serve_socks5_with_limit(
+    listen: String,
+    pool: SessionPool,
+    stats: RuntimeStats,
+    connect_timeout: Duration,
+    udp_associate_idle_timeout: Option<Duration>,
+    max_in_flight_connections: usize,
+) -> Result<(), String> {
     let listener = TcpListener::bind(listen)
         .await
         .map_err(|err| err.to_string())?;
     let local_addr = listener.local_addr().map_err(|err| err.to_string())?;
+    let limiter = Arc::new(Semaphore::new(max_in_flight_connections));
     tracing::info!(
         protocol = tracing::field::display("socks5"),
         listen = %local_addr,
@@ -596,25 +617,36 @@ pub async fn serve_socks5(
     );
     loop {
         let (stream, _) = listener.accept().await.map_err(|err| err.to_string())?;
+        let permit = limiter.clone().try_acquire_owned();
         let pool = pool.clone();
         let stats = stats.clone();
-        tokio::spawn(async move {
-            if let Err(err) = handle_live_client(
-                stream,
-                pool,
-                stats,
-                connect_timeout,
-                udp_associate_idle_timeout,
-            )
-            .await
-            {
-                tracing::warn!(
-                    protocol = tracing::field::display("socks5"),
-                    error = %err,
-                    "live proxy request failed"
-                );
+        match permit {
+            Ok(permit) => {
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    if let Err(err) = handle_live_client(
+                        stream,
+                        pool,
+                        stats,
+                        connect_timeout,
+                        udp_associate_idle_timeout,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            protocol = tracing::field::display("socks5"),
+                            error = %err,
+                            "live proxy request failed"
+                        );
+                    }
+                });
             }
-        });
+            Err(_) => {
+                tokio::spawn(async move {
+                    let _ = reject_over_capacity_socks5(stream).await;
+                });
+            }
+        }
     }
 }
 
@@ -652,6 +684,22 @@ pub async fn proxy_socks5_live_failure_for_test() -> Result<(), String> {
     let _ = client.shutdown().await;
     tokio::time::sleep(Duration::from_millis(20)).await;
     Ok(())
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_over_capacity_for_test() -> Result<Socks5FailureResult, String> {
+    let upstream = spawn_echo_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_socks5_with_limit(pool, 1, move |_account_name, _host, _port| async move {
+        TcpStream::connect(upstream).await
+    })
+    .await?;
+
+    let blocker = TcpStream::connect(addr).await.map_err(|err| err.to_string())?;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let result = request_no_ready_session(addr).await;
+    drop(blocker);
+    result
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -727,7 +775,14 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    spawn_test_socks5_internal(pool, None, DEFAULT_CONNECT_TIMEOUT, connector).await
+    spawn_test_socks5_internal(
+        pool,
+        None,
+        DEFAULT_CONNECT_TIMEOUT,
+        DEFAULT_MAX_IN_FLIGHT_CONNECTIONS,
+        connector,
+    )
+    .await
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -740,7 +795,14 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    spawn_test_socks5_internal(pool, Some(stats), DEFAULT_CONNECT_TIMEOUT, connector).await
+    spawn_test_socks5_internal(
+        pool,
+        Some(stats),
+        DEFAULT_CONNECT_TIMEOUT,
+        DEFAULT_MAX_IN_FLIGHT_CONNECTIONS,
+        connector,
+    )
+    .await
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -753,7 +815,34 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    spawn_test_socks5_internal(pool, None, connect_timeout, connector).await
+    spawn_test_socks5_internal(
+        pool,
+        None,
+        connect_timeout,
+        DEFAULT_MAX_IN_FLIGHT_CONNECTIONS,
+        connector,
+    )
+    .await
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_test_socks5_with_limit<F, Fut>(
+    pool: SessionPool,
+    max_in_flight_connections: usize,
+    connector: F,
+) -> Result<SocketAddr, String>
+where
+    F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
+{
+    spawn_test_socks5_internal(
+        pool,
+        None,
+        DEFAULT_CONNECT_TIMEOUT,
+        max_in_flight_connections,
+        connector,
+    )
+    .await
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -761,6 +850,7 @@ async fn spawn_test_socks5_internal<F, Fut>(
     pool: SessionPool,
     stats: Option<RuntimeStats>,
     connect_timeout: Duration,
+    max_in_flight_connections: usize,
     connector: F,
 ) -> Result<SocketAddr, String>
 where
@@ -771,21 +861,38 @@ where
         .await
         .map_err(|err| err.to_string())?;
     let addr = listener.local_addr().map_err(|err| err.to_string())?;
+    let limiter = Arc::new(Semaphore::new(max_in_flight_connections));
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
+            let permit = limiter.clone().try_acquire_owned();
             let pool = pool.clone();
             let stats = stats.clone();
             let connector = connector.clone();
             let connect_timeout = connect_timeout;
-            tokio::spawn(async move {
-                let _ = handle_client(stream, pool, stats, connect_timeout, connector).await;
-            });
+            match permit {
+                Ok(permit) => {
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let _ = handle_client(stream, pool, stats, connect_timeout, connector).await;
+                    });
+                }
+                Err(_) => {
+                    tokio::spawn(async move {
+                        let _ = reject_over_capacity_socks5(stream).await;
+                    });
+                }
+            }
         }
     });
     Ok(addr)
+}
+
+async fn reject_over_capacity_socks5(stream: TcpStream) -> io::Result<()> {
+    drop(stream);
+    Ok(())
 }
 
 #[cfg(any(test, debug_assertions))]

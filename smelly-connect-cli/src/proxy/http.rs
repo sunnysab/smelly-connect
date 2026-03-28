@@ -5,7 +5,6 @@ use std::io;
 #[cfg(any(test, debug_assertions))]
 use std::net::SocketAddr;
 use std::pin::Pin;
-#[cfg(any(test, debug_assertions))]
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -23,7 +22,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirec
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 #[cfg(any(test, debug_assertions))]
 use tokio::time::Instant;
 
@@ -34,6 +33,7 @@ use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 
 type ProxyBody = BoxBody<Bytes, io::Error>;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
+const DEFAULT_MAX_IN_FLIGHT_CONNECTIONS: usize = 1024;
 
 #[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
@@ -1195,10 +1195,28 @@ pub async fn serve_http(
     stats: RuntimeStats,
     connect_timeout: Duration,
 ) -> Result<(), String> {
+    serve_http_with_limit(
+        listen,
+        pool,
+        stats,
+        connect_timeout,
+        DEFAULT_MAX_IN_FLIGHT_CONNECTIONS,
+    )
+    .await
+}
+
+async fn serve_http_with_limit(
+    listen: String,
+    pool: SessionPool,
+    stats: RuntimeStats,
+    connect_timeout: Duration,
+    max_in_flight_connections: usize,
+) -> Result<(), String> {
     let listener = TcpListener::bind(listen)
         .await
         .map_err(|err| err.to_string())?;
     let local_addr = listener.local_addr().map_err(|err| err.to_string())?;
+    let limiter = Arc::new(Semaphore::new(max_in_flight_connections));
     tracing::info!(
         protocol = tracing::field::display("http"),
         listen = %local_addr,
@@ -1206,17 +1224,29 @@ pub async fn serve_http(
     );
     loop {
         let (stream, _) = listener.accept().await.map_err(|err| err.to_string())?;
+        let permit = limiter.clone().try_acquire_owned();
         let pool = pool.clone();
         let stats = stats.clone();
-        tokio::spawn(async move {
-            if let Err(err) = handle_live_client(stream, pool, stats, connect_timeout).await {
-                tracing::warn!(
-                    protocol = tracing::field::display("http"),
-                    error = %err,
-                    "live proxy request failed"
-                );
+        match permit {
+            Ok(permit) => {
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    if let Err(err) = handle_live_client(stream, pool, stats, connect_timeout).await
+                    {
+                        tracing::warn!(
+                            protocol = tracing::field::display("http"),
+                            error = %err,
+                            "live proxy request failed"
+                        );
+                    }
+                });
             }
-        });
+            Err(_) => {
+                tokio::spawn(async move {
+                    let _ = reject_over_capacity_http(stream).await;
+                });
+            }
+        }
     }
 }
 
@@ -1261,12 +1291,28 @@ pub async fn proxy_http_live_failure_for_test() -> Result<(), String> {
 }
 
 #[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_over_capacity_for_test() -> Result<NoReadySessionResult, String> {
+    let upstream = spawn_http_upstream().await;
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let addr = spawn_test_proxy_with_limit(pool, 1, move |_account_name, _host, _port| async move {
+        TcpStream::connect(upstream).await
+    })
+    .await?;
+
+    let blocker = TcpStream::connect(addr).await.map_err(|err| err.to_string())?;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let result = request_no_ready_session(addr).await;
+    drop(blocker);
+    result
+}
+
+#[cfg(any(test, debug_assertions))]
 async fn spawn_test_proxy<F, Fut>(pool: SessionPool, connector: F) -> Result<SocketAddr, String>
 where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    spawn_test_proxy_internal(pool, None, DEFAULT_CONNECT_TIMEOUT, connector).await
+    spawn_test_proxy_internal(pool, None, DEFAULT_CONNECT_TIMEOUT, DEFAULT_MAX_IN_FLIGHT_CONNECTIONS, connector).await
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -1279,7 +1325,14 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    spawn_test_proxy_internal(pool, Some(stats), DEFAULT_CONNECT_TIMEOUT, connector).await
+    spawn_test_proxy_internal(
+        pool,
+        Some(stats),
+        DEFAULT_CONNECT_TIMEOUT,
+        DEFAULT_MAX_IN_FLIGHT_CONNECTIONS,
+        connector,
+    )
+    .await
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -1292,7 +1345,34 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    spawn_test_proxy_internal(pool, None, connect_timeout, connector).await
+    spawn_test_proxy_internal(
+        pool,
+        None,
+        connect_timeout,
+        DEFAULT_MAX_IN_FLIGHT_CONNECTIONS,
+        connector,
+    )
+    .await
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_test_proxy_with_limit<F, Fut>(
+    pool: SessionPool,
+    max_in_flight_connections: usize,
+    connector: F,
+) -> Result<SocketAddr, String>
+where
+    F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
+{
+    spawn_test_proxy_internal(
+        pool,
+        None,
+        DEFAULT_CONNECT_TIMEOUT,
+        max_in_flight_connections,
+        connector,
+    )
+    .await
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -1300,6 +1380,7 @@ async fn spawn_test_proxy_internal<F, Fut>(
     pool: SessionPool,
     stats: Option<RuntimeStats>,
     connect_timeout: Duration,
+    max_in_flight_connections: usize,
     connector: F,
 ) -> Result<SocketAddr, String>
 where
@@ -1310,21 +1391,37 @@ where
         .await
         .map_err(|err| err.to_string())?;
     let addr = listener.local_addr().map_err(|err| err.to_string())?;
+    let limiter = Arc::new(Semaphore::new(max_in_flight_connections));
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
+            let permit = limiter.clone().try_acquire_owned();
             let pool = pool.clone();
             let stats = stats.clone();
             let connector = connector.clone();
             let connect_timeout = connect_timeout;
-            tokio::spawn(async move {
-                let _ = handle_client(stream, pool, stats, connect_timeout, connector).await;
-            });
+            match permit {
+                Ok(permit) => {
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let _ = handle_client(stream, pool, stats, connect_timeout, connector).await;
+                    });
+                }
+                Err(_) => {
+                    tokio::spawn(async move {
+                        let _ = reject_over_capacity_http(stream).await;
+                    });
+                }
+            }
         }
     });
     Ok(addr)
+}
+
+async fn reject_over_capacity_http(mut stream: TcpStream) -> io::Result<()> {
+    stream.shutdown().await
 }
 
 #[cfg(any(test, debug_assertions))]
