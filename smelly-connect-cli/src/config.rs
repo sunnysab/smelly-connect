@@ -6,6 +6,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use crate::cli::ProxyCommand;
+use crate::error::CliError;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -246,8 +247,12 @@ impl AppConfig {
 }
 
 pub fn load(path: impl AsRef<Path>) -> Result<AppConfig, String> {
-    let body = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
-    toml::from_str(&body).map_err(|err| err.to_string())
+    load_typed(path).map_err(|err| err.to_string())
+}
+
+pub fn load_typed(path: impl AsRef<Path>) -> Result<AppConfig, CliError> {
+    let body = std::fs::read_to_string(path).map_err(|err| CliError::Config(err.to_string()))?;
+    toml::from_str(&body).map_err(|err| CliError::Config(err.to_string()))
 }
 
 #[cfg(any(test, debug_assertions))]
