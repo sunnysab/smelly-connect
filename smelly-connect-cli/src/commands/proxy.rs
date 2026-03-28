@@ -71,13 +71,13 @@ pub async fn run_proxy(
         return Err("no proxy listener enabled".to_string());
     }
 
-    while let Some(result) = tasks.join_next().await {
-        match result {
-            Ok(Ok(())) => return Err("proxy listener exited unexpectedly".to_string()),
-            Ok(Err(err)) => return Err(err),
-            Err(err) => return Err(format!("proxy listener task failed: {err}")),
-        }
-    }
+    let Some(result) = tasks.join_next().await else {
+        return Err("no proxy listener remained running".to_string());
+    };
 
-    Err("no proxy listener remained running".to_string())
+    match result {
+        Ok(Ok(())) => Err("proxy listener exited unexpectedly".to_string()),
+        Ok(Err(err)) => Err(err),
+        Err(err) => Err(format!("proxy listener task failed: {err}")),
+    }
 }
