@@ -26,7 +26,11 @@ fn wildcard_domain_rules_match_subdomains() {
 "#;
     let parsed = smelly_connect::resource::parse_resources(body).unwrap();
     assert!(parsed.domain_rules.contains_key(".sit.edu.cn"));
-    assert!(parsed.matches_domain("jwxt.sit.edu.cn", 443));
+    assert!(parsed.matches_domain(
+        "jwxt.sit.edu.cn",
+        443,
+        smelly_connect::RouteProtocol::Tcp,
+    ));
 }
 
 #[test]

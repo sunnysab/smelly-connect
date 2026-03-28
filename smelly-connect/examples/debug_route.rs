@@ -52,7 +52,9 @@ async fn main() {
         .await
         .expect("system lookup");
     for addr in resolved {
-        let allowed = state.resources.matches_ip(addr.ip(), port);
+        let allowed = state
+            .resources
+            .matches_ip(addr.ip(), port, smelly_connect::RouteProtocol::Tcp);
         println!("resolved: {addr} allowed={allowed}");
     }
 }
