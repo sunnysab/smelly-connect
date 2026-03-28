@@ -10,8 +10,6 @@ pub mod proxy {
     pub use crate::proxy::tests::*;
 }
 
+pub mod resolver;
 pub mod session;
-
-pub mod transport {
-    pub use crate::transport::tests::*;
-}
+pub mod transport;
