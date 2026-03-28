@@ -1167,7 +1167,9 @@ async fn handle_live_client(
             let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
                 Ok(upstream) => upstream,
                 Err(err) => {
-                    stats.record_connect_failure();
+                    if !matches!(err, UpstreamConnectError::RouteRejected) {
+                        stats.record_connect_failure();
+                    }
                     if !matches!(err, UpstreamConnectError::RouteRejected) {
                         pool.report_live_session_unhealthy_if_probe_fails(
                             &account_name,
