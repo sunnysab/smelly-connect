@@ -6,9 +6,7 @@ pub mod integration {
     pub use crate::integration::tests::*;
 }
 
-pub mod proxy {
-    pub use crate::proxy::tests::*;
-}
+pub mod proxy;
 
 pub mod resolver;
 pub mod session;
