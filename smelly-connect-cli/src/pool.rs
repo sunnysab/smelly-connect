@@ -70,7 +70,6 @@ pub enum AccountState {
 
 #[derive(Clone)]
 struct AccountNode {
-    name: String,
     account: AccountConfig,
     state: AccountState,
     #[allow(dead_code)]
@@ -241,7 +240,6 @@ impl SessionPool {
                 })
             };
             nodes.push(AccountNode {
-                name: name.clone(),
                 account: AccountConfig {
                     name: name.clone(),
                     username: name.clone(),
@@ -277,7 +275,6 @@ impl SessionPool {
         let nodes = names
             .into_iter()
             .map(|name| AccountNode {
-                name: name.to_string(),
                 account: AccountConfig {
                     name: name.to_string(),
                     username: name.to_string(),
@@ -315,7 +312,6 @@ impl SessionPool {
         let nodes = entries
             .into_iter()
             .map(|(account_name, host, ip)| AccountNode {
-                name: account_name.to_string(),
                 account: AccountConfig {
                     name: account_name.to_string(),
                     username: account_name.to_string(),
@@ -359,7 +355,6 @@ impl SessionPool {
         let nodes = entries
             .into_iter()
             .map(|(account_name, session)| AccountNode {
-                name: account_name.to_string(),
                 account: AccountConfig {
                     name: account_name.to_string(),
                     username: account_name.to_string(),
@@ -441,7 +436,6 @@ impl SessionPool {
                 ),
             };
             nodes.push(AccountNode {
-                name: name.clone(),
                 account: AccountConfig {
                     name: name.clone(),
                     username: name.clone(),
@@ -478,7 +472,6 @@ impl SessionPool {
         for idx in 0..total {
             let name = format!("failed-{:02}", idx + 1);
             nodes.push(AccountNode {
-                name: name.clone(),
                 account: AccountConfig {
                     name: name.clone(),
                     username: name.clone(),
@@ -516,7 +509,6 @@ impl SessionPool {
         Self {
             inner: Arc::new(Mutex::new(PoolState {
                 nodes: vec![AccountNode {
-                    name: "acct-01".to_string(),
                     account: AccountConfig {
                         name: "acct-01".to_string(),
                         username: "acct-01".to_string(),
@@ -564,7 +556,6 @@ impl SessionPool {
         let mut nodes = Vec::new();
         for account in &cfg.accounts {
             nodes.push(AccountNode {
-                name: account.name.clone(),
                 account: account.clone(),
                 state: AccountState::Configured(account.clone()),
                 flaky_retry: false,
@@ -637,7 +628,7 @@ impl SessionPool {
             .iter()
             .map(|node| {
                 let label = state_label(&node.state);
-                format!("{}:{label}", node.name)
+                format!("{}:{label}", node.account.name)
             })
             .collect::<Vec<_>>()
             .join(",")
@@ -651,7 +642,7 @@ impl SessionPool {
 
         for node in &state.nodes {
             nodes.push(AccountNodeSnapshot {
-                name: node.name.clone(),
+                name: node.account.name.clone(),
                 state: state_label(&node.state).to_ascii_lowercase(),
                 consecutive_failures: node.consecutive_failures,
                 failure_threshold: node.failure_threshold,
@@ -691,7 +682,7 @@ impl SessionPool {
                 _ => None,
             };
             nodes.push(AccountRoutesSnapshot {
-                name: node.name.clone(),
+                name: node.account.name.clone(),
                 state: state_label(&node.state).to_ascii_lowercase(),
                 routes,
                 local_routes,
@@ -710,7 +701,7 @@ impl SessionPool {
         if let Some(node) = state
             .nodes
             .iter_mut()
-            .find(|node| node.name == account_name)
+            .find(|node| node.account.name == account_name)
         {
             node.live_probe_in_flight = false;
             if matches!(
@@ -738,7 +729,7 @@ impl SessionPool {
         if let Some(node) = state
             .nodes
             .iter_mut()
-            .find(|node| node.name == account_name)
+            .find(|node| node.account.name == account_name)
         {
             node.live_probe_in_flight = false;
             if matches!(
@@ -822,7 +813,7 @@ impl SessionPool {
                 continue;
             };
             node.live_probe_in_flight = true;
-            sessions.push((node.name.clone(), session));
+            sessions.push((node.account.name.clone(), session));
         }
         sessions
     }
@@ -888,7 +879,7 @@ impl SessionPool {
         let Some(node) = state
             .nodes
             .iter_mut()
-            .find(|node| node.name == account_name)
+            .find(|node| node.account.name == account_name)
         else {
             return false;
         };
@@ -910,7 +901,7 @@ impl SessionPool {
         if let Some(node) = state
             .nodes
             .iter_mut()
-            .find(|node| node.name == account_name)
+            .find(|node| node.account.name == account_name)
         {
             node.live_probe_in_flight = false;
         }
@@ -934,7 +925,6 @@ impl SessionPool {
             inner: Arc::new(Mutex::new(PoolState {
                 nodes: vec![
                     AccountNode {
-                        name: "ready-01".to_string(),
                         account: AccountConfig {
                             name: "ready-01".to_string(),
                             username: "ready-01".to_string(),
@@ -953,7 +943,6 @@ impl SessionPool {
                         live_probe_in_flight: false,
                     },
                     AccountNode {
-                        name: "suspect-01".to_string(),
                         account: AccountConfig {
                             name: "suspect-01".to_string(),
                             username: "suspect-01".to_string(),
@@ -972,7 +961,6 @@ impl SessionPool {
                         live_probe_in_flight: false,
                     },
                     AccountNode {
-                        name: "open-01".to_string(),
                         account: AccountConfig {
                             name: "open-01".to_string(),
                             username: "open-01".to_string(),
@@ -991,7 +979,6 @@ impl SessionPool {
                         live_probe_in_flight: false,
                     },
                     AccountNode {
-                        name: "half-open-01".to_string(),
                         account: AccountConfig {
                             name: "half-open-01".to_string(),
                             username: "half-open-01".to_string(),
@@ -1035,7 +1022,6 @@ impl SessionPool {
         Self {
             inner: Arc::new(Mutex::new(PoolState {
                 nodes: vec![AccountNode {
-                    name: account.name.clone(),
                     account: account.clone(),
                     state: AccountState::Open(AccountFailure {
                         message: "vpn unavailable".to_string(),
@@ -1140,7 +1126,7 @@ impl SessionPool {
             node.state = AccountState::Open(AccountFailure {
                 message: "forced probe failure".to_string(),
             });
-            let name = node.name.clone();
+            let name = node.account.name.clone();
             let backoff = node.current_backoff;
             let account = node.account.clone();
             let inner = Arc::clone(&self.inner);
@@ -1148,7 +1134,7 @@ impl SessionPool {
             tokio::spawn(async move {
                 tokio::time::sleep(backoff).await;
                 let mut state = inner.lock().await;
-                if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
+                if let Some(node) = state.nodes.iter_mut().find(|node| node.account.name == name) {
                     node.state = AccountState::HalfOpen(account);
                 }
             });
@@ -1214,7 +1200,7 @@ impl SessionPool {
             .iter_mut()
             .find(|node| matches!(node.state, AccountState::Configured(_)))
         {
-            node.state = AccountState::Ready(PooledSession::new(node.name.clone(), None).into());
+            node.state = AccountState::Ready(PooledSession::new(node.account.name.clone(), None).into());
             return Ok(());
         }
         Err(PoolError::new("no configurable account remaining"))
@@ -1237,7 +1223,7 @@ impl SessionPool {
                         AccountState::Ready(_) | AccountState::Suspect(_)
                     )
                 }) {
-                    let name = node.name.clone();
+                    let name = node.account.name.clone();
                     let flaky_retry = node.flaky_retry;
                     node.live_probe_in_flight = false;
                     node.consecutive_failures += 1;
@@ -1285,7 +1271,7 @@ impl SessionPool {
                     );
                     tokio::time::sleep(retry_delay).await;
                     let mut state = inner.lock().await;
-                    if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
+                    if let Some(node) = state.nodes.iter_mut().find(|node| node.account.name == name) {
                         node.state = AccountState::Ready(
                             PooledSession::new(node.account.name.clone(), None).into(),
                         );
@@ -1359,7 +1345,7 @@ impl SessionPool {
                 return Err(PoolError::new("no configurable account remaining"));
             };
             let account = state.nodes[idx].account.clone();
-            let name = state.nodes[idx].name.clone();
+            let name = state.nodes[idx].account.name.clone();
             state.nodes[idx].state = AccountState::Connecting;
             (name, account, server)
         };
@@ -1377,7 +1363,7 @@ impl SessionPool {
             Ok(session) => {
                 let pooled = self.wrap_live_session(account.name.clone(), session);
                 let mut state = self.inner.lock().await;
-                if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
+                if let Some(node) = state.nodes.iter_mut().find(|node| node.account.name == name) {
                     node.state = AccountState::Ready(pooled.into());
                     tracing::info!(account = %account.name, "account ready");
                 }
@@ -1385,7 +1371,7 @@ impl SessionPool {
             }
             Err(err) => {
                 let mut state = self.inner.lock().await;
-                if let Some(node) = state.nodes.iter_mut().find(|node| node.name == name) {
+                if let Some(node) = state.nodes.iter_mut().find(|node| node.account.name == name) {
                     open_node(node, err.to_string());
                 }
                 tracing::warn!(account = %account.name, error = %err, "account prewarm failed");
@@ -1429,7 +1415,7 @@ impl SessionPool {
         let idx = probe_candidates[pos];
         let node = &mut state.nodes[idx];
         let account = node.account.clone();
-        let name = node.name.clone();
+        let name = node.account.name.clone();
         node.state = AccountState::Connecting;
         node.open_until = None;
         tracing::info!(account = %name, "request-triggered recovery probe scheduled");
@@ -1480,7 +1466,7 @@ impl SessionPool {
         let node = state
             .nodes
             .iter_mut()
-            .find(|node| node.name == name)
+            .find(|node| node.account.name == name)
             .ok_or_else(|| PoolError::new(format!("probe target disappeared: {name}")))?;
         node.account = account;
         node.consecutive_failures = 0;
@@ -1496,7 +1482,7 @@ impl SessionPool {
         let node = state
             .nodes
             .iter_mut()
-            .find(|node| node.name == name)
+            .find(|node| node.account.name == name)
             .ok_or_else(|| PoolError::new(format!("probe target disappeared: {name}")))?;
         open_node(node, error.clone());
         tracing::warn!(account = %name, error = %error, "request-triggered recovery probe failed");
