@@ -51,6 +51,52 @@ async fn proxy_command_rejects_management_config_when_feature_is_disabled() {
 }
 
 #[tokio::test]
+async fn proxy_command_returns_typed_error_when_management_feature_is_missing() {
+    let path = write_temp_config(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+
+        [pool]
+        prewarm = 0
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = false
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+
+        [management]
+        enabled = true
+        listen = "127.0.0.1:9090"
+        "#,
+    );
+    let command = smelly_connect_cli::cli::ProxyCommand {
+        listen_http: None,
+        listen_socks5: None,
+        prewarm: None,
+        keepalive_host: None,
+        allow_all: false,
+    };
+
+    let err = smelly_connect_cli::commands::proxy::run_proxy_typed(&path, &command)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, smelly_connect_cli::error::CliError::Command(_)));
+    let _ = fs::remove_file(path);
+}
+
+#[tokio::test]
 async fn proxy_command_surfaces_listener_failure_instead_of_hanging() {
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
