@@ -68,3 +68,46 @@ async fn http_connect_failure_marks_runtime_status_recovering() {
             .unwrap();
     assert_eq!(snapshot.status, smelly_connect_cli::pool::PoolHealthStatus::Recovering);
 }
+
+#[test]
+fn status_command_returns_typed_error_when_management_is_disabled() {
+    let path = std::env::temp_dir().join("smelly-connect-cli-status-no-management.toml");
+    std::fs::write(
+        &path,
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+
+        [pool]
+        prewarm = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+    )
+    .unwrap();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let err = rt
+        .block_on(smelly_connect_cli::commands::status::run_status_with_config_typed(
+            &path,
+        ))
+        .unwrap_err();
+    assert!(matches!(err, smelly_connect_cli::error::CliError::Command(_)));
+    let _ = std::fs::remove_file(path);
+}
