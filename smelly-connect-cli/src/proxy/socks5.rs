@@ -32,6 +32,10 @@ use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_MAX_IN_FLIGHT_CONNECTIONS: usize = 1024;
 
+fn reply_success_addr() -> std::net::SocketAddr {
+    std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0))
+}
+
 #[derive(Debug, Clone)]
 enum UpstreamConnectError {
     TimedOut,
@@ -1119,7 +1123,7 @@ where
     };
     let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Socks5));
     let mut client = proto
-        .reply_success("127.0.0.1:0".parse().unwrap())
+        .reply_success(reply_success_addr())
         .await
         .map_err(|err| err.to_string())?;
     relay_tunnel(&mut client, &mut upstream, connection.as_ref()).await
@@ -1188,7 +1192,7 @@ async fn handle_live_client(
             stats.record_connect_success();
             let connection = stats.open_connection(ProxyProtocol::Socks5);
             let mut client = proto
-                .reply_success("127.0.0.1:0".parse().unwrap())
+                .reply_success(reply_success_addr())
                 .await
                 .map_err(|err| err.to_string())?;
             relay_tunnel(&mut client, &mut upstream, Some(&connection)).await

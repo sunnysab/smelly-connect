@@ -24,7 +24,7 @@ async fn build_client_with_proxy_addr(
     session: &EasyConnectSession,
 ) -> Result<(reqwest::Client, SocketAddr), Error> {
     let handle = session
-        .start_http_proxy("127.0.0.1:0".parse().unwrap())
+        .start_http_proxy(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)))
         .await?;
     let proxy_addr = handle.local_addr();
     let client = build_client_from_handle(handle)?;
