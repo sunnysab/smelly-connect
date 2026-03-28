@@ -22,3 +22,18 @@ async fn test_http_fetches_url() {
             .unwrap();
     assert!(output.contains("status="));
 }
+
+#[test]
+fn test_tcp_returns_typed_error_for_missing_port() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let err = rt
+        .block_on(smelly_connect_cli::commands::test::run_tcp_with_config_typed(
+            "tests/fixtures/config.sample.toml",
+            "10.0.0.8",
+        ))
+        .unwrap_err();
+    assert!(matches!(err, smelly_connect_cli::error::CliError::Command(_)));
+}
