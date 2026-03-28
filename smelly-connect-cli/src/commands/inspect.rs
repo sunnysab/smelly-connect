@@ -2,6 +2,8 @@
 use smelly_connect::test_support;
 use std::path::Path;
 
+use crate::error::CliError;
+
 #[cfg(any(test, debug_assertions))]
 pub async fn inspect_route_for_test(host: &str, port: u16) -> String {
     let session = test_support::session::login_harness().ready_session().await;
@@ -35,14 +37,24 @@ pub async fn run_route_with_config(
     host: &str,
     port: u16,
 ) -> Result<String, String> {
-    let config = crate::config::load(config_path)?;
+    run_route_with_config_typed(config_path, host, port)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+pub async fn run_route_with_config_typed(
+    config_path: impl AsRef<Path>,
+    host: &str,
+    port: u16,
+) -> Result<String, CliError> {
+    let config = crate::config::load_typed(config_path)?;
     let pool = crate::pool::SessionPool::from_config(&config)
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| CliError::Command(err.to_string()))?;
     let (_account_name, session) = pool
         .next_live_session()
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| CliError::Command(err.to_string()))?;
     match session.plan_tcp_connect((host, port)).await {
         Ok(route) => Ok(format!("allowed: {route:?}")),
         Err(err) => Ok(format!("rejected: {err:?}")),
@@ -50,10 +62,18 @@ pub async fn run_route_with_config(
 }
 
 pub async fn run_session_with_config(config_path: impl AsRef<Path>) -> Result<String, String> {
-    let config = crate::config::load(config_path)?;
+    run_session_with_config_typed(config_path)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+pub async fn run_session_with_config_typed(
+    config_path: impl AsRef<Path>,
+) -> Result<String, CliError> {
+    let config = crate::config::load_typed(config_path)?;
     let pool = crate::pool::SessionPool::from_config(&config)
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| CliError::Command(err.to_string()))?;
     let ready = pool.ready_count().await;
     Ok(format!(
         "configured={} ready={ready}",
