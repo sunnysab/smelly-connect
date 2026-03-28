@@ -1,6 +1,5 @@
 use smelly_connect::auth::control::{request_ip_for_server, request_token};
-use smelly_connect::runtime::control_plane::run_control_plane;
-use smelly_connect::{CaptchaHandler, EasyConnectConfig};
+use smelly_connect::{CaptchaHandler, EasyConnectConfig, run_control_plane};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {

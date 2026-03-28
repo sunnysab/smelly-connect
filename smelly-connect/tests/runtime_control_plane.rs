@@ -1,4 +1,4 @@
-use smelly_connect::runtime::control_plane::AuthenticatedSessionSeed;
+use smelly_connect::AuthenticatedSessionSeed;
 
 #[test]
 fn authenticated_session_seed_carries_resources_and_tunnel_bootstrap() {

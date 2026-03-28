@@ -1,5 +1,4 @@
-use smelly_connect::runtime::control_plane::run_control_plane;
-use smelly_connect::{CaptchaError, CaptchaHandler, EasyConnectConfig};
+use smelly_connect::{CaptchaError, CaptchaHandler, EasyConnectConfig, run_control_plane};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
