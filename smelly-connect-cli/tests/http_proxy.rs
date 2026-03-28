@@ -33,6 +33,16 @@ async fn http_proxy_completes_body_when_upstream_keeps_connection_alive() {
 }
 
 #[tokio::test]
+async fn http_proxy_reuses_upstream_connection_for_sequential_requests() {
+    let result =
+        smelly_connect_cli::proxy::http::proxy_http_reuses_upstream_connection_for_test()
+            .await
+            .unwrap();
+    assert_eq!(result.body, "ok");
+    assert_eq!(result.upstream_accepts, 1);
+}
+
+#[tokio::test]
 async fn http_proxy_streams_split_request_body_to_upstream() {
     let result = smelly_connect_cli::proxy::http::proxy_http_streams_request_body_for_test()
         .await
