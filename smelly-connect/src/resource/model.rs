@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
+use crate::RouteProtocol;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainRule {
     pub port_min: u16,
     pub port_max: u16,
-    pub protocol: String,
+    pub protocol: RouteProtocol,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,7 +16,7 @@ pub struct IpRule {
     pub ip_max: IpAddr,
     pub port_min: u16,
     pub port_max: u16,
-    pub protocol: String,
+    pub protocol: RouteProtocol,
 }
 
 #[derive(Debug, Clone, Default)]

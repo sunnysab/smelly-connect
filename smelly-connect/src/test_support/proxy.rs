@@ -500,7 +500,7 @@ fn proxy_ready_session(http_upstream: SocketAddr, tunnel_upstream: SocketAddr) -
         DomainRule {
             port_min: 80,
             port_max: 80,
-            protocol: "all".to_string(),
+            protocol: crate::RouteProtocol::All,
         },
     );
     resources.domain_rules.insert(
@@ -508,7 +508,7 @@ fn proxy_ready_session(http_upstream: SocketAddr, tunnel_upstream: SocketAddr) -
         DomainRule {
             port_min: 443,
             port_max: 443,
-            protocol: "all".to_string(),
+            protocol: crate::RouteProtocol::All,
         },
     );
     resources.ip_rules.push(IpRule {
@@ -516,7 +516,7 @@ fn proxy_ready_session(http_upstream: SocketAddr, tunnel_upstream: SocketAddr) -
         ip_max: resolved_ip,
         port_min: 1,
         port_max: 65535,
-        protocol: "all".to_string(),
+        protocol: crate::RouteProtocol::All,
     });
 
     let mut system_dns = HashMap::new();

@@ -224,7 +224,7 @@ fn matched_resources(host: &str, ip: Ipv4Addr) -> (ResourceSet, HashMap<String, 
         DomainRule {
             port_min: 1,
             port_max: 65535,
-            protocol: "all".to_string(),
+            protocol: crate::RouteProtocol::All,
         },
     );
     resources.ip_rules.push(IpRule {
@@ -232,7 +232,7 @@ fn matched_resources(host: &str, ip: Ipv4Addr) -> (ResourceSet, HashMap<String, 
         ip_max: IpAddr::V4(ip),
         port_min: 1,
         port_max: 65535,
-        protocol: "all".to_string(),
+        protocol: crate::RouteProtocol::All,
     });
     resources.static_dns.insert(host.to_string(), IpAddr::V4(ip));
 

@@ -51,7 +51,7 @@ fn ready_session(http_upstream: SocketAddr) -> EasyConnectSession {
         DomainRule {
             port_min: 80,
             port_max: 80,
-            protocol: "all".to_string(),
+            protocol: crate::RouteProtocol::All,
         },
     );
     resources.ip_rules.push(IpRule {
@@ -59,7 +59,7 @@ fn ready_session(http_upstream: SocketAddr) -> EasyConnectSession {
         ip_max: resolved_ip,
         port_min: 1,
         port_max: 65535,
-        protocol: "all".to_string(),
+        protocol: crate::RouteProtocol::All,
     });
 
     let mut system_dns = HashMap::new();

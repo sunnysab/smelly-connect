@@ -45,7 +45,7 @@ async fn routing_allows_domain_resources_even_when_resolved_ip_is_not_in_ip_rule
         smelly_connect::resource::DomainRule {
             port_min: 443,
             port_max: 443,
-            protocol: "all".to_string(),
+            protocol: smelly_connect::RouteProtocol::All,
         },
     );
 
@@ -136,7 +136,7 @@ async fn local_route_overrides_allow_domain_and_ip_targets() {
             smelly_connect::resource::DomainRule {
                 port_min: 443,
                 port_max: 443,
-                protocol: "tcp".to_string(),
+                protocol: smelly_connect::RouteProtocol::Tcp,
             },
         )]
         .into_iter()
@@ -146,7 +146,7 @@ async fn local_route_overrides_allow_domain_and_ip_targets() {
             ip_max: "42.62.107.254".parse().unwrap(),
             port_min: 1,
             port_max: 65535,
-            protocol: "all".to_string(),
+            protocol: smelly_connect::RouteProtocol::All,
         }],
     ));
 
@@ -177,7 +177,7 @@ async fn tcp_only_domain_rule_does_not_allow_udp_send() {
         smelly_connect::resource::DomainRule {
             port_min: 1,
             port_max: 65535,
-            protocol: "tcp".to_string(),
+            protocol: smelly_connect::RouteProtocol::Tcp,
         },
     );
 
@@ -224,7 +224,7 @@ async fn udp_only_domain_rule_does_not_allow_tcp_connect() {
         smelly_connect::resource::DomainRule {
             port_min: 1,
             port_max: 65535,
-            protocol: "udp".to_string(),
+            protocol: smelly_connect::RouteProtocol::Udp,
         },
     );
 

@@ -2,6 +2,7 @@ use serde::Deserialize;
 #[cfg(any(test, debug_assertions))]
 use std::fs;
 use std::path::Path;
+use std::str::FromStr;
 use std::time::Duration;
 
 use crate::cli::ProxyCommand;
@@ -98,8 +99,8 @@ pub struct LocalDomainRuleConfig {
     pub port_min: u16,
     #[serde(default = "default_port_max")]
     pub port_max: u16,
-    #[serde(default = "default_protocol")]
-    pub protocol: String,
+    #[serde(default = "default_protocol", deserialize_with = "deserialize_route_protocol")]
+    pub protocol: smelly_connect::RouteProtocol,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,8 +111,8 @@ pub struct LocalIpRuleConfig {
     pub port_min: u16,
     #[serde(default = "default_port_max")]
     pub port_max: u16,
-    #[serde(default = "default_protocol")]
-    pub protocol: String,
+    #[serde(default = "default_protocol", deserialize_with = "deserialize_route_protocol")]
+    pub protocol: smelly_connect::RouteProtocol,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -156,8 +157,18 @@ fn default_port_max() -> u16 {
     65535
 }
 
-fn default_protocol() -> String {
-    "all".to_string()
+fn default_protocol() -> smelly_connect::RouteProtocol {
+    smelly_connect::RouteProtocol::All
+}
+
+fn deserialize_route_protocol<'de, D>(
+    deserializer: D,
+) -> Result<smelly_connect::RouteProtocol, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    smelly_connect::RouteProtocol::from_str(&value).map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

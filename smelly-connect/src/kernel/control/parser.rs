@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use roxmltree::Document;
 
 use super::messages::{LoginAuthChallenge, ResourceDocument};
+use crate::RouteProtocol;
 use crate::resource::{DomainRule, IpRule, ResourceSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,12 +54,11 @@ pub fn parse_resource_document(body: &str) -> Result<ResourceDocument, roxmltree
 
     for rc in doc.descendants().filter(|n| n.has_tag_name("Rc")) {
         let protocol = match rc.attribute("proto").unwrap_or("-1") {
-            "-1" => "all",
-            "0" => "tcp",
-            "1" => "udp",
-            value => value,
-        }
-        .to_string();
+            "-1" => RouteProtocol::All,
+            "0" => RouteProtocol::Tcp,
+            "1" => RouteProtocol::Udp,
+            _ => RouteProtocol::All,
+        };
         let hosts = rc.attribute("host").unwrap_or_default().split(';');
         let ports = rc.attribute("port").unwrap_or_default().split(';');
 
@@ -70,7 +70,7 @@ pub fn parse_resource_document(body: &str) -> Result<ResourceDocument, roxmltree
                     ip_max,
                     port_min,
                     port_max,
-                    protocol: protocol.clone(),
+                    protocol,
                 });
                 continue;
             }
@@ -82,7 +82,7 @@ pub fn parse_resource_document(body: &str) -> Result<ResourceDocument, roxmltree
                     DomainRule {
                         port_min,
                         port_max,
-                        protocol: protocol.clone(),
+                        protocol,
                     },
                 );
             }

@@ -1590,25 +1590,25 @@ fn build_route_set_snapshot(session: &Session) -> RouteSetSnapshot {
     let mut domain_rules = resources
         .domain_rules
         .iter()
-        .map(|(domain, rule)| DomainRouteSnapshot {
-            domain: domain.clone(),
-            port_min: rule.port_min,
-            port_max: rule.port_max,
-            protocol: rule.protocol.clone(),
-        })
+            .map(|(domain, rule)| DomainRouteSnapshot {
+                domain: domain.clone(),
+                port_min: rule.port_min,
+                port_max: rule.port_max,
+                protocol: rule.protocol.to_string(),
+            })
         .collect::<Vec<_>>();
     domain_rules.sort_by(|a, b| a.domain.cmp(&b.domain));
 
     let mut ip_rules = resources
         .ip_rules
         .iter()
-        .map(|rule| IpRouteSnapshot {
-            ip_min: rule.ip_min.to_string(),
-            ip_max: rule.ip_max.to_string(),
-            port_min: rule.port_min,
-            port_max: rule.port_max,
-            protocol: rule.protocol.clone(),
-        })
+            .map(|rule| IpRouteSnapshot {
+                ip_min: rule.ip_min.to_string(),
+                ip_max: rule.ip_max.to_string(),
+                port_min: rule.port_min,
+                port_max: rule.port_max,
+                protocol: rule.protocol.to_string(),
+            })
         .collect::<Vec<_>>();
     ip_rules.sort_by(|a, b| {
         (&a.ip_min, &a.ip_max, a.port_min, a.port_max, &a.protocol).cmp(&(
@@ -1643,25 +1643,25 @@ fn build_local_route_set_snapshot(session: &Session) -> RouteSetSnapshot {
     let mut domain_rules = local
         .domain_rules()
         .iter()
-        .map(|(domain, rule)| DomainRouteSnapshot {
-            domain: domain.clone(),
-            port_min: rule.port_min,
-            port_max: rule.port_max,
-            protocol: rule.protocol.clone(),
-        })
+            .map(|(domain, rule)| DomainRouteSnapshot {
+                domain: domain.clone(),
+                port_min: rule.port_min,
+                port_max: rule.port_max,
+                protocol: rule.protocol.to_string(),
+            })
         .collect::<Vec<_>>();
     domain_rules.sort_by(|a, b| a.domain.cmp(&b.domain));
 
     let mut ip_rules = local
         .ip_rules()
         .iter()
-        .map(|rule| IpRouteSnapshot {
-            ip_min: rule.ip_min.to_string(),
-            ip_max: rule.ip_max.to_string(),
-            port_min: rule.port_min,
-            port_max: rule.port_max,
-            protocol: rule.protocol.clone(),
-        })
+            .map(|rule| IpRouteSnapshot {
+                ip_min: rule.ip_min.to_string(),
+                ip_max: rule.ip_max.to_string(),
+                port_min: rule.port_min,
+                port_max: rule.port_max,
+                protocol: rule.protocol.to_string(),
+            })
         .collect::<Vec<_>>();
     ip_rules.sort_by(|a, b| {
         (&a.ip_min, &a.ip_max, a.port_min, a.port_max, &a.protocol).cmp(&(
@@ -1694,7 +1694,7 @@ fn build_local_route_overrides(
             smelly_connect::resource::DomainRule {
                 port_min: rule.port_min,
                 port_max: rule.port_max,
-                protocol: rule.protocol.clone(),
+                protocol: rule.protocol,
             },
         );
     }
@@ -1721,7 +1721,7 @@ fn build_local_route_overrides(
             ip_max,
             port_min: rule.port_min,
             port_max: rule.port_max,
-            protocol: rule.protocol.clone(),
+            protocol: rule.protocol,
         });
     }
 
