@@ -15,7 +15,6 @@ async fn proxy_command_rejects_management_config_when_feature_is_disabled() {
         prewarm = 0
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
-        selection = "round_robin"
 
         [[accounts]]
         name = "acct-01"

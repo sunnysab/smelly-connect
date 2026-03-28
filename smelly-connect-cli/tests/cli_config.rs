@@ -37,7 +37,6 @@ fn legacy_connect_timeout_still_applies_when_split_fields_are_absent() {
         prewarm = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
-        selection = "round_robin"
 
         [[accounts]]
         name = "acct-01"
@@ -77,7 +76,6 @@ fn parses_local_routing_overrides_from_config() {
         prewarm = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
-        selection = "round_robin"
 
         [[accounts]]
         name = "acct-01"
@@ -129,7 +127,6 @@ fn parses_allow_all_routing_flag_from_config() {
         prewarm = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
-        selection = "round_robin"
 
         [[accounts]]
         name = "acct-01"

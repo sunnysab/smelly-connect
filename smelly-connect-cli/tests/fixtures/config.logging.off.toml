@@ -5,7 +5,6 @@ server = "vpn1.sit.edu.cn"
 prewarm = 1
 connect_timeout_secs = 20
 healthcheck_interval_secs = 60
-selection = "round_robin"
 
 [[accounts]]
 name = "acct-01"

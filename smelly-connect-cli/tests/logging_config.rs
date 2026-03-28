@@ -8,7 +8,6 @@ fn logging_defaults_to_stdout_info_and_default_file() {
         prewarm = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
-        selection = "round_robin"
         [[accounts]]
         name = "acct-01"
         username = "user1"
@@ -50,7 +49,6 @@ fn invalid_logging_mode_is_rejected() {
         prewarm = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
-        selection = "round_robin"
         [[accounts]]
         name = "acct-01"
         username = "user1"
@@ -76,7 +74,6 @@ fn invalid_logging_level_is_rejected() {
         prewarm = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
-        selection = "round_robin"
         [[accounts]]
         name = "acct-01"
         username = "user1"

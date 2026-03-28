@@ -62,7 +62,6 @@ fn resilience_defaults_are_present() {
         prewarm = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
-        selection = "round_robin"
         [[accounts]]
         name = "acct-01"
         username = "user1"
@@ -92,7 +91,6 @@ async fn pool_uses_connect_timeout_secs_for_recovery_login_timeout() {
         prewarm = 0
         connect_timeout_secs = 7
         healthcheck_interval_secs = 60
-        selection = "round_robin"
         failure_threshold = 3
         backoff_base_secs = 30
         backoff_max_secs = 600
@@ -131,7 +129,6 @@ async fn pool_prefers_session_connect_timeout_secs_over_legacy_timeout() {
         connect_timeout_secs = 20
         session_connect_timeout_secs = 9
         healthcheck_interval_secs = 60
-        selection = "round_robin"
         failure_threshold = 3
         backoff_base_secs = 30
         backoff_max_secs = 600
@@ -373,7 +370,6 @@ async fn pool_prefers_default_keepalive_host_over_vpn_server() {
         prewarm = 0
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
-        selection = "round_robin"
         failure_threshold = 3
         backoff_base_secs = 30
         backoff_max_secs = 600
