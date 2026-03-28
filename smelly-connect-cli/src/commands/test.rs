@@ -94,18 +94,27 @@ pub async fn run_icmp_with_config(
     config_path: impl AsRef<Path>,
     target: &str,
 ) -> Result<String, String> {
-    let config = crate::config::load(config_path)?;
+    run_icmp_with_config_typed(config_path, target)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+pub async fn run_icmp_with_config_typed(
+    config_path: impl AsRef<Path>,
+    target: &str,
+) -> Result<String, CliError> {
+    let config = crate::config::load_typed(config_path)?;
     let pool = crate::pool::SessionPool::from_config(&config)
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| CliError::Command(err.to_string()))?;
     let (_account_name, session) = pool
         .next_live_session()
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| CliError::Command(err.to_string()))?;
     session
         .icmp_ping(target.into())
         .await
-        .map_err(|err| format!("{err:?}"))?;
+        .map_err(|err| CliError::Command(format!("{err:?}")))?;
     Ok(format!("icmp ok: {target}"))
 }
 
@@ -113,25 +122,37 @@ pub async fn run_http_with_config(
     config_path: impl AsRef<Path>,
     url: &str,
 ) -> Result<String, String> {
-    let config = crate::config::load(config_path)?;
+    run_http_with_config_typed(config_path, url)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+pub async fn run_http_with_config_typed(
+    config_path: impl AsRef<Path>,
+    url: &str,
+) -> Result<String, CliError> {
+    let config = crate::config::load_typed(config_path)?;
     let pool = crate::pool::SessionPool::from_config(&config)
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| CliError::Command(err.to_string()))?;
     let (_account_name, session) = pool
         .next_live_session()
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| CliError::Command(err.to_string()))?;
     let client = session
         .reqwest_client()
         .await
-        .map_err(|err| format!("{err:?}"))?;
+        .map_err(|err| CliError::Command(format!("{err:?}")))?;
     let response = client
         .get(url)
         .send()
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| CliError::Command(err.to_string()))?;
     let status = response.status();
-    let body = response.text().await.map_err(|err| err.to_string())?;
+    let body = response
+        .text()
+        .await
+        .map_err(|err| CliError::Command(err.to_string()))?;
     let body_len = body.len();
     let has_html = body.to_ascii_lowercase().contains("<html");
     Ok(format!(
