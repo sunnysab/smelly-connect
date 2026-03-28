@@ -836,6 +836,21 @@ pub async fn proxy_http_runtime_stats_for_test() -> Result<RuntimeSnapshot, Stri
 }
 
 #[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_connect_failure_runtime_status_for_test() -> Result<RuntimeSnapshot, String> {
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let stats = RuntimeStats::default();
+    let addr = spawn_test_proxy_with_stats(
+        pool.clone(),
+        stats.clone(),
+        |_account_name, _host, _port| async move { Err(io::Error::other("upstream failed")) },
+    )
+    .await?;
+
+    let _ = request_connect_status(addr).await?;
+    Ok(stats.snapshot(pool.summary().await))
+}
+
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_connect_timeout_for_test() -> Result<TimeoutTestResult, String> {
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
     let addr = spawn_test_proxy_with_timeout(
@@ -1578,7 +1593,12 @@ where
         let upstream = connector(account_name, host, port);
         let upstream = match connect_with_timeout(connect_timeout, upstream).await {
             Ok(upstream) => upstream,
-            Err(err) => return gateway_error_response(&err),
+            Err(err) => {
+                if let Some(stats) = &stats {
+                    stats.record_connect_failure();
+                }
+                return gateway_error_response(&err);
+            }
         };
         let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
         tokio::spawn(async move {
@@ -1606,7 +1626,12 @@ where
     let upstream = connector(account_name, host, port);
     let upstream = match connect_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
-        Err(err) => return gateway_error_response(&err),
+        Err(err) => {
+            if let Some(stats) = &stats {
+                stats.record_connect_failure();
+            }
+            return gateway_error_response(&err);
+        }
     };
     let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
     forward_request(request, uri, upstream, connection).await
@@ -1645,6 +1670,7 @@ async fn handle_live_request(
         let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
             Ok(upstream) => upstream,
             Err(err) => {
+                stats.record_connect_failure();
                 if should_report_live_session_failure(&err) {
                     pool.report_live_session_unhealthy_if_probe_fails(
                         &account_name,
@@ -1684,6 +1710,7 @@ async fn handle_live_request(
     let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
         Err(err) => {
+            stats.record_connect_failure();
             if should_report_live_session_failure(&err) {
                 pool.report_live_session_unhealthy_if_probe_fails(
                     &account_name,

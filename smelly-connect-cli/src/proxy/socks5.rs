@@ -418,6 +418,22 @@ pub async fn proxy_socks5_runtime_stats_for_test() -> Result<RuntimeSnapshot, St
 }
 
 #[cfg(any(test, debug_assertions))]
+pub async fn proxy_socks5_connect_failure_runtime_status_for_test()
+-> Result<RuntimeSnapshot, String> {
+    let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let stats = RuntimeStats::default();
+    let addr = spawn_test_socks5_with_stats(
+        pool.clone(),
+        stats.clone(),
+        |_account_name, _host, _port| async move { Err(io::Error::other("upstream failed")) },
+    )
+    .await?;
+
+    let _ = request_connect_failure(addr).await?;
+    Ok(stats.snapshot(pool.summary().await))
+}
+
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_connect_timeout_for_test() -> Result<TimeoutTestResult, String> {
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
     let addr = spawn_test_socks5_with_timeout(
@@ -1091,6 +1107,9 @@ where
     let mut upstream = match connect_with_timeout(connect_timeout, upstream).await {
         Ok(upstream) => upstream,
         Err(err) => {
+            if let Some(stats) = &stats {
+                stats.record_connect_failure();
+            }
             proto
                 .reply_error(&map_socks5_reply_error(&err))
                 .await
@@ -1148,6 +1167,7 @@ async fn handle_live_client(
             let mut upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
                 Ok(upstream) => upstream,
                 Err(err) => {
+                    stats.record_connect_failure();
                     if !matches!(err, UpstreamConnectError::RouteRejected) {
                         pool.report_live_session_unhealthy_if_probe_fails(
                             &account_name,
