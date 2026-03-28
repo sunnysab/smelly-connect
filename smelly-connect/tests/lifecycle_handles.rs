@@ -5,7 +5,7 @@ use std::time::Duration;
 #[tokio::test]
 async fn keepalive_handle_supports_explicit_shutdown() {
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let session = smelly_connect::session::tests::session_with_icmp_ping(counter.clone());
+    let session = smelly_connect::test_support::session::session_with_icmp_ping(counter.clone());
     let handle = session.start_icmp_keepalive(
         smelly_connect::session::IcmpKeepAliveTarget::Ip("10.0.0.8".parse().unwrap()),
         Duration::from_millis(20),
@@ -24,7 +24,7 @@ async fn keepalive_handle_supports_explicit_shutdown() {
 #[tokio::test]
 async fn dropping_keepalive_handle_stops_background_task() {
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let session = smelly_connect::session::tests::session_with_icmp_ping(counter.clone());
+    let session = smelly_connect::test_support::session::session_with_icmp_ping(counter.clone());
     let handle = session.start_icmp_keepalive(
         smelly_connect::session::IcmpKeepAliveTarget::Ip("10.0.0.8".parse().unwrap()),
         Duration::from_millis(20),
@@ -43,7 +43,7 @@ async fn dropping_keepalive_handle_stops_background_task() {
 
 #[tokio::test]
 async fn proxy_handle_supports_explicit_shutdown() {
-    let session = smelly_connect::session::tests::login_harness()
+    let session = smelly_connect::test_support::session::login_harness()
         .ready_session()
         .await;
     let handle = session
@@ -65,7 +65,7 @@ async fn proxy_handle_supports_explicit_shutdown() {
 #[tokio::test]
 async fn dropping_last_session_clone_stops_session_owned_keepalive() {
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let session = smelly_connect::session::tests::session_with_owned_keepalive(
+    let session = smelly_connect::test_support::session::session_with_owned_keepalive(
         counter.clone(),
         Duration::from_millis(20),
     );

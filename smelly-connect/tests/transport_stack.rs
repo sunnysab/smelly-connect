@@ -38,14 +38,14 @@ async fn packet_device_builds_real_smoltcp_transport() {
 
 #[tokio::test]
 async fn session_connect_tcp_returns_async_stream() {
-    let harness = smelly_connect::session::tests::login_harness();
+    let harness = smelly_connect::test_support::session::login_harness();
     let session = harness.ready_session().await;
     let _stream = session.connect_tcp(("10.0.0.8", 443)).await.unwrap();
 }
 
 #[tokio::test]
 async fn session_connect_tcp_preserves_timeout_as_structured_transport_error() {
-    let session = smelly_connect::session::tests::session_with_immediate_timeout_domain_match(
+    let session = smelly_connect::test_support::session::session_with_immediate_timeout_domain_match(
         "jwxt.sit.edu.cn",
         "10.0.0.8".parse().unwrap(),
     );
@@ -60,7 +60,7 @@ async fn session_connect_tcp_preserves_timeout_as_structured_transport_error() {
 
 #[tokio::test]
 async fn session_bind_udp_returns_datagram_handle() {
-    let harness = smelly_connect::session::tests::login_harness();
+    let harness = smelly_connect::test_support::session::login_harness();
     let session = harness.ready_session().await;
     let socket = session.bind_udp().await.unwrap();
     assert!(socket.local_addr().unwrap().port() > 0);
@@ -69,7 +69,7 @@ async fn session_bind_udp_returns_datagram_handle() {
 #[tokio::test]
 async fn session_keepalive_task_invokes_transport_icmp_ping() {
     let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let session = smelly_connect::session::tests::session_with_icmp_ping(counter.clone());
+    let session = smelly_connect::test_support::session::session_with_icmp_ping(counter.clone());
     let handle = session.spawn_icmp_keepalive_task(
         smelly_connect::session::IcmpKeepAliveTarget::Ip("10.0.0.8".parse().unwrap()),
         std::time::Duration::from_millis(20),

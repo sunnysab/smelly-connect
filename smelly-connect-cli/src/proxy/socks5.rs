@@ -214,7 +214,7 @@ pub async fn proxy_socks5_ipv6_for_test() -> Result<Socks5ProxyTestResult, Strin
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_udp_associate_for_test() -> Result<Socks5ProxyTestResult, String> {
     let upstream = spawn_udp_echo_upstream().await;
-    let session = smelly_connect::session::tests::session_with_domain_match(
+    let session = smelly_connect::test_support::session::session_with_domain_match(
         "udp.test",
         std::net::Ipv4Addr::LOCALHOST,
     );
@@ -252,7 +252,7 @@ pub async fn proxy_socks5_udp_associate_for_test() -> Result<Socks5ProxyTestResu
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_udp_associate_idle_timeout_for_test() -> Result<(), String> {
     let upstream = spawn_udp_echo_upstream().await;
-    let session = smelly_connect::session::tests::session_with_domain_match(
+    let session = smelly_connect::test_support::session::session_with_domain_match(
         "udp.test",
         std::net::Ipv4Addr::LOCALHOST,
     );
@@ -657,7 +657,7 @@ pub async fn proxy_socks5_live_failure_for_test() -> Result<(), String> {
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_allow_all_failure_does_not_open_for_test()
 -> Result<Socks5LiveFailureRecoveryTestResult, String> {
-    let session = smelly_connect::session::tests::fake_session_without_match_with_transport(
+    let session = smelly_connect::test_support::session::fake_session_without_match_with_transport(
         smelly_connect::session::EasyConnectSession::failing_transport(
             "forced allow-all target failure",
         ),
@@ -683,7 +683,7 @@ pub async fn proxy_socks5_allow_all_failure_does_not_open_for_test()
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_route_rejection_does_not_open_for_test()
 -> Result<Socks5LiveFailureRecoveryTestResult, String> {
-    let session = smelly_connect::session::tests::session_with_domain_match(
+    let session = smelly_connect::test_support::session::session_with_domain_match(
         "jwxt.sit.edu.cn",
         std::net::Ipv4Addr::new(10, 0, 0, 8),
     );
@@ -711,7 +711,7 @@ pub async fn proxy_socks5_route_rejection_does_not_open_for_test()
 
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_live_timeout_reply_for_test() -> Result<Socks5FailureResult, String> {
-    let session = smelly_connect::session::tests::session_with_immediate_timeout_domain_match(
+    let session = smelly_connect::test_support::session::session_with_immediate_timeout_domain_match(
         "libdb.zju.edu.cn",
         std::net::Ipv4Addr::new(10, 0, 0, 8),
     );

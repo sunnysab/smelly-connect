@@ -898,7 +898,7 @@ pub async fn proxy_connect_timeout_status_for_test() -> Result<NoReadySessionRes
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_live_connect_failure_recovery_for_test()
 -> Result<LiveFailureRecoveryTestResult, String> {
-    let session = smelly_connect::session::tests::session_with_failing_domain_match(
+    let session = smelly_connect::test_support::session::session_with_failing_domain_match(
         "libdb.zju.edu.cn",
         std::net::Ipv4Addr::new(10, 0, 0, 8),
     );
@@ -937,7 +937,7 @@ pub async fn proxy_http_live_connect_failure_does_not_wait_for_probe_for_test()
 -> Result<LiveFailureLatencyTestResult, String> {
     let probe_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let session =
-        smelly_connect::session::tests::session_with_failing_domain_match_and_delayed_icmp(
+        smelly_connect::test_support::session::session_with_failing_domain_match_and_delayed_icmp(
             "libdb.zju.edu.cn",
             std::net::Ipv4Addr::new(10, 0, 0, 8),
             Duration::from_millis(50),
@@ -977,7 +977,7 @@ pub async fn proxy_http_live_connect_failure_does_not_wait_for_probe_for_test()
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_route_rejection_does_not_open_for_test()
 -> Result<LiveFailureRecoveryTestResult, String> {
-    let session = smelly_connect::session::tests::session_with_domain_match(
+    let session = smelly_connect::test_support::session::session_with_domain_match(
         "jwxt.sit.edu.cn",
         std::net::Ipv4Addr::new(10, 0, 0, 8),
     );
@@ -1033,7 +1033,7 @@ pub async fn proxy_http_route_rejection_does_not_open_for_test()
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_timeout_does_not_open_for_test()
 -> Result<LiveFailureRecoveryTestResult, String> {
-    let session = smelly_connect::session::tests::session_with_slow_domain_match(
+    let session = smelly_connect::test_support::session::session_with_slow_domain_match(
         "jwxt.sit.edu.cn",
         std::net::Ipv4Addr::new(10, 0, 0, 8),
     );
@@ -1087,7 +1087,7 @@ pub async fn proxy_http_timeout_does_not_open_for_test()
 
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_immediate_timeout_status_for_test() -> Result<NoReadySessionResult, String> {
-    let session = smelly_connect::session::tests::session_with_immediate_timeout_domain_match(
+    let session = smelly_connect::test_support::session::session_with_immediate_timeout_domain_match(
         "jwxt.sit.edu.cn",
         std::net::Ipv4Addr::new(10, 0, 0, 8),
     );
@@ -1135,7 +1135,7 @@ pub async fn proxy_http_immediate_timeout_status_for_test() -> Result<NoReadySes
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_allow_all_failure_does_not_open_for_test()
 -> Result<LiveFailureRecoveryTestResult, String> {
-    let session = smelly_connect::session::tests::fake_session_without_match_with_transport(
+    let session = smelly_connect::test_support::session::fake_session_without_match_with_transport(
         smelly_connect::session::EasyConnectSession::failing_transport(
             "forced allow-all target failure",
         ),

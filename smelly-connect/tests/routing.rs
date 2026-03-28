@@ -1,6 +1,6 @@
 #[tokio::test]
 async fn routing_rejects_non_resource_targets_by_default() {
-    let session = smelly_connect::session::tests::fake_session_without_match();
+    let session = smelly_connect::test_support::session::fake_session_without_match();
     let err = session
         .plan_tcp_connect(("example.com", 443))
         .await
@@ -11,7 +11,7 @@ async fn routing_rejects_non_resource_targets_by_default() {
 #[tokio::test]
 async fn allow_all_bypasses_target_not_allowed_for_domains_and_ips() {
     let session =
-        smelly_connect::session::tests::fake_session_without_match().with_allow_all_routes(true);
+        smelly_connect::test_support::session::fake_session_without_match().with_allow_all_routes(true);
 
     let domain_route = session
         .plan_tcp_connect(("example.com", 443))
@@ -32,7 +32,7 @@ async fn allow_all_bypasses_target_not_allowed_for_domains_and_ips() {
 
 #[tokio::test]
 async fn config_connect_builds_session_with_client_ip() {
-    let harness = smelly_connect::session::tests::login_harness();
+    let harness = smelly_connect::test_support::session::login_harness();
     let session = harness.config().connect().await.unwrap();
     assert_eq!(session.client_ip().to_string(), "10.0.0.8");
 }

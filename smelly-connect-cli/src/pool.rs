@@ -318,7 +318,7 @@ impl SessionPool {
                 state: AccountState::Ready(
                     PooledSession::new(
                         account_name.to_string(),
-                        Some(smelly_connect::session::tests::session_with_domain_match(
+                        Some(smelly_connect::test_support::session::session_with_domain_match(
                             host, ip,
                         )),
                     )

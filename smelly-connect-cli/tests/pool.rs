@@ -262,7 +262,7 @@ async fn successful_probe_returns_node_to_ready_and_back_into_normal_rotation() 
 
 #[tokio::test(start_paused = true)]
 async fn live_session_failure_opens_node_and_request_triggered_probe_can_recover() {
-    let session = smelly_connect::session::tests::session_with_domain_match(
+    let session = smelly_connect::test_support::session::session_with_domain_match(
         "jwxt.sit.edu.cn",
         std::net::Ipv4Addr::new(10, 0, 0, 8),
     );
@@ -282,7 +282,7 @@ async fn live_session_failure_opens_node_and_request_triggered_probe_can_recover
 
 #[tokio::test]
 async fn successful_vpn_probe_keeps_live_session_selectable() {
-    let session = smelly_connect::session::tests::session_with_icmp_result(true);
+    let session = smelly_connect::test_support::session::session_with_icmp_result(true);
     let pool =
         smelly_connect_cli::pool::SessionPool::from_live_sessions_with_keepalive_target_for_test(
             vec![("acct-01", session.clone())],
@@ -299,7 +299,7 @@ async fn successful_vpn_probe_keeps_live_session_selectable() {
 
 #[tokio::test]
 async fn repeated_vpn_probe_failures_mark_live_session_open() {
-    let session = smelly_connect::session::tests::session_with_icmp_result(false);
+    let session = smelly_connect::test_support::session::session_with_icmp_result(false);
     let pool =
         smelly_connect_cli::pool::SessionPool::from_live_sessions_with_keepalive_target_for_test(
             vec![("acct-01", session.clone())],
@@ -318,7 +318,7 @@ async fn repeated_vpn_probe_failures_mark_live_session_open() {
 #[tokio::test]
 async fn concurrent_live_session_failures_share_one_vpn_probe() {
     let probe_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let session = smelly_connect::session::tests::session_with_delayed_icmp_result(
+    let session = smelly_connect::test_support::session::session_with_delayed_icmp_result(
         false,
         std::time::Duration::from_millis(50),
         probe_count.clone(),
@@ -348,7 +348,7 @@ async fn concurrent_live_session_failures_share_one_vpn_probe() {
 
 #[tokio::test]
 async fn periodic_health_probe_marks_dead_live_session_open_without_request_failure() {
-    let session = smelly_connect::session::tests::session_with_icmp_result(false);
+    let session = smelly_connect::test_support::session::session_with_icmp_result(false);
     let pool =
         smelly_connect_cli::pool::SessionPool::from_live_sessions_with_keepalive_target_for_test(
             vec![("acct-01", session)],
@@ -404,7 +404,7 @@ async fn pool_prefers_default_keepalive_host_over_vpn_server() {
 
 #[tokio::test(start_paused = true)]
 async fn session_keepalive_failure_marks_live_session_open_before_periodic_healthcheck() {
-    let session = smelly_connect::session::tests::session_with_icmp_result(false);
+    let session = smelly_connect::test_support::session::session_with_icmp_result(false);
     let pool =
         smelly_connect_cli::pool::SessionPool::from_live_sessions_with_active_keepalive_for_test(
             vec![("acct-01", session)],

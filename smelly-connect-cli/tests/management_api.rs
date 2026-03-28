@@ -134,7 +134,7 @@ async fn management_routes_endpoint_reports_route_tables() {
 
 #[tokio::test]
 async fn management_routes_endpoint_reports_local_overrides_separately() {
-    let session = smelly_connect::session::tests::session_with_domain_match(
+    let session = smelly_connect::test_support::session::session_with_domain_match(
         "jwxt.sit.edu.cn",
         std::net::Ipv4Addr::new(10, 0, 0, 8),
     )
