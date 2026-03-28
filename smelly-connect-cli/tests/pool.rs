@@ -278,6 +278,25 @@ async fn live_session_failure_opens_node_and_request_triggered_probe_can_recover
 }
 
 #[tokio::test]
+async fn pool_live_session_selection_keeps_shared_session_storage() {
+    let session = smelly_connect::test_support::session::session_with_domain_match(
+        "jwxt.sit.edu.cn",
+        std::net::Ipv4Addr::new(10, 0, 0, 8),
+    );
+    let pool = smelly_connect_cli::pool::SessionPool::from_live_sessions_for_test(vec![(
+        "acct-01",
+        session.clone(),
+    )])
+    .await;
+
+    let (_account_name, selected) = pool.next_live_session().await.unwrap();
+    assert!(
+        std::ptr::eq(session.resources(), selected.resources()),
+        "selected live session should share underlying storage with the source session"
+    );
+}
+
+#[tokio::test]
 async fn successful_vpn_probe_keeps_live_session_selectable() {
     let session = smelly_connect::test_support::session::session_with_icmp_result(true);
     let pool =

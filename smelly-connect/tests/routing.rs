@@ -256,3 +256,14 @@ async fn udp_only_domain_rule_does_not_allow_tcp_connect() {
         )
     ));
 }
+
+#[test]
+fn session_clone_shares_resource_storage() {
+    let session = smelly_connect::test_support::session::fake_session_without_match();
+    let clone = session.clone();
+
+    assert!(
+        std::ptr::eq(session.resources(), clone.resources()),
+        "session clone should share resource storage"
+    );
+}
