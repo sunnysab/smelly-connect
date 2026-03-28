@@ -1,6 +1,5 @@
 #[cfg(any(test, debug_assertions))]
 use std::future::Future;
-#[cfg(any(test, debug_assertions))]
 use std::io;
 use std::net::SocketAddr as StdSocketAddr;
 #[cfg(any(test, debug_assertions))]

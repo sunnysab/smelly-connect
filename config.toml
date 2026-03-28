@@ -1,0 +1,61 @@
+# Example configuration for smelly-connect-cli
+
+[vpn]
+server = "vpn1.sit.edu.cn"
+# Optional session-level keepalive target used by the CLI pool/service layer.
+default_keepalive_host = "jwxt.sit.edu.cn"
+
+[pool]
+# Number of accounts to connect immediately during startup.
+prewarm = 2
+# Legacy fallback timeout. Used only when the split timeout fields below are absent.
+connect_timeout_secs = 5
+# Timeout for establishing or recovering one VPN session.
+session_connect_timeout_secs = 5
+# Probe interval used for pool health checks.
+healthcheck_interval_secs = 60
+# Current implementation supports round_robin only.
+selection = "round_robin"
+# Consecutive failures before a node is removed from normal rotation.
+failure_threshold = 3
+# Exponential backoff start for failed nodes.
+backoff_base_secs = 30
+# Exponential backoff cap.
+backoff_max_secs = 600
+# Allow one request-triggered early recovery attempt when no selectable upstream exists.
+allow_request_triggered_probe = true
+
+[proxy]
+# Timeout for TCP connect from the proxy to the upstream target.
+upstream_tcp_connect_timeout_secs = 5
+
+[[accounts]]
+name = "jcc"
+username = "2410821207"
+password = "Jiao@20060417"
+
+[proxy.http]
+enabled = true
+listen = "127.0.0.1:8080"
+
+[proxy.socks5]
+enabled = true
+listen = "127.0.0.1:1080"
+# Optional idle timeout for SOCKS5 UDP ASSOCIATE. 0 or unset disables it.
+udp_associate_idle_timeout_secs = 0
+
+[routing]
+# Bypass route filtering and allow all destinations through the VPN.
+allow_all = false
+
+[management]
+# Optional local management/status API.
+enabled = false
+listen = "127.0.0.1:9090"
+
+[logging]
+# stdout | file | stdout+file | off
+mode = "stdout"
+# error | warn | info | debug
+level = "info"
+file = "smelly-connect.log"

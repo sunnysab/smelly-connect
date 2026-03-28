@@ -17,7 +17,9 @@ mod selection;
 mod state;
 
 use selection::next_selectable_index;
-use state::{build_pool_summary, next_backoff, open_node, state_label};
+use state::{build_pool_summary, open_node, state_label};
+#[cfg(any(test, debug_assertions))]
+use state::next_backoff;
 
 #[derive(Clone)]
 pub struct PooledSession {
@@ -27,6 +29,7 @@ pub struct PooledSession {
 }
 
 impl PooledSession {
+    #[cfg(any(test, debug_assertions))]
     fn new(account_name: String, session: Option<Session>) -> Self {
         Self {
             account_name,
