@@ -12,6 +12,7 @@ use crate::runtime::tasks::keepalive::KeepaliveHandle;
 use crate::target::TargetAddr;
 use crate::transport::device::PacketDevice;
 use crate::transport::{TransportStack, VpnStream, VpnUdpSocket};
+use crate::{RouteProtocol, domain::route_match};
 
 mod runtime;
 
@@ -60,32 +61,16 @@ impl LocalRouteOverrides {
         &self.ip_rules
     }
 
-    fn matches_domain(&self, host: &str, port: u16) -> bool {
-        self.domain_rules.iter().any(|(domain, rule)| {
-            port >= rule.port_min
-                && port <= rule.port_max
-                && if domain.starts_with('.') {
-                    host.ends_with(domain)
-                } else {
-                    host == domain || host.ends_with(&format!(".{domain}"))
-                }
-        })
+    fn matches_domain(&self, host: &str, port: u16, protocol: RouteProtocol) -> bool {
+        self.domain_rules
+            .iter()
+            .any(|(domain, rule)| route_match::domain_rule_matches(host, port, protocol, domain, rule))
     }
 
-    fn matches_ip(&self, ip: IpAddr, port: u16) -> bool {
-        self.ip_rules.iter().any(|rule| {
-            port >= rule.port_min
-                && port <= rule.port_max
-                && match (rule.ip_min, rule.ip_max, ip) {
-                    (IpAddr::V4(min), IpAddr::V4(max), IpAddr::V4(current)) => {
-                        current >= min && current <= max
-                    }
-                    (IpAddr::V6(min), IpAddr::V6(max), IpAddr::V6(current)) => {
-                        current >= min && current <= max
-                    }
-                    _ => false,
-                }
-        })
+    fn matches_ip(&self, ip: IpAddr, port: u16, protocol: RouteProtocol) -> bool {
+        self.ip_rules
+            .iter()
+            .any(|rule| route_match::ip_rule_matches(ip, port, protocol, rule))
     }
 }
 
@@ -194,11 +179,15 @@ impl EasyConnectSession {
         let host = target.host();
         let port = target.port();
         if let Ok(ip) = host.parse::<Ipv4Addr>() {
-            !self.resources.matches_ip(IpAddr::V4(ip), port)
-                && !self.local_route_overrides.matches_ip(IpAddr::V4(ip), port)
+            !self.resources.matches_ip(IpAddr::V4(ip), port, RouteProtocol::Tcp)
+                && !self
+                    .local_route_overrides
+                    .matches_ip(IpAddr::V4(ip), port, RouteProtocol::Tcp)
         } else {
-            !self.resources.matches_domain(host, port)
-                && !self.local_route_overrides.matches_domain(host, port)
+            !self.resources.matches_domain(host, port, RouteProtocol::Tcp)
+                && !self
+                    .local_route_overrides
+                    .matches_domain(host, port, RouteProtocol::Tcp)
         }
     }
 
@@ -341,11 +330,15 @@ impl EasyConnectSession {
     where
         T: Into<TargetAddr>,
     {
-        let addr = self.plan_socket_addr(target).await?;
+        let addr = self.plan_socket_addr(target, RouteProtocol::Tcp).await?;
         Ok(RoutePlan::VpnResolved(addr))
     }
 
-    async fn plan_socket_addr<T>(&self, target: T) -> Result<SocketAddr, Error>
+    async fn plan_socket_addr<T>(
+        &self,
+        target: T,
+        protocol: RouteProtocol,
+    ) -> Result<SocketAddr, Error>
     where
         T: Into<TargetAddr>,
     {
@@ -354,12 +347,12 @@ impl EasyConnectSession {
         let port = target.port();
 
         if let Ok(ip) = host.parse::<Ipv4Addr>() {
-            return self.plan_ip(ip, port);
+            return self.plan_ip(ip, port, protocol);
         }
 
         if !self.allow_all_routes
-            && !self.resources.matches_domain(&host, port)
-            && !self.local_route_overrides.matches_domain(&host, port)
+            && !self.resources.matches_domain(&host, port, protocol)
+            && !self.local_route_overrides.matches_domain(&host, port, protocol)
         {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
@@ -373,10 +366,10 @@ impl EasyConnectSession {
         Ok(SocketAddr::new(ip, port))
     }
 
-    fn plan_ip(&self, ip: Ipv4Addr, port: u16) -> Result<SocketAddr, Error> {
+    fn plan_ip(&self, ip: Ipv4Addr, port: u16, protocol: RouteProtocol) -> Result<SocketAddr, Error> {
         if !self.allow_all_routes
-            && !self.resources.matches_ip(IpAddr::V4(ip), port)
-            && !self.local_route_overrides.matches_ip(IpAddr::V4(ip), port)
+            && !self.resources.matches_ip(IpAddr::V4(ip), port, protocol)
+            && !self.local_route_overrides.matches_ip(IpAddr::V4(ip), port, protocol)
         {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
@@ -394,7 +387,10 @@ impl SessionUdpSocket {
     where
         T: Into<TargetAddr>,
     {
-        let addr = self.session.plan_socket_addr(target).await?;
+        let addr = self
+            .session
+            .plan_socket_addr(target, RouteProtocol::Udp)
+            .await?;
         self.socket
             .send_to(data, addr)
             .await

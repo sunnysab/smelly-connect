@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
+use crate::domain::route_match::{domain_rule_matches, ip_rule_matches};
 use crate::RouteProtocol;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,28 +29,15 @@ pub struct ResourceSet {
 }
 
 impl ResourceSet {
-    pub fn matches_domain(&self, host: &str, port: u16) -> bool {
-        self.domain_rules.iter().any(|(domain, rule)| {
-            port >= rule.port_min
-                && port <= rule.port_max
-                && if domain.starts_with('.') {
-                    host.ends_with(domain)
-                } else {
-                    host == domain || host.ends_with(&format!(".{domain}"))
-                }
-        })
+    pub fn matches_domain(&self, host: &str, port: u16, protocol: RouteProtocol) -> bool {
+        self.domain_rules
+            .iter()
+            .any(|(domain, rule)| domain_rule_matches(host, port, protocol, domain, rule))
     }
 
-    pub fn matches_ip(&self, ip: IpAddr, port: u16) -> bool {
-        self.ip_rules.iter().any(|rule| {
-            port >= rule.port_min
-                && port <= rule.port_max
-                && match (rule.ip_min, rule.ip_max, ip) {
-                    (IpAddr::V4(min), IpAddr::V4(max), IpAddr::V4(current)) => {
-                        current >= min && current <= max
-                    }
-                    _ => false,
-                }
-        })
+    pub fn matches_ip(&self, ip: IpAddr, port: u16, protocol: RouteProtocol) -> bool {
+        self.ip_rules
+            .iter()
+            .any(|rule| ip_rule_matches(ip, port, protocol, rule))
     }
 }
