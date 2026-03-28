@@ -20,40 +20,43 @@ pub async fn run_proxy(
         "starting proxy service"
     );
 
-    let mut tasks = Vec::new();
+    let mut tasks = tokio::task::JoinSet::new();
     if config.proxy.http.enabled {
         let listen_http = config.proxy.http.listen.clone();
         let pool = pool.clone();
         let stats = stats.clone();
-        tasks.push(tokio::spawn(crate::proxy::http::serve_http(
-            listen_http,
-            pool,
-            stats,
-            upstream_tcp_connect_timeout,
-        )));
+        tasks.spawn(async move {
+            crate::proxy::http::serve_http(listen_http, pool, stats, upstream_tcp_connect_timeout)
+                .await
+                .map_err(|err| format!("http listener failed: {err}"))
+        });
     }
     if config.proxy.socks5.enabled {
         let listen_socks5 = config.proxy.socks5.listen.clone();
         let pool = pool.clone();
         let stats = stats.clone();
-        tasks.push(tokio::spawn(crate::proxy::socks5::serve_socks5(
-            listen_socks5,
-            pool,
-            stats,
-            upstream_tcp_connect_timeout,
-            udp_associate_idle_timeout,
-        )));
+        tasks.spawn(async move {
+            crate::proxy::socks5::serve_socks5(
+                listen_socks5,
+                pool,
+                stats,
+                upstream_tcp_connect_timeout,
+                udp_associate_idle_timeout,
+            )
+            .await
+            .map_err(|err| format!("socks5 listener failed: {err}"))
+        });
     }
     #[cfg(feature = "management-api")]
     if config.management.enabled {
         let listen_management = config.management.listen.clone();
         let pool = pool.clone();
         let stats = stats.clone();
-        tasks.push(tokio::spawn(crate::management::serve_management(
-            listen_management,
-            pool,
-            stats,
-        )));
+        tasks.spawn(async move {
+            crate::management::serve_management(listen_management, pool, stats)
+                .await
+                .map_err(|err| format!("management listener failed: {err}"))
+        });
     }
 
     #[cfg(not(feature = "management-api"))]
@@ -68,8 +71,13 @@ pub async fn run_proxy(
         return Err("no proxy listener enabled".to_string());
     }
 
-    for task in tasks {
-        task.await.map_err(|err| err.to_string())??;
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(())) => return Err("proxy listener exited unexpectedly".to_string()),
+            Ok(Err(err)) => return Err(err),
+            Err(err) => return Err(format!("proxy listener task failed: {err}")),
+        }
     }
-    Ok(())
+
+    Err("no proxy listener remained running".to_string())
 }
