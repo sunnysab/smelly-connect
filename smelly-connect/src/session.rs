@@ -14,8 +14,10 @@ use crate::transport::device::PacketDevice;
 use crate::transport::{TransportStack, VpnStream, VpnUdpSocket};
 use crate::{RouteProtocol, domain::route_match};
 
+mod inner;
 mod runtime;
 
+use inner::{LegacyDataPlaneConfig, SessionInner};
 use runtime::SessionRuntime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,22 +87,9 @@ fn normalize_override_domain(value: &str) -> String {
 
 #[derive(Clone)]
 pub struct EasyConnectSession {
-    client_ip: Ipv4Addr,
-    resources: ResourceSet,
+    inner: Arc<SessionInner>,
     local_route_overrides: LocalRouteOverrides,
     allow_all_routes: bool,
-    resolver: SessionResolver,
-    transport: TransportStack,
-    legacy_data_plane: Option<LegacyDataPlaneConfig>,
-    runtime: Arc<SessionRuntime>,
-}
-
-#[derive(Clone)]
-#[allow(dead_code)]
-struct LegacyDataPlaneConfig {
-    server_addr: SocketAddr,
-    token: crate::protocol::DerivedToken,
-    legacy_cipher_hint: Option<String>,
 }
 
 impl EasyConnectSession {
@@ -111,14 +100,16 @@ impl EasyConnectSession {
         transport: TransportStack,
     ) -> Self {
         Self {
-            client_ip,
-            resources,
+            inner: Arc::new(SessionInner {
+                client_ip,
+                resources,
+                resolver,
+                transport,
+                legacy_data_plane: None,
+                runtime: Arc::new(SessionRuntime::default()),
+            }),
             local_route_overrides: LocalRouteOverrides::default(),
             allow_all_routes: false,
-            resolver,
-            transport,
-            legacy_data_plane: None,
-            runtime: Arc::new(SessionRuntime::default()),
         }
     }
 
@@ -128,7 +119,7 @@ impl EasyConnectSession {
         token: crate::protocol::DerivedToken,
         legacy_cipher_hint: Option<String>,
     ) -> Self {
-        self.legacy_data_plane = Some(LegacyDataPlaneConfig {
+        Arc::make_mut(&mut self.inner).legacy_data_plane = Some(LegacyDataPlaneConfig {
             server_addr,
             token,
             legacy_cipher_hint,
@@ -141,16 +132,17 @@ impl EasyConnectSession {
         legacy_tunnel: Option<smelly_tls::TunnelConnection>,
         keepalive: Option<KeepaliveHandle>,
     ) -> Self {
-        self.runtime = Arc::new(SessionRuntime::new(legacy_tunnel, keepalive));
+        Arc::make_mut(&mut self.inner).runtime =
+            Arc::new(SessionRuntime::new(legacy_tunnel, keepalive));
         self
     }
 
     pub fn client_ip(&self) -> Ipv4Addr {
-        self.client_ip
+        self.inner.client_ip
     }
 
     pub fn resources(&self) -> &ResourceSet {
-        &self.resources
+        &self.inner.resources
     }
 
     pub fn local_route_overrides(&self) -> &LocalRouteOverrides {
@@ -179,12 +171,18 @@ impl EasyConnectSession {
         let host = target.host();
         let port = target.port();
         if let Ok(ip) = host.parse::<Ipv4Addr>() {
-            !self.resources.matches_ip(IpAddr::V4(ip), port, RouteProtocol::Tcp)
+            !self
+                .inner
+                .resources
+                .matches_ip(IpAddr::V4(ip), port, RouteProtocol::Tcp)
                 && !self
                     .local_route_overrides
                     .matches_ip(IpAddr::V4(ip), port, RouteProtocol::Tcp)
         } else {
-            !self.resources.matches_domain(host, port, RouteProtocol::Tcp)
+            !self
+                .inner
+                .resources
+                .matches_domain(host, port, RouteProtocol::Tcp)
                 && !self
                     .local_route_overrides
                     .matches_domain(host, port, RouteProtocol::Tcp)
@@ -196,8 +194,8 @@ impl EasyConnectSession {
         target: IcmpKeepAliveTarget,
         interval: Duration,
     ) -> tokio::task::JoinHandle<()> {
-        let transport = self.transport.clone();
-        let resolver = self.resolver.clone();
+        let transport = self.inner.transport.clone();
+        let resolver = self.inner.resolver.clone();
         tokio::spawn(async move {
             loop {
                 if let Ok(ip) = resolve_keepalive_target(&resolver, &target).await {
@@ -212,13 +210,14 @@ impl EasyConnectSession {
         &self,
         target: IcmpKeepAliveTarget,
     ) -> Result<Ipv4Addr, Error> {
-        resolve_keepalive_target(&self.resolver, &target)
+        resolve_keepalive_target(&self.inner.resolver, &target)
             .await
             .map_err(Error::Resolve)
     }
 
     pub async fn icmp_ping_ip(&self, target: Ipv4Addr) -> Result<(), Error> {
-        self.transport
+        self.inner
+            .transport
             .icmp_ping(target)
             .await
             .map_err(|err| Error::Transport(TransportError::from_io(err)))
@@ -236,6 +235,7 @@ impl EasyConnectSession {
         let route = self.plan_tcp_connect(target).await?;
         match route {
             RoutePlan::VpnResolved(addr) => self
+                .inner
                 .transport
                 .connect(addr)
                 .await
@@ -245,6 +245,7 @@ impl EasyConnectSession {
 
     pub async fn bind_udp(&self) -> Result<SessionUdpSocket, Error> {
         let socket = self
+            .inner
             .transport
             .bind_udp()
             .await
@@ -279,8 +280,8 @@ impl EasyConnectSession {
         F: Fn() + Send + Sync + 'static,
     {
         let target = target.into();
-        let transport = self.transport.clone();
-        let resolver = self.resolver.clone();
+        let transport = self.inner.transport.clone();
+        let resolver = self.inner.resolver.clone();
         let on_failure = Arc::new(on_failure);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
@@ -312,7 +313,7 @@ impl EasyConnectSession {
 
     #[allow(dead_code)]
     pub(crate) async fn spawn_packet_device(&self) -> Result<PacketDevice, Error> {
-        let cfg = self.legacy_data_plane.as_ref().ok_or_else(|| {
+        let cfg = self.inner.legacy_data_plane.as_ref().ok_or_else(|| {
             Error::Transport(TransportError::ConnectFailed(
                 "legacy data plane unavailable".to_string(),
             ))
@@ -320,7 +321,7 @@ impl EasyConnectSession {
         crate::auth::control::spawn_legacy_packet_device(
             cfg.server_addr,
             &cfg.token,
-            self.client_ip,
+            self.inner.client_ip,
             cfg.legacy_cipher_hint.as_deref(),
         )
         .await
@@ -351,13 +352,14 @@ impl EasyConnectSession {
         }
 
         if !self.allow_all_routes
-            && !self.resources.matches_domain(&host, port, protocol)
+            && !self.inner.resources.matches_domain(&host, port, protocol)
             && !self.local_route_overrides.matches_domain(&host, port, protocol)
         {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
 
         let ip = self
+            .inner
             .resolver
             .resolve_for_vpn(&host)
             .await
@@ -368,7 +370,7 @@ impl EasyConnectSession {
 
     fn plan_ip(&self, ip: Ipv4Addr, port: u16, protocol: RouteProtocol) -> Result<SocketAddr, Error> {
         if !self.allow_all_routes
-            && !self.resources.matches_ip(IpAddr::V4(ip), port, protocol)
+            && !self.inner.resources.matches_ip(IpAddr::V4(ip), port, protocol)
             && !self.local_route_overrides.matches_ip(IpAddr::V4(ip), port, protocol)
         {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
