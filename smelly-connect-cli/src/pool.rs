@@ -13,6 +13,12 @@ use tokio::time::Instant;
 
 use crate::config::{AccountConfig, AppConfig};
 
+mod selection;
+mod state;
+
+use selection::next_selectable_index;
+use state::{build_pool_summary, next_backoff, open_node, state_label};
+
 #[derive(Clone)]
 pub struct PooledSession {
     account_name: String,
@@ -1562,28 +1568,6 @@ async fn connect_account(
     Ok(session)
 }
 
-fn next_backoff(current: Duration, base: Duration, max: Duration) -> Duration {
-    let doubled = current.saturating_mul(2);
-    if doubled < base {
-        base
-    } else if doubled > max {
-        max
-    } else {
-        doubled
-    }
-}
-
-fn state_label(state: &AccountState) -> &'static str {
-    match state {
-        AccountState::Configured(_) => "Configured",
-        AccountState::Connecting => "Connecting",
-        AccountState::Ready(_) => "Ready",
-        AccountState::Suspect(_) => "Suspect",
-        AccountState::Open(_) => "Open",
-        AccountState::HalfOpen(_) => "HalfOpen",
-    }
-}
-
 fn build_route_set_snapshot(session: &Session) -> RouteSetSnapshot {
     let resources = session.resources();
 
@@ -1735,82 +1719,4 @@ fn normalize_override_domain(value: &str) -> String {
     } else {
         trimmed.to_string()
     }
-}
-
-fn build_pool_summary(state: &PoolState) -> PoolSummary {
-    let mut ready_nodes = 0;
-    let mut suspect_nodes = 0;
-    let mut open_nodes = 0;
-    let mut timed_open_nodes = 0;
-    let mut half_open_nodes = 0;
-    let mut connecting_nodes = 0;
-    let mut configured_nodes = 0;
-
-    for node in &state.nodes {
-        match node.state {
-            AccountState::Configured(_) => configured_nodes += 1,
-            AccountState::Connecting => connecting_nodes += 1,
-            AccountState::Ready(_) => ready_nodes += 1,
-            AccountState::Suspect(_) => suspect_nodes += 1,
-            AccountState::Open(_) => {
-                open_nodes += 1;
-                if node.open_until.is_some() {
-                    timed_open_nodes += 1;
-                }
-            }
-            AccountState::HalfOpen(_) => half_open_nodes += 1,
-        }
-    }
-
-    let selectable_nodes = ready_nodes + suspect_nodes;
-    let status = if selectable_nodes > 0 {
-        PoolHealthStatus::Healthy
-    } else if half_open_nodes > 0
-        || connecting_nodes > 0
-        || timed_open_nodes > 0
-        || configured_nodes > 0
-    {
-        PoolHealthStatus::Recovering
-    } else {
-        PoolHealthStatus::Down
-    };
-
-    PoolSummary {
-        status,
-        total_nodes: state.nodes.len(),
-        selectable_nodes,
-        ready_nodes,
-        suspect_nodes,
-        open_nodes,
-        half_open_nodes,
-        connecting_nodes,
-        configured_nodes,
-    }
-}
-
-fn next_selectable_index(
-    state: &mut PoolState,
-    mut predicate: impl FnMut(&AccountNode) -> bool,
-) -> Option<usize> {
-    let total = state.nodes.len();
-    if total == 0 {
-        return None;
-    }
-
-    for offset in 0..total {
-        let idx = (state.cursor + offset) % total;
-        if predicate(&state.nodes[idx]) {
-            state.cursor = idx + 1;
-            return Some(idx);
-        }
-    }
-
-    None
-}
-
-fn open_node(node: &mut AccountNode, message: String) {
-    node.current_backoff = next_backoff(node.current_backoff, node.backoff_base, node.backoff_max);
-    node.open_until = Some(Instant::now() + node.current_backoff);
-    node.live_probe_in_flight = false;
-    node.state = AccountState::Open(AccountFailure { message });
 }
