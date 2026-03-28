@@ -891,7 +891,39 @@ where
 }
 
 async fn reject_over_capacity_socks5(stream: TcpStream) -> io::Result<()> {
-    drop(stream);
+    let mut stream = stream;
+    let mut method_header = [0_u8; 2];
+    tokio::io::AsyncReadExt::read_exact(&mut stream, &mut method_header).await?;
+    let methods_len = method_header[1] as usize;
+    let mut methods = vec![0_u8; methods_len];
+    tokio::io::AsyncReadExt::read_exact(&mut stream, &mut methods).await?;
+    tokio::io::AsyncWriteExt::write_all(&mut stream, &[0x05, 0x00]).await?;
+
+    let mut request_header = [0_u8; 4];
+    tokio::io::AsyncReadExt::read_exact(&mut stream, &mut request_header).await?;
+    match request_header[3] {
+        0x01 => {
+            let mut rest = [0_u8; 6];
+            tokio::io::AsyncReadExt::read_exact(&mut stream, &mut rest).await?;
+        }
+        0x03 => {
+            let mut len = [0_u8; 1];
+            tokio::io::AsyncReadExt::read_exact(&mut stream, &mut len).await?;
+            let mut rest = vec![0_u8; len[0] as usize + 2];
+            tokio::io::AsyncReadExt::read_exact(&mut stream, &mut rest).await?;
+        }
+        0x04 => {
+            let mut rest = [0_u8; 18];
+            tokio::io::AsyncReadExt::read_exact(&mut stream, &mut rest).await?;
+        }
+        _ => {}
+    }
+
+    tokio::io::AsyncWriteExt::write_all(
+        &mut stream,
+        &[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0],
+    )
+    .await?;
     Ok(())
 }
 

@@ -1421,6 +1421,11 @@ where
 }
 
 async fn reject_over_capacity_http(mut stream: TcpStream) -> io::Result<()> {
+    stream
+        .write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await?;
     stream.shutdown().await
 }
 
