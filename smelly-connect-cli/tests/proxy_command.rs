@@ -50,6 +50,61 @@ async fn proxy_command_rejects_management_config_when_feature_is_disabled() {
     let _ = fs::remove_file(path);
 }
 
+#[tokio::test]
+async fn proxy_command_surfaces_listener_failure_instead_of_hanging() {
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind occupied listener");
+    let occupied_addr = occupied.local_addr().expect("occupied listener addr");
+
+    let path = write_temp_config(&format!(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+
+        [pool]
+        prewarm = 0
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:0"
+
+        [proxy.socks5]
+        enabled = true
+        listen = "{occupied_addr}"
+
+        [management]
+        enabled = false
+        listen = "127.0.0.1:9090"
+        "#
+    ));
+    let command = smelly_connect_cli::cli::ProxyCommand {
+        listen_http: None,
+        listen_socks5: None,
+        prewarm: None,
+        keepalive_host: None,
+        allow_all: false,
+    };
+
+    let err = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        smelly_connect_cli::commands::proxy::run_proxy(&path, &command),
+    )
+    .await
+    .expect("proxy command should not hang when a listener fails")
+    .unwrap_err();
+
+    assert!(err.contains("address") || err.contains("listener"));
+    let _ = fs::remove_file(path);
+}
+
 fn write_temp_config(body: &str) -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
