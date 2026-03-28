@@ -213,3 +213,39 @@ fn explicit_config_path_overrides_default_config_toml_lookup() {
         smelly_connect_cli::config::load_for_test("tests/fixtures/config.sample.toml").unwrap();
     assert_eq!(merged.accounts.len(), 2);
 }
+
+#[test]
+fn invalid_route_protocol_is_rejected() {
+    let cfg = toml::from_str::<smelly_connect_cli::config::AppConfig>(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+
+        [pool]
+        prewarm = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+
+        [[routing.domain_rules]]
+        domain = "*.foo.edu.cn"
+        port_min = 443
+        port_max = 443
+        protocol = "icmp"
+        "#,
+    );
+
+    assert!(cfg.is_err(), "invalid route protocol should be rejected");
+}

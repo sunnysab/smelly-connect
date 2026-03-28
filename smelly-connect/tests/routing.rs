@@ -168,3 +168,91 @@ async fn local_route_overrides_allow_domain_and_ip_targets() {
         smelly_connect::session::RoutePlan::VpnResolved(_)
     ));
 }
+
+#[tokio::test]
+async fn tcp_only_domain_rule_does_not_allow_udp_send() {
+    let mut resources = smelly_connect::resource::ResourceSet::default();
+    resources.domain_rules.insert(
+        "portal.foo.edu.cn".to_string(),
+        smelly_connect::resource::DomainRule {
+            port_min: 1,
+            port_max: 65535,
+            protocol: "tcp".to_string(),
+        },
+    );
+
+    let mut system_dns = std::collections::HashMap::new();
+    system_dns.insert(
+        "portal.foo.edu.cn".to_string(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+    );
+
+    let transport = smelly_connect::session::EasyConnectSession::failing_transport("unused")
+        .with_udp_binder(|| async {
+            let socket = tokio::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+            Ok(smelly_connect::transport::VpnUdpSocket::new(socket))
+        });
+    let session = smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        resources,
+        smelly_connect::resolver::SessionResolver::new(
+            std::collections::HashMap::new(),
+            None,
+            system_dns,
+        ),
+        transport,
+    );
+
+    let socket = session.bind_udp().await.unwrap();
+    let err = socket
+        .send_to(b"ping", ("portal.foo.edu.cn", 53))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        smelly_connect::Error::RouteDecision(
+            smelly_connect::error::RouteDecisionError::TargetNotAllowed
+        )
+    ));
+}
+
+#[tokio::test]
+async fn udp_only_domain_rule_does_not_allow_tcp_connect() {
+    let mut resources = smelly_connect::resource::ResourceSet::default();
+    resources.domain_rules.insert(
+        "portal.foo.edu.cn".to_string(),
+        smelly_connect::resource::DomainRule {
+            port_min: 1,
+            port_max: 65535,
+            protocol: "udp".to_string(),
+        },
+    );
+
+    let mut system_dns = std::collections::HashMap::new();
+    system_dns.insert(
+        "portal.foo.edu.cn".to_string(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+    );
+
+    let session = smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        resources,
+        smelly_connect::resolver::SessionResolver::new(
+            std::collections::HashMap::new(),
+            None,
+            system_dns,
+        ),
+        smelly_connect::session::EasyConnectSession::failing_transport("unused"),
+    );
+
+    let err = session
+        .plan_tcp_connect(("portal.foo.edu.cn", 443))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        smelly_connect::Error::RouteDecision(
+            smelly_connect::error::RouteDecisionError::TargetNotAllowed
+        )
+    ));
+}
