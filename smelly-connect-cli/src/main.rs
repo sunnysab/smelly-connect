@@ -27,7 +27,7 @@ fn main() {
         level = %config.logging.level.as_str(),
         "cli startup"
     );
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("build runtime");
