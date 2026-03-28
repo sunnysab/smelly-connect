@@ -160,6 +160,7 @@ pub async fn run_http_with_config_typed(
     ))
 }
 
+#[cfg(any(test, debug_assertions))]
 fn split_target(target: &str) -> Result<(String, u16), String> {
     split_target_typed(target).map_err(|err| err.to_string())
 }
