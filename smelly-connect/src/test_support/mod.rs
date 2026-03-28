@@ -1,10 +1,5 @@
-pub mod auth {
-    pub use crate::auth::tests::*;
-}
-
-pub mod integration {
-    pub use crate::integration::tests::*;
-}
+pub mod auth;
+pub mod integration;
 
 pub mod proxy;
 
