@@ -59,3 +59,12 @@ async fn status_command_reports_health_and_runtime_stats() {
     assert!(output.contains("http current=1 total=4 c2u=40 u2c=90"));
     assert!(output.contains("socks5 current=2 total=5 c2u=80 u2c=150"));
 }
+
+#[tokio::test]
+async fn http_connect_failure_marks_runtime_status_recovering() {
+    let snapshot =
+        smelly_connect_cli::proxy::http::proxy_http_connect_failure_runtime_status_for_test()
+            .await
+            .unwrap();
+    assert_eq!(snapshot.status, smelly_connect_cli::pool::PoolHealthStatus::Recovering);
+}

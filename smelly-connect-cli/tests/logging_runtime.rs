@@ -117,3 +117,12 @@ fn invalid_logging_config_emits_error_log() {
     assert!(events.iter().any(|line| line.contains(" ERROR ")));
     assert!(events.iter().any(|line| line.contains("logging")));
 }
+
+#[tokio::test]
+async fn socks5_connect_failure_marks_runtime_status_recovering() {
+    let snapshot =
+        smelly_connect_cli::proxy::socks5::proxy_socks5_connect_failure_runtime_status_for_test()
+            .await
+            .unwrap();
+    assert_eq!(snapshot.status, smelly_connect_cli::pool::PoolHealthStatus::Recovering);
+}
