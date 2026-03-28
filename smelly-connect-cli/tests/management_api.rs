@@ -144,7 +144,7 @@ async fn management_routes_endpoint_reports_local_overrides_separately() {
             smelly_connect::resource::DomainRule {
                 port_min: 443,
                 port_max: 443,
-                protocol: "tcp".to_string(),
+                protocol: smelly_connect::RouteProtocol::Tcp,
             },
         )]
         .into_iter()
@@ -154,7 +154,7 @@ async fn management_routes_endpoint_reports_local_overrides_separately() {
             ip_max: "42.62.107.254".parse().unwrap(),
             port_min: 1,
             port_max: 65535,
-            protocol: "all".to_string(),
+            protocol: smelly_connect::RouteProtocol::All,
         }],
     ));
     let pool = smelly_connect_cli::pool::SessionPool::from_live_sessions_for_test(vec![(
