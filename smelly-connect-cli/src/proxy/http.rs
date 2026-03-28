@@ -396,7 +396,7 @@ pub async fn proxy_http_body_completes_for_keep_alive_upstream_for_test()
         .map_err(|err| err.to_string())?;
     client
         .write_all(
-            b"GET http://intranet.zju.edu.cn/index.html HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: keep-alive\r\n\r\n",
+            b"GET http://intranet.zju.edu.cn/index.html HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
         )
         .await
         .map_err(|err| err.to_string())?;
@@ -446,11 +446,7 @@ pub async fn proxy_http_reuses_upstream_connection_for_test()
         .await
         .map_err(|err| err.to_string())?;
     let response = String::from_utf8(response).map_err(|err| err.to_string())?;
-    let body = response
-        .split("\r\n\r\n")
-        .nth(1)
-        .unwrap_or_default()
-        .to_string();
+    let body = extract_first_response_body(&response)?.to_string();
     Ok(ReusedUpstreamTestResult {
         body,
         upstream_accepts: accepts.load(std::sync::atomic::Ordering::SeqCst),
@@ -2671,6 +2667,31 @@ async fn spawn_reusable_keep_alive_http_upstream(
         }
     });
     (addr, accepts)
+}
+
+#[cfg(any(test, debug_assertions))]
+fn extract_first_response_body(response: &str) -> Result<&str, String> {
+    let (headers, rest) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "missing response header terminator".to_string())?;
+    let status_line = headers.lines().next().unwrap_or_default();
+    if !status_line.starts_with("HTTP/1.1 200") {
+        return Err(format!("unexpected status line: {status_line}"));
+    }
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            line.split_once(':').and_then(|(name, value)| {
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+        })
+        .ok_or_else(|| "missing content-length".to_string())?;
+    if rest.len() < content_length {
+        return Err("response body shorter than content-length".to_string());
+    }
+    Ok(&rest[..content_length])
 }
 
 #[cfg(any(test, debug_assertions))]
