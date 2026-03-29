@@ -401,21 +401,25 @@ impl EasyConnectSession {
             return self.plan_ip(ip, port, protocol);
         }
 
-        if !self.allow_all_routes
-            && !self.inner.resources.matches_domain(&host, port, protocol)
-            && !self
-                .local_route_overrides
-                .matches_domain(&host, port, protocol)
-        {
-            return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
-        }
-
         let ip = self
             .inner
             .resolver
             .resolve_for_vpn(&host)
             .await
             .map_err(Error::Resolve)?;
+
+        if !self.allow_all_routes
+            && !self.inner.resources.matches_domain(&host, port, protocol)
+            && !self
+                .local_route_overrides
+                .matches_domain(&host, port, protocol)
+            && !self.inner.resources.matches_ip(ip, port, protocol)
+            && !self
+                .local_route_overrides
+                .matches_ip(ip, port, protocol)
+        {
+            return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
+        }
 
         Ok(SocketAddr::new(ip, port))
     }

@@ -10,8 +10,8 @@ async fn routing_rejects_non_resource_targets_by_default() {
 
 #[tokio::test]
 async fn allow_all_bypasses_target_not_allowed_for_domains_and_ips() {
-    let session =
-        smelly_connect::test_support::session::fake_session_without_match().with_allow_all_routes(true);
+    let session = smelly_connect::test_support::session::fake_session_without_match()
+        .with_allow_all_routes(true);
 
     let domain_route = session
         .plan_tcp_connect(("example.com", 443))
@@ -114,6 +114,45 @@ async fn routing_allows_direct_single_ip_resources() {
 }
 
 #[tokio::test]
+async fn routing_allows_domain_targets_when_resolved_ip_matches_ip_rules() {
+    let mut resources = smelly_connect::resource::ResourceSet::default();
+    resources.ip_rules.push(smelly_connect::resource::IpRule {
+        ip_min: "172.24.9.11".parse().unwrap(),
+        ip_max: "172.24.9.11".parse().unwrap(),
+        port_min: 443,
+        port_max: 443,
+        protocol: smelly_connect::RouteProtocol::Tcp,
+    });
+
+    let mut system_dns = std::collections::HashMap::new();
+    system_dns.insert(
+        "xg.sit.edu.cn".to_string(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 24, 9, 11)),
+    );
+
+    let session = smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        resources,
+        smelly_connect::resolver::SessionResolver::new(
+            std::collections::HashMap::new(),
+            None,
+            system_dns,
+        ),
+        smelly_connect::session::EasyConnectSession::failing_transport("unused"),
+    );
+
+    let route = session
+        .plan_tcp_connect(("xg.sit.edu.cn", 443))
+        .await
+        .unwrap();
+    assert!(matches!(
+        route,
+        smelly_connect::session::RoutePlan::VpnResolved(addr)
+            if addr == "172.24.9.11:443".parse().unwrap()
+    ));
+}
+
+#[tokio::test]
 async fn local_route_overrides_allow_domain_and_ip_targets() {
     let mut system_dns = std::collections::HashMap::new();
     system_dns.insert(
@@ -166,6 +205,45 @@ async fn local_route_overrides_allow_domain_and_ip_targets() {
     assert!(matches!(
         ip_route,
         smelly_connect::session::RoutePlan::VpnResolved(_)
+    ));
+}
+
+#[tokio::test]
+async fn local_ip_overrides_allow_domain_targets_after_resolution() {
+    let mut system_dns = std::collections::HashMap::new();
+    system_dns.insert(
+        "xg.sit.edu.cn".to_string(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 24, 9, 11)),
+    );
+    let session = smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        smelly_connect::resource::ResourceSet::default(),
+        smelly_connect::resolver::SessionResolver::new(
+            std::collections::HashMap::new(),
+            None,
+            system_dns,
+        ),
+        smelly_connect::session::EasyConnectSession::failing_transport("unused"),
+    )
+    .with_local_route_overrides(smelly_connect::session::LocalRouteOverrides::new(
+        std::collections::HashMap::new(),
+        vec![smelly_connect::resource::IpRule {
+            ip_min: "172.24.9.11".parse().unwrap(),
+            ip_max: "172.24.9.11".parse().unwrap(),
+            port_min: 443,
+            port_max: 443,
+            protocol: smelly_connect::RouteProtocol::Tcp,
+        }],
+    ));
+
+    let route = session
+        .plan_tcp_connect(("xg.sit.edu.cn", 443))
+        .await
+        .unwrap();
+    assert!(matches!(
+        route,
+        smelly_connect::session::RoutePlan::VpnResolved(addr)
+            if addr == "172.24.9.11:443".parse().unwrap()
     ));
 }
 
