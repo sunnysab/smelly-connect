@@ -709,12 +709,15 @@ pub async fn proxy_socks5_live_failure_for_test() -> Result<(), String> {
 pub async fn proxy_socks5_over_capacity_for_test() -> Result<Socks5FailureResult, String> {
     let upstream = spawn_echo_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
-    let addr = spawn_test_socks5_with_limit(pool, 1, move |_account_name, _host, _port| async move {
-        TcpStream::connect(upstream).await
-    })
-    .await?;
+    let addr =
+        spawn_test_socks5_with_limit(pool, 1, move |_account_name, _host, _port| async move {
+            TcpStream::connect(upstream).await
+        })
+        .await?;
 
-    let blocker = TcpStream::connect(addr).await.map_err(|err| err.to_string())?;
+    let blocker = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
     tokio::time::sleep(Duration::from_millis(20)).await;
     let result = request_no_ready_session(addr).await;
     drop(blocker);
@@ -778,10 +781,11 @@ pub async fn proxy_socks5_route_rejection_does_not_open_for_test()
 
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_live_timeout_reply_for_test() -> Result<Socks5FailureResult, String> {
-    let session = smelly_connect::test_support::session::session_with_immediate_timeout_domain_match(
-        "libdb.zju.edu.cn",
-        std::net::Ipv4Addr::new(10, 0, 0, 8),
-    );
+    let session =
+        smelly_connect::test_support::session::session_with_immediate_timeout_domain_match(
+            "libdb.zju.edu.cn",
+            std::net::Ipv4Addr::new(10, 0, 0, 8),
+        );
     let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
     let addr = spawn_live_test_socks5(pool, RuntimeStats::default(), DEFAULT_CONNECT_TIMEOUT, None)
         .await?;
@@ -895,7 +899,8 @@ where
                 Ok(permit) => {
                     tokio::spawn(async move {
                         let _permit = permit;
-                        let _ = handle_client(stream, pool, stats, connect_timeout, connector).await;
+                        let _ =
+                            handle_client(stream, pool, stats, connect_timeout, connector).await;
                     });
                 }
                 Err(_) => {
@@ -938,11 +943,8 @@ async fn reject_over_capacity_socks5(stream: TcpStream) -> io::Result<()> {
         _ => {}
     }
 
-    tokio::io::AsyncWriteExt::write_all(
-        &mut stream,
-        &[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0],
-    )
-    .await?;
+    tokio::io::AsyncWriteExt::write_all(&mut stream, &[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .await?;
     Ok(())
 }
 
@@ -1173,7 +1175,13 @@ async fn handle_live_client(
                     if !matches!(err, UpstreamConnectError::RouteRejected) {
                         stats.record_connect_failure();
                     }
-                    if !matches!(err, UpstreamConnectError::RouteRejected) {
+                    if matches!(err, UpstreamConnectError::TimedOut) {
+                        pool.report_live_session_reconnect_required(
+                            &account_name,
+                            format!("{err:?}"),
+                        )
+                            .await;
+                    } else if !matches!(err, UpstreamConnectError::RouteRejected) {
                         pool.report_live_session_unhealthy_if_probe_fails(
                             &account_name,
                             &session,

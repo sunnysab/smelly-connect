@@ -752,6 +752,37 @@ impl SessionPool {
         }
     }
 
+    pub async fn report_live_session_reconnect_required(
+        &self,
+        account_name: &str,
+        error: impl Into<String>,
+    ) {
+        let error = error.into();
+        let mut state = self.inner.lock().await;
+        if let Some(node) = state
+            .nodes
+            .iter_mut()
+            .find(|node| node.account.name == account_name)
+        {
+            node.live_probe_in_flight = false;
+            if matches!(
+                node.state,
+                AccountState::Ready(_) | AccountState::Suspect(_)
+            ) {
+                node.consecutive_failures = node.failure_threshold;
+                node.open_until = Some(Instant::now());
+                node.state = AccountState::Open(AccountFailure {
+                    message: error.clone(),
+                });
+                tracing::warn!(
+                    account = %account_name,
+                    error = %error,
+                    "live session retired and queued for reconnect"
+                );
+            }
+        }
+    }
+
     pub async fn report_live_session_unhealthy_if_probe_fails(
         &self,
         account_name: &str,

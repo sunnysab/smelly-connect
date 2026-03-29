@@ -6,8 +6,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http::header::{CONNECTION, EXPECT, HOST, PROXY_AUTHORIZATION};
@@ -23,8 +24,6 @@ use tokio::net::{TcpListener, TcpStream};
 #[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
 use tokio::sync::{Semaphore, mpsc};
-#[cfg(any(test, debug_assertions))]
-use tokio::time::Instant;
 
 use crate::pool::SessionPool;
 #[cfg(any(test, debug_assertions))]
@@ -34,6 +33,7 @@ use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 type ProxyBody = BoxBody<Bytes, io::Error>;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const DEFAULT_MAX_IN_FLIGHT_CONNECTIONS: usize = 1024;
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
@@ -875,7 +875,8 @@ pub async fn proxy_http_runtime_stats_for_test() -> Result<RuntimeSnapshot, Stri
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_http_connect_failure_runtime_status_for_test() -> Result<RuntimeSnapshot, String> {
+pub async fn proxy_http_connect_failure_runtime_status_for_test() -> Result<RuntimeSnapshot, String>
+{
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
     let stats = RuntimeStats::default();
     let addr = spawn_test_proxy_with_stats(
@@ -1140,11 +1141,13 @@ pub async fn proxy_http_timeout_does_not_open_for_test()
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_http_immediate_timeout_status_for_test() -> Result<NoReadySessionResult, String> {
-    let session = smelly_connect::test_support::session::session_with_immediate_timeout_domain_match(
-        "jwxt.sit.edu.cn",
-        std::net::Ipv4Addr::new(10, 0, 0, 8),
-    );
+pub async fn proxy_http_immediate_timeout_status_for_test() -> Result<NoReadySessionResult, String>
+{
+    let session =
+        smelly_connect::test_support::session::session_with_immediate_timeout_domain_match(
+            "jwxt.sit.edu.cn",
+            std::net::Ipv4Addr::new(10, 0, 0, 8),
+        );
     let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -1348,12 +1351,15 @@ pub async fn proxy_http_live_failure_for_test() -> Result<(), String> {
 pub async fn proxy_http_over_capacity_for_test() -> Result<NoReadySessionResult, String> {
     let upstream = spawn_http_upstream().await;
     let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
-    let addr = spawn_test_proxy_with_limit(pool, 1, move |_account_name, _host, _port| async move {
-        TcpStream::connect(upstream).await
-    })
-    .await?;
+    let addr =
+        spawn_test_proxy_with_limit(pool, 1, move |_account_name, _host, _port| async move {
+            TcpStream::connect(upstream).await
+        })
+        .await?;
 
-    let blocker = TcpStream::connect(addr).await.map_err(|err| err.to_string())?;
+    let blocker = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
     tokio::time::sleep(Duration::from_millis(20)).await;
     let result = request_no_ready_session(addr).await;
     drop(blocker);
@@ -1366,7 +1372,14 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
-    spawn_test_proxy_internal(pool, None, DEFAULT_CONNECT_TIMEOUT, DEFAULT_MAX_IN_FLIGHT_CONNECTIONS, connector).await
+    spawn_test_proxy_internal(
+        pool,
+        None,
+        DEFAULT_CONNECT_TIMEOUT,
+        DEFAULT_MAX_IN_FLIGHT_CONNECTIONS,
+        connector,
+    )
+    .await
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -1460,7 +1473,8 @@ where
                 Ok(permit) => {
                     tokio::spawn(async move {
                         let _permit = permit;
-                        let _ = handle_client(stream, pool, stats, connect_timeout, connector).await;
+                        let _ =
+                            handle_client(stream, pool, stats, connect_timeout, connector).await;
                     });
                 }
                 Err(_) => {
@@ -1584,7 +1598,9 @@ async fn handle_live_client(
     stats: RuntimeStats,
     connect_timeout: Duration,
 ) -> Result<(), String> {
-    let upstream_cache = Arc::new(tokio::sync::Mutex::new(None::<CachedUpstream<smelly_connect::transport::VpnStream>>));
+    let upstream_cache = Arc::new(tokio::sync::Mutex::new(
+        None::<CachedUpstream<smelly_connect::transport::VpnStream>>,
+    ));
     let io = TokioIo::new(client);
     hyper_server_http1::Builder::new()
         .half_close(true)
@@ -1620,13 +1636,11 @@ where
     F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
 {
+    let request_id = next_request_id();
     let account_name = match pool.next_account_name().await {
         Ok(name) => name,
         Err(_) => {
-            tracing::warn!(
-                protocol = tracing::field::display("http"),
-                "no ready session"
-            );
+            log_no_ready_session(request_id, "http");
             return empty_response(StatusCode::SERVICE_UNAVAILABLE);
         }
     };
@@ -1637,16 +1651,29 @@ where
             Err(_) => return empty_response(StatusCode::BAD_REQUEST),
         };
         tracing::info!(
+            request_id,
             protocol = tracing::field::display("connect"),
             target = %target,
             account = %account_name,
             "request accepted"
         );
         let on_upgrade = upgrade::on(request);
+        let connect_started = Instant::now();
+        log_upstream_connect_start(
+            request_id,
+            "connect",
+            &account_name,
+            &target,
+            connect_timeout,
+        );
         let upstream = connector(account_name, host, port);
         let upstream = match connect_with_timeout(connect_timeout, upstream).await {
-            Ok(upstream) => upstream,
+            Ok(upstream) => {
+                log_upstream_connect_success(request_id, "connect", &target, connect_started);
+                upstream
+            }
             Err(err) => {
+                log_upstream_connect_failure(request_id, "connect", &target, connect_started, &err);
                 if let Some(stats) = &stats {
                     stats.record_connect_failure();
                 }
@@ -1656,11 +1683,34 @@ where
         let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
         tokio::spawn(async move {
             let Ok(upgraded) = on_upgrade.await else {
+                tracing::warn!(request_id, target = %target, "http connect upgrade failed");
                 return;
             };
+            tracing::info!(request_id, target = %target, "http connect tunnel established");
             let mut client = TokioIo::new(upgraded);
             let mut upstream = upstream;
-            let _ = relay_upgraded_tunnel(&mut client, &mut upstream, connection.as_ref()).await;
+            let relay_started = Instant::now();
+            match relay_upgraded_tunnel(&mut client, &mut upstream, connection.as_ref()).await {
+                Ok((client_to_upstream_bytes, upstream_to_client_bytes)) => {
+                    tracing::info!(
+                        request_id,
+                        target = %target,
+                        elapsed_ms = elapsed_ms(relay_started),
+                        client_to_upstream_bytes,
+                        upstream_to_client_bytes,
+                        "http connect tunnel relay finished"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        request_id,
+                        target = %target,
+                        elapsed_ms = elapsed_ms(relay_started),
+                        error = %err,
+                        "http connect tunnel relay failed"
+                    );
+                }
+            }
         });
         return connect_established_response();
     }
@@ -1670,6 +1720,7 @@ where
         Err(_) => return empty_response(StatusCode::BAD_REQUEST),
     };
     tracing::info!(
+        request_id,
         protocol = tracing::field::display("http"),
         target = %target,
         account = %account_name,
@@ -1680,7 +1731,34 @@ where
     let upstream = take_cached_upstream(&upstream_cache, &host, port).await;
     let upstream = match upstream {
         Some(upstream) => Ok(upstream),
-        None => connect_with_timeout(connect_timeout, connector(account_name, host.clone(), port)).await,
+        None => {
+            let connect_started = Instant::now();
+            log_upstream_connect_start(
+                request_id,
+                "http",
+                &account_name,
+                &target,
+                connect_timeout,
+            );
+            match connect_with_timeout(connect_timeout, connector(account_name, host.clone(), port))
+                .await
+            {
+                Ok(upstream) => {
+                    log_upstream_connect_success(request_id, "http", &target, connect_started);
+                    Ok(upstream)
+                }
+                Err(err) => {
+                    log_upstream_connect_failure(
+                        request_id,
+                        "http",
+                        &target,
+                        connect_started,
+                        &err,
+                    );
+                    Err(err)
+                }
+            }
+        }
     };
     let upstream = match upstream {
         Ok(upstream) => upstream,
@@ -1693,7 +1771,8 @@ where
     };
     let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
     if wants_keep_alive {
-        let (response, reusable) = forward_request_with_reuse(request, uri, upstream, connection).await;
+        let (response, reusable) =
+            forward_request_with_reuse(request, uri, upstream, connection).await;
         if let Some(reusable) = reusable {
             store_cached_upstream(&upstream_cache, host, port, reusable).await;
         }
@@ -1708,15 +1787,15 @@ async fn handle_live_request(
     pool: SessionPool,
     stats: RuntimeStats,
     connect_timeout: Duration,
-    upstream_cache: Arc<tokio::sync::Mutex<Option<CachedUpstream<smelly_connect::transport::VpnStream>>>>,
+    upstream_cache: Arc<
+        tokio::sync::Mutex<Option<CachedUpstream<smelly_connect::transport::VpnStream>>>,
+    >,
 ) -> Response<ProxyBody> {
+    let request_id = next_request_id();
     let (account_name, session) = match pool.next_live_session().await {
         Ok(ready) => ready,
         Err(_) => {
-            tracing::warn!(
-                protocol = tracing::field::display("http"),
-                "no ready session"
-            );
+            log_no_ready_session(request_id, "http");
             return empty_response(StatusCode::SERVICE_UNAVAILABLE);
         }
     };
@@ -1727,27 +1806,33 @@ async fn handle_live_request(
             Err(_) => return empty_response(StatusCode::BAD_REQUEST),
         };
         tracing::info!(
+            request_id,
             protocol = tracing::field::display("connect"),
             target = %target,
             account = %account_name,
             "request accepted"
         );
         let on_upgrade = upgrade::on(request);
+        let connect_started = Instant::now();
+        log_upstream_connect_start(
+            request_id,
+            "connect",
+            &account_name,
+            &target,
+            connect_timeout,
+        );
         let upstream = session.connect_tcp((host.as_str(), port));
         let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
-            Ok(upstream) => upstream,
+            Ok(upstream) => {
+                log_upstream_connect_success(request_id, "connect", &target, connect_started);
+                upstream
+            }
             Err(err) => {
+                log_upstream_connect_failure(request_id, "connect", &target, connect_started, &err);
                 if !matches!(err, UpstreamConnectError::RouteRejected) {
                     stats.record_connect_failure();
                 }
-                if should_report_live_session_failure(&err) {
-                    pool.report_live_session_unhealthy_if_probe_fails(
-                        &account_name,
-                        &session,
-                        format!("{err:?}"),
-                    )
-                    .await;
-                }
+                handle_live_session_failure(&pool, &account_name, &session, &err).await;
                 return gateway_error_response(&err);
             }
         };
@@ -1755,11 +1840,34 @@ async fn handle_live_request(
         let connection = stats.open_connection(ProxyProtocol::Http);
         tokio::spawn(async move {
             let Ok(upgraded) = on_upgrade.await else {
+                tracing::warn!(request_id, target = %target, "http connect upgrade failed");
                 return;
             };
+            tracing::info!(request_id, target = %target, "http connect tunnel established");
             let mut client = TokioIo::new(upgraded);
             let mut upstream = upstream;
-            let _ = relay_upgraded_tunnel(&mut client, &mut upstream, Some(&connection)).await;
+            let relay_started = Instant::now();
+            match relay_upgraded_tunnel(&mut client, &mut upstream, Some(&connection)).await {
+                Ok((client_to_upstream_bytes, upstream_to_client_bytes)) => {
+                    tracing::info!(
+                        request_id,
+                        target = %target,
+                        elapsed_ms = elapsed_ms(relay_started),
+                        client_to_upstream_bytes,
+                        upstream_to_client_bytes,
+                        "http connect tunnel relay finished"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        request_id,
+                        target = %target,
+                        elapsed_ms = elapsed_ms(relay_started),
+                        error = %err,
+                        "http connect tunnel relay failed"
+                    );
+                }
+            }
         });
         return connect_established_response();
     }
@@ -1769,6 +1877,7 @@ async fn handle_live_request(
         Err(_) => return empty_response(StatusCode::BAD_REQUEST),
     };
     tracing::info!(
+        request_id,
         protocol = tracing::field::display("http"),
         target = %target,
         account = %account_name,
@@ -1779,7 +1888,37 @@ async fn handle_live_request(
     let upstream = take_cached_upstream(&upstream_cache, &host, port).await;
     let upstream = match upstream {
         Some(upstream) => Ok(upstream),
-        None => connect_session_with_timeout(connect_timeout, session.connect_tcp((host.as_str(), port))).await,
+        None => {
+            let connect_started = Instant::now();
+            log_upstream_connect_start(
+                request_id,
+                "http",
+                &account_name,
+                &target,
+                connect_timeout,
+            );
+            match connect_session_with_timeout(
+                connect_timeout,
+                session.connect_tcp((host.as_str(), port)),
+            )
+            .await
+            {
+                Ok(upstream) => {
+                    log_upstream_connect_success(request_id, "http", &target, connect_started);
+                    Ok(upstream)
+                }
+                Err(err) => {
+                    log_upstream_connect_failure(
+                        request_id,
+                        "http",
+                        &target,
+                        connect_started,
+                        &err,
+                    );
+                    Err(err)
+                }
+            }
+        }
     };
     let upstream = match upstream {
         Ok(upstream) => upstream,
@@ -1787,14 +1926,7 @@ async fn handle_live_request(
             if !matches!(err, UpstreamConnectError::RouteRejected) {
                 stats.record_connect_failure();
             }
-            if should_report_live_session_failure(&err) {
-                pool.report_live_session_unhealthy_if_probe_fails(
-                    &account_name,
-                    &session,
-                    format!("{err:?}"),
-                )
-                .await;
-            }
+            handle_live_session_failure(&pool, &account_name, &session, &err).await;
             return gateway_error_response(&err);
         }
     };
@@ -1834,16 +1966,117 @@ fn connect_established_response() -> Response<ProxyBody> {
 }
 
 fn gateway_error_response(err: &UpstreamConnectError) -> Response<ProxyBody> {
-    let status = match err {
-        UpstreamConnectError::TimedOut => StatusCode::GATEWAY_TIMEOUT,
-        UpstreamConnectError::RouteRejected => StatusCode::FORBIDDEN,
-        UpstreamConnectError::Failed => StatusCode::BAD_GATEWAY,
-    };
-    empty_response(status)
+    empty_response(gateway_error_status(err))
 }
 
 fn should_report_live_session_failure(err: &UpstreamConnectError) -> bool {
     !matches!(err, UpstreamConnectError::RouteRejected)
+}
+
+async fn handle_live_session_failure(
+    pool: &SessionPool,
+    account_name: &str,
+    session: &smelly_connect::Session,
+    err: &UpstreamConnectError,
+) {
+    match err {
+        UpstreamConnectError::TimedOut => {
+            pool.report_live_session_reconnect_required(account_name, format!("{err:?}"))
+                .await;
+        }
+        UpstreamConnectError::Failed if should_report_live_session_failure(err) => {
+            pool.report_live_session_unhealthy_if_probe_fails(
+                account_name,
+                session,
+                format!("{err:?}"),
+            )
+            .await;
+        }
+        UpstreamConnectError::RouteRejected | UpstreamConnectError::Failed => {}
+    }
+}
+
+fn next_request_id() -> u64 {
+    NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn gateway_error_status(err: &UpstreamConnectError) -> StatusCode {
+    match err {
+        UpstreamConnectError::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+        UpstreamConnectError::RouteRejected => StatusCode::FORBIDDEN,
+        UpstreamConnectError::Failed => StatusCode::BAD_GATEWAY,
+    }
+}
+
+fn upstream_error_label(err: &UpstreamConnectError) -> &'static str {
+    match err {
+        UpstreamConnectError::TimedOut => "timed_out",
+        UpstreamConnectError::RouteRejected => "route_rejected",
+        UpstreamConnectError::Failed => "failed",
+    }
+}
+
+fn log_no_ready_session(request_id: u64, protocol: &'static str) {
+    tracing::warn!(
+        request_id,
+        protocol = tracing::field::display(protocol),
+        "no ready session"
+    );
+}
+
+fn log_upstream_connect_start(
+    request_id: u64,
+    protocol: &'static str,
+    account: &str,
+    target: &str,
+    timeout: Duration,
+) {
+    tracing::info!(
+        request_id,
+        protocol = tracing::field::display(protocol),
+        account,
+        target,
+        timeout_ms = timeout.as_millis().try_into().unwrap_or(u64::MAX),
+        "http upstream connect start"
+    );
+}
+
+fn log_upstream_connect_success(
+    request_id: u64,
+    protocol: &'static str,
+    target: &str,
+    started: Instant,
+) {
+    tracing::info!(
+        request_id,
+        protocol = tracing::field::display(protocol),
+        target,
+        elapsed_ms = elapsed_ms(started),
+        result = "ok",
+        "http upstream connect result"
+    );
+}
+
+fn log_upstream_connect_failure(
+    request_id: u64,
+    protocol: &'static str,
+    target: &str,
+    started: Instant,
+    err: &UpstreamConnectError,
+) {
+    tracing::warn!(
+        request_id,
+        protocol = tracing::field::display(protocol),
+        target,
+        elapsed_ms = elapsed_ms(started),
+        result = upstream_error_label(err),
+        http_status = gateway_error_status(err).as_u16(),
+        "http upstream connect result"
+    );
 }
 
 fn resolve_forward_target(
@@ -2036,12 +2269,12 @@ async fn relay_upgraded_tunnel(
     client: &mut (impl AsyncRead + AsyncWrite + Unpin),
     upstream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     connection: Option<&ConnectionGuard>,
-) -> Result<(), String> {
+) -> Result<(u64, u64), String> {
     let (client_to_upstream, upstream_to_client) = copy_bidirectional(client, upstream)
         .await
         .map_err(|err| err.to_string())?;
     record_tunnel_transfer(connection, client_to_upstream, upstream_to_client);
-    Ok(())
+    Ok((client_to_upstream, upstream_to_client))
 }
 
 fn should_strip_request_header(name: &http::header::HeaderName) -> bool {
@@ -2176,8 +2409,11 @@ where
     let header_lines: Vec<&str> = lines.collect();
     let body_kind = response_body_kind(status_code, &header_lines);
     let initial_body = buffer[header_end..].to_vec();
-    let can_reuse =
-        response_allows_reuse(&header_lines) && matches!(body_kind, ResponseBodyKind::None | ResponseBodyKind::ContentLength(_));
+    let can_reuse = response_allows_reuse(&header_lines)
+        && matches!(
+            body_kind,
+            ResponseBodyKind::None | ResponseBodyKind::ContentLength(_)
+        );
 
     if !can_reuse {
         let mut builder = Response::builder().status(status_code);
@@ -2205,9 +2441,14 @@ where
             let mut body = initial_body;
             while body.len() < length {
                 let mut chunk = [0_u8; 8192];
-                let n = upstream.read(&mut chunk).await.map_err(|err| err.to_string())?;
+                let n = upstream
+                    .read(&mut chunk)
+                    .await
+                    .map_err(|err| err.to_string())?;
                 if n == 0 {
-                    return Err("connection closed before reusable response body completed".to_string());
+                    return Err(
+                        "connection closed before reusable response body completed".to_string()
+                    );
                 }
                 body.extend_from_slice(&chunk[..n]);
             }
@@ -2646,8 +2887,8 @@ async fn spawn_keep_alive_http_upstream() -> SocketAddr {
 }
 
 #[cfg(any(test, debug_assertions))]
-async fn spawn_reusable_keep_alive_http_upstream(
-) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+async fn spawn_reusable_keep_alive_http_upstream()
+-> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));

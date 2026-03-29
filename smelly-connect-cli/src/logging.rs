@@ -99,6 +99,21 @@ pub fn capture_http_connect_log_for_test() -> Vec<String> {
 }
 
 #[cfg(any(test, debug_assertions))]
+pub fn capture_http_timeout_diagnostic_log_for_test() -> Vec<String> {
+    capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
+        let _ = crate::proxy::http::proxy_http_immediate_timeout_status_for_test().await;
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub fn capture_http_connect_tunnel_log_for_test() -> Vec<String> {
+    capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
+        let _ = crate::proxy::http::proxy_connect_for_test().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
 pub fn capture_socks5_request_log_for_test() -> Vec<String> {
     capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
         let _ = crate::proxy::socks5::proxy_socks5_for_test().await;

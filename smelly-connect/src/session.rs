@@ -4,6 +4,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tracing::{info, warn};
+
 use crate::error::{Error, ProxyError, RouteDecisionError, TransportError};
 use crate::proxy::http::ProxyHandle;
 use crate::resolver::SessionResolver;
@@ -64,9 +66,9 @@ impl LocalRouteOverrides {
     }
 
     fn matches_domain(&self, host: &str, port: u16, protocol: RouteProtocol) -> bool {
-        self.domain_rules
-            .iter()
-            .any(|(domain, rule)| route_match::domain_rule_matches(host, port, protocol, domain, rule))
+        self.domain_rules.iter().any(|(domain, rule)| {
+            route_match::domain_rule_matches(host, port, protocol, domain, rule)
+        })
     }
 
     fn matches_ip(&self, ip: IpAddr, port: u16, protocol: RouteProtocol) -> bool {
@@ -232,14 +234,62 @@ impl EasyConnectSession {
     where
         T: Into<TargetAddr>,
     {
-        let route = self.plan_tcp_connect(target).await?;
+        let target = target.into();
+        let host = target.host().to_string();
+        let port = target.port();
+        let started = std::time::Instant::now();
+        let route = match self.plan_tcp_connect((host.as_str(), port)).await {
+            Ok(route) => route,
+            Err(err) => {
+                warn!(
+                    target_host = %host,
+                    target_port = port,
+                    elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                    error_kind = session_plan_error_kind(&err),
+                    error = ?err,
+                    "session tcp connect planning failed"
+                );
+                return Err(err);
+            }
+        };
         match route {
-            RoutePlan::VpnResolved(addr) => self
-                .inner
-                .transport
-                .connect(addr)
-                .await
-                .map_err(|err| Error::Transport(TransportError::from_io(err))),
+            RoutePlan::VpnResolved(addr) => {
+                info!(
+                    target_host = %host,
+                    target_port = port,
+                    resolved_addr = %addr,
+                    plan_elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                    "session tcp connect planned"
+                );
+                let transport_started = std::time::Instant::now();
+                match self.inner.transport.connect(addr).await {
+                    Ok(stream) => {
+                        info!(
+                            target_host = %host,
+                            target_port = port,
+                            resolved_addr = %addr,
+                            connect_elapsed_ms = transport_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                            total_elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                            "session tcp connect established"
+                        );
+                        Ok(stream)
+                    }
+                    Err(err) => {
+                        let mapped = Error::Transport(TransportError::from_io(err));
+                        warn!(
+                            target_host = %host,
+                            target_port = port,
+                            resolved_addr = %addr,
+                            connect_elapsed_ms = transport_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                            total_elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                            error_kind = session_transport_error_kind(&mapped),
+                            error = ?mapped,
+                            "session tcp connect failed"
+                        );
+                        Err(mapped)
+                    }
+                }
+            }
         }
     }
 
@@ -353,7 +403,9 @@ impl EasyConnectSession {
 
         if !self.allow_all_routes
             && !self.inner.resources.matches_domain(&host, port, protocol)
-            && !self.local_route_overrides.matches_domain(&host, port, protocol)
+            && !self
+                .local_route_overrides
+                .matches_domain(&host, port, protocol)
         {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
@@ -368,10 +420,20 @@ impl EasyConnectSession {
         Ok(SocketAddr::new(ip, port))
     }
 
-    fn plan_ip(&self, ip: Ipv4Addr, port: u16, protocol: RouteProtocol) -> Result<SocketAddr, Error> {
+    fn plan_ip(
+        &self,
+        ip: Ipv4Addr,
+        port: u16,
+        protocol: RouteProtocol,
+    ) -> Result<SocketAddr, Error> {
         if !self.allow_all_routes
-            && !self.inner.resources.matches_ip(IpAddr::V4(ip), port, protocol)
-            && !self.local_route_overrides.matches_ip(IpAddr::V4(ip), port, protocol)
+            && !self
+                .inner
+                .resources
+                .matches_ip(IpAddr::V4(ip), port, protocol)
+            && !self
+                .local_route_overrides
+                .matches_ip(IpAddr::V4(ip), port, protocol)
         {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
@@ -410,6 +472,26 @@ impl SessionUdpSocket {
         self.socket
             .local_addr()
             .map_err(|err| Error::Transport(TransportError::from_io(err)))
+    }
+}
+
+fn session_plan_error_kind(err: &Error) -> &'static str {
+    match err {
+        Error::RouteDecision(RouteDecisionError::TargetNotAllowed) => "route_rejected",
+        Error::Resolve(_) => "resolve_failed",
+        Error::Transport(TransportError::ConnectTimedOut) => "transport_connect_timeout",
+        Error::Transport(TransportError::ConnectFailed(_)) => "transport_connect_failed",
+        Error::Transport(TransportError::ConnectionClosed) => "transport_connection_closed",
+        _ => "plan_failed",
+    }
+}
+
+fn session_transport_error_kind(err: &Error) -> &'static str {
+    match err {
+        Error::Transport(TransportError::ConnectTimedOut) => "transport_connect_timeout",
+        Error::Transport(TransportError::ConnectFailed(_)) => "transport_connect_failed",
+        Error::Transport(TransportError::ConnectionClosed) => "transport_connection_closed",
+        _ => "transport_failed",
     }
 }
 

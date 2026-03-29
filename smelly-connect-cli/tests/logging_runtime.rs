@@ -118,11 +118,63 @@ fn invalid_logging_config_emits_error_log() {
     assert!(events.iter().any(|line| line.contains("logging")));
 }
 
+#[test]
+fn http_timeout_diagnostic_logs_include_request_id_and_timeout_result() {
+    let events = smelly_connect_cli::logging::capture_http_timeout_diagnostic_log_for_test();
+    assert!(events.iter().any(|line| line.contains("request_id=")));
+    assert!(
+        events
+            .iter()
+            .any(|line| line.contains("http upstream connect start"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|line| line.contains("http upstream connect result"))
+    );
+    assert!(events.iter().any(|line| line.contains("timed_out")));
+    assert!(events.iter().any(|line| line.contains("504")));
+    assert!(
+        events
+            .iter()
+            .any(|line| line.contains("session tcp connect planned"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|line| line.contains("session tcp connect failed"))
+    );
+}
+
+#[test]
+fn http_connect_tunnel_logs_relay_completion_bytes() {
+    let events = smelly_connect_cli::logging::capture_http_connect_tunnel_log_for_test();
+    assert!(events.iter().any(|line| line.contains("request_id=")));
+    assert!(
+        events
+            .iter()
+            .any(|line| line.contains("http connect tunnel relay finished"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|line| line.contains("client_to_upstream_bytes="))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|line| line.contains("upstream_to_client_bytes="))
+    );
+}
+
 #[tokio::test]
 async fn socks5_connect_failure_marks_runtime_status_recovering() {
     let snapshot =
         smelly_connect_cli::proxy::socks5::proxy_socks5_connect_failure_runtime_status_for_test()
             .await
             .unwrap();
-    assert_eq!(snapshot.status, smelly_connect_cli::pool::PoolHealthStatus::Recovering);
+    assert_eq!(
+        snapshot.status,
+        smelly_connect_cli::pool::PoolHealthStatus::Recovering
+    );
 }

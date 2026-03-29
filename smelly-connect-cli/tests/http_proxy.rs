@@ -34,10 +34,9 @@ async fn http_proxy_completes_body_when_upstream_keeps_connection_alive() {
 
 #[tokio::test]
 async fn http_proxy_reuses_upstream_connection_for_sequential_requests() {
-    let result =
-        smelly_connect_cli::proxy::http::proxy_http_reuses_upstream_connection_for_test()
-            .await
-            .unwrap();
+    let result = smelly_connect_cli::proxy::http::proxy_http_reuses_upstream_connection_for_test()
+        .await
+        .unwrap();
     assert_eq!(result.body, "ok");
     assert_eq!(result.upstream_accepts, 1);
 }
@@ -98,8 +97,8 @@ async fn http_proxy_preserves_head_responses_without_waiting_for_body_bytes() {
 async fn http_proxy_rejects_oversized_upstream_response_headers() {
     let result =
         smelly_connect_cli::proxy::http::proxy_http_rejects_oversized_response_headers_for_test()
-        .await
-        .unwrap();
+            .await
+            .unwrap();
     assert_eq!(result.status_code, 502);
 }
 
@@ -188,13 +187,13 @@ async fn http_route_rejection_does_not_mark_live_session_open() {
 }
 
 #[tokio::test]
-async fn http_connect_timeout_does_not_mark_live_session_open() {
+async fn http_connect_timeout_marks_live_session_open() {
     let result = smelly_connect_cli::proxy::http::proxy_http_timeout_does_not_open_for_test()
         .await
         .unwrap();
     assert_eq!(result.status_code, 504);
-    assert!(result.state_summary.contains("Ready"));
-    assert!(result.selectable_after_failure);
+    assert!(result.state_summary.contains("Open"));
+    assert!(!result.selectable_after_failure);
 }
 
 #[tokio::test]

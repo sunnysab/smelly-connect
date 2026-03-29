@@ -1562,6 +1562,7 @@ dependencies = [
  "smelly-tls",
  "smoltcp",
  "tokio",
+ "tracing",
  "trybuild",
 ]
 
