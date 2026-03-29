@@ -1178,6 +1178,7 @@ async fn handle_live_client(
                     if matches!(err, UpstreamConnectError::TimedOut) {
                         pool.report_live_session_reconnect_required(
                             &account_name,
+                            &session,
                             format!("{err:?}"),
                         )
                             .await;

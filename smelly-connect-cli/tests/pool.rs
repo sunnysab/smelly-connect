@@ -238,6 +238,49 @@ async fn request_triggered_probe_recovers_one_node_when_pool_is_exhausted() {
     assert_eq!(recovered.account_name(), "acct-01");
 }
 
+#[tokio::test]
+async fn timed_out_live_session_recovery_prefers_transport_rebuild_before_relogin() {
+    let mut resources = smelly_connect::resource::ResourceSet::default();
+    resources.domain_rules.insert(
+        "jwxt.sit.edu.cn".to_string(),
+        smelly_connect::resource::DomainRule {
+            port_min: 443,
+            port_max: 443,
+            protocol: smelly_connect::RouteProtocol::Tcp,
+        },
+    );
+    let mut system_dns = std::collections::HashMap::new();
+    system_dns.insert(
+        "jwxt.sit.edu.cn".to_string(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(210, 35, 66, 210)),
+    );
+    let session = smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        resources,
+        smelly_connect::resolver::SessionResolver::new(
+            std::collections::HashMap::new(),
+            None,
+            system_dns,
+        ),
+        smelly_connect::session::EasyConnectSession::failing_transport("stale transport"),
+    )
+    .with_transport_rebuild_for_test(|| {
+        Ok(smelly_connect::transport::TransportStack::new(|_| async {
+            let (client, _server) = tokio::io::duplex(1024);
+            Ok(smelly_connect::transport::VpnStream::new(client))
+        }))
+    });
+    let pool =
+        smelly_connect_cli::pool::SessionPool::from_live_sessions_for_test(vec![("acct-01", session.clone())])
+            .await;
+
+    pool.report_live_session_reconnect_required("acct-01", &session, "forced timeout")
+        .await;
+
+    let recovered = pool.next_live_session().await.unwrap();
+    assert_eq!(recovered.0, "acct-01");
+}
+
 #[tokio::test(start_paused = true)]
 async fn concurrent_requests_do_not_probe_same_node_twice() {
     let pool = smelly_connect_cli::pool::SessionPool::from_exhausted_pool_for_test().await;

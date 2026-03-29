@@ -248,6 +248,54 @@ async fn local_ip_overrides_allow_domain_targets_after_resolution() {
 }
 
 #[tokio::test]
+async fn session_can_rebuild_transport_without_reauth() {
+    let mut resources = smelly_connect::resource::ResourceSet::default();
+    resources.domain_rules.insert(
+        "jwxt.sit.edu.cn".to_string(),
+        smelly_connect::resource::DomainRule {
+            port_min: 443,
+            port_max: 443,
+            protocol: smelly_connect::RouteProtocol::Tcp,
+        },
+    );
+    let mut system_dns = std::collections::HashMap::new();
+    system_dns.insert(
+        "jwxt.sit.edu.cn".to_string(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(210, 35, 66, 210)),
+    );
+
+    let rebuilt = smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        resources,
+        smelly_connect::resolver::SessionResolver::new(
+            std::collections::HashMap::new(),
+            None,
+            system_dns,
+        ),
+        smelly_connect::session::EasyConnectSession::failing_transport("stale transport"),
+    )
+    .with_transport_rebuild_for_test(|| {
+        Ok(smelly_connect::transport::TransportStack::new(|_| async {
+            let (client, _server) = tokio::io::duplex(1024);
+            Ok(smelly_connect::transport::VpnStream::new(client))
+        }))
+    })
+    .rebuild_transport()
+    .await
+    .unwrap();
+
+    let route = rebuilt
+        .plan_tcp_connect(("jwxt.sit.edu.cn", 443))
+        .await
+        .unwrap();
+    assert!(matches!(
+        route,
+        smelly_connect::session::RoutePlan::VpnResolved(addr)
+            if addr == "210.35.66.210:443".parse().unwrap()
+    ));
+}
+
+#[tokio::test]
 async fn tcp_only_domain_rule_does_not_allow_udp_send() {
     let mut resources = smelly_connect::resource::ResourceSet::default();
     resources.domain_rules.insert(

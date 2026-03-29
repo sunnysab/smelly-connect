@@ -75,6 +75,7 @@ pub enum AccountState {
 struct AccountNode {
     account: AccountConfig,
     state: AccountState,
+    reconnect_session: Option<Session>,
     #[allow(dead_code)]
     flaky_retry: bool,
     consecutive_failures: u32,
@@ -249,6 +250,7 @@ impl SessionPool {
                     password: "pass".to_string(),
                 },
                 state,
+                reconnect_session: None,
                 flaky_retry: false,
                 consecutive_failures: 0,
                 failure_threshold: 3,
@@ -284,6 +286,7 @@ impl SessionPool {
                     password: "pass".to_string(),
                 },
                 state: AccountState::Ready(PooledSession::new(name.to_string(), None).into()),
+                reconnect_session: None,
                 flaky_retry: false,
                 consecutive_failures: 0,
                 failure_threshold: 3,
@@ -331,6 +334,7 @@ impl SessionPool {
                     )
                     .into(),
                 ),
+                reconnect_session: None,
                 flaky_retry: false,
                 consecutive_failures: 0,
                 failure_threshold: 3,
@@ -368,6 +372,7 @@ impl SessionPool {
                 state: AccountState::Ready(
                     PooledSession::new(account_name.to_string(), Some(session)).into(),
                 ),
+                reconnect_session: None,
                 flaky_retry: false,
                 consecutive_failures: 0,
                 failure_threshold: 3,
@@ -448,6 +453,7 @@ impl SessionPool {
                     password: "pass".to_string(),
                 },
                 state,
+                reconnect_session: None,
                 flaky_retry: false,
                 consecutive_failures: 0,
                 failure_threshold: 3,
@@ -486,6 +492,7 @@ impl SessionPool {
                 state: AccountState::Open(AccountFailure {
                     message: "not ready".to_string(),
                 }),
+                reconnect_session: None,
                 flaky_retry: false,
                 consecutive_failures: 0,
                 failure_threshold: 3,
@@ -523,6 +530,7 @@ impl SessionPool {
                     state: AccountState::Ready(
                         PooledSession::new("acct-01".to_string(), None).into(),
                     ),
+                    reconnect_session: None,
                     flaky_retry: true,
                     consecutive_failures: 0,
                     failure_threshold: 3,
@@ -564,6 +572,7 @@ impl SessionPool {
             nodes.push(AccountNode {
                 account: account.clone(),
                 state: AccountState::Configured(account.clone()),
+                reconnect_session: None,
                 flaky_retry: false,
                 consecutive_failures: 0,
                 failure_threshold: cfg.pool.failure_threshold,
@@ -755,6 +764,7 @@ impl SessionPool {
     pub async fn report_live_session_reconnect_required(
         &self,
         account_name: &str,
+        session: &Session,
         error: impl Into<String>,
     ) {
         let error = error.into();
@@ -769,6 +779,7 @@ impl SessionPool {
                 node.state,
                 AccountState::Ready(_) | AccountState::Suspect(_)
             ) {
+                node.reconnect_session = Some(session.clone());
                 node.consecutive_failures = node.failure_threshold;
                 node.open_until = Some(Instant::now());
                 node.state = AccountState::Open(AccountFailure {
@@ -966,6 +977,7 @@ impl SessionPool {
                         state: AccountState::Ready(
                             PooledSession::new("ready-01".to_string(), None).into(),
                         ),
+                        reconnect_session: None,
                         flaky_retry: false,
                         consecutive_failures: 0,
                         failure_threshold: 3,
@@ -984,6 +996,7 @@ impl SessionPool {
                         state: AccountState::Suspect(
                             PooledSession::new("suspect-01".to_string(), None).into(),
                         ),
+                        reconnect_session: None,
                         flaky_retry: false,
                         consecutive_failures: 1,
                         failure_threshold: 3,
@@ -1002,6 +1015,7 @@ impl SessionPool {
                         state: AccountState::Open(AccountFailure {
                             message: "open".to_string(),
                         }),
+                        reconnect_session: None,
                         flaky_retry: false,
                         consecutive_failures: 3,
                         failure_threshold: 3,
@@ -1022,6 +1036,7 @@ impl SessionPool {
                             username: "half-open-01".to_string(),
                             password: "pass".to_string(),
                         }),
+                        reconnect_session: None,
                         flaky_retry: false,
                         consecutive_failures: 3,
                         failure_threshold: 3,
@@ -1059,6 +1074,7 @@ impl SessionPool {
                     state: AccountState::Open(AccountFailure {
                         message: "vpn unavailable".to_string(),
                     }),
+                    reconnect_session: None,
                     flaky_retry: false,
                     consecutive_failures: 3,
                     failure_threshold: 3,
@@ -1110,7 +1126,8 @@ impl SessionPool {
 
     #[cfg(any(test, debug_assertions))]
     pub async fn try_request_triggered_probe_for_test(&self) -> Result<PooledSession, PoolError> {
-        let Some((name, account)) = self.claim_request_triggered_probe().await? else {
+        let Some((name, account, _reconnect_session)) = self.claim_request_triggered_probe().await?
+        else {
             return Err(PoolError::new("no ready session"));
         };
         let session = PooledSession::new(name.clone(), None);
@@ -1432,7 +1449,7 @@ impl SessionPool {
 
     async fn claim_request_triggered_probe(
         &self,
-    ) -> Result<Option<(String, AccountConfig)>, PoolError> {
+    ) -> Result<Option<(String, AccountConfig, Option<Session>)>, PoolError> {
         if !self.allow_request_triggered_probe {
             return Ok(None);
         }
@@ -1466,32 +1483,23 @@ impl SessionPool {
         let node = &mut state.nodes[idx];
         let account = node.account.clone();
         let name = node.account.name.clone();
+        let reconnect_session = node.reconnect_session.clone();
         node.state = AccountState::Connecting;
         node.open_until = None;
         tracing::info!(account = %name, "request-triggered recovery probe scheduled");
-        Ok(Some((name, account)))
+        Ok(Some((name, account, reconnect_session)))
     }
 
     async fn try_request_triggered_live_probe(
         &self,
     ) -> Result<Option<(String, Session)>, PoolError> {
-        let Some((name, account)) = self.claim_request_triggered_probe().await? else {
+        let Some((name, account, reconnect_session)) = self.claim_request_triggered_probe().await?
+        else {
             return Ok(None);
         };
-        let server = self
-            .server
-            .as_deref()
-            .ok_or_else(|| PoolError::new("real server configuration unavailable"))?;
-
-        match connect_account(
-            server,
-            &account,
-            self.connect_timeout,
-            &self.local_route_overrides,
-            self.allow_all_routes,
-            self.keepalive_target.as_deref(),
-        )
-        .await
+        match self
+            .recover_account_session(&name, &account, reconnect_session)
+            .await
         {
             Ok(session) => {
                 let live = session.clone();
@@ -1522,6 +1530,7 @@ impl SessionPool {
         node.consecutive_failures = 0;
         node.current_backoff = node.backoff_base;
         node.open_until = None;
+        node.reconnect_session = None;
         node.state = AccountState::Ready(Box::new(session));
         tracing::info!(account = %name, "request-triggered recovery probe succeeded");
         Ok(())
@@ -1550,6 +1559,46 @@ impl SessionPool {
                 node.open_until = None;
             }
         }
+    }
+}
+
+impl SessionPool {
+    async fn recover_account_session(
+        &self,
+        name: &str,
+        account: &AccountConfig,
+        reconnect_session: Option<Session>,
+    ) -> Result<Session, PoolError> {
+        if let Some(session) = reconnect_session {
+            match session.rebuild_transport().await {
+                Ok(rebuilt) => {
+                    tracing::info!(account = %name, "live session transport rebuilt");
+                    return Ok(rebuilt);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        account = %name,
+                        error = ?err,
+                        "live session transport rebuild failed; falling back to full reconnect"
+                    );
+                }
+            }
+        }
+
+        let server = self
+            .server
+            .as_deref()
+            .ok_or_else(|| PoolError::new("real server configuration unavailable"))?;
+
+        connect_account(
+            server,
+            account,
+            self.connect_timeout,
+            &self.local_route_overrides,
+            self.allow_all_routes,
+            self.keepalive_target.as_deref(),
+        )
+        .await
     }
 }
 

@@ -125,6 +125,24 @@ impl EasyConnectSession {
             server_addr,
             token,
             legacy_cipher_hint,
+            #[cfg(any(test, debug_assertions))]
+            transport_rebuilder: None,
+        });
+        self
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn with_transport_rebuild_for_test<F>(mut self, rebuilder: F) -> Self
+    where
+        F: Fn() -> Result<TransportStack, Error> + Send + Sync + 'static,
+    {
+        let server_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 443));
+        let token = crate::protocol::DerivedToken([0_u8; 48]);
+        Arc::make_mut(&mut self.inner).legacy_data_plane = Some(LegacyDataPlaneConfig {
+            server_addr,
+            token,
+            legacy_cipher_hint: None,
+            transport_rebuilder: Some(Arc::new(rebuilder)),
         });
         self
     }
@@ -310,6 +328,75 @@ impl EasyConnectSession {
         crate::integration::http_proxy::start_http_proxy(self.clone(), bind)
             .await
             .map_err(|err| Error::Proxy(ProxyError::BindFailed(err.to_string())))
+    }
+
+    pub async fn rebuild_transport(&self) -> Result<Self, Error> {
+        let cfg = self.inner.legacy_data_plane.as_ref().ok_or_else(|| {
+            Error::Transport(TransportError::ConnectFailed(
+                "legacy data plane unavailable".to_string(),
+            ))
+        })?;
+        #[cfg(any(test, debug_assertions))]
+        let (client_ip, transport, request_ip_tunnel) = if let Some(rebuilder) = &cfg.transport_rebuilder {
+            (self.inner.client_ip, rebuilder()?, None)
+        } else {
+            let (client_ip, request_ip_tunnel) =
+                crate::auth::control::request_ip_via_tunnel_with_conn(
+                    cfg.server_addr,
+                    &cfg.token,
+                    cfg.legacy_cipher_hint.as_deref(),
+                )
+                .await?;
+            let device = crate::auth::control::spawn_legacy_packet_device(
+                cfg.server_addr,
+                &cfg.token,
+                client_ip,
+                cfg.legacy_cipher_hint.as_deref(),
+            )
+            .await?;
+            let transport = crate::transport::netstack::build_transport_from_packet_device(
+                device,
+                client_ip,
+            )
+            .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
+            (client_ip, transport, Some(request_ip_tunnel))
+        };
+        #[cfg(not(any(test, debug_assertions)))]
+        let (client_ip, transport, request_ip_tunnel) = {
+            let (client_ip, request_ip_tunnel) =
+                crate::auth::control::request_ip_via_tunnel_with_conn(
+                    cfg.server_addr,
+                    &cfg.token,
+                    cfg.legacy_cipher_hint.as_deref(),
+                )
+                .await?;
+            let device = crate::auth::control::spawn_legacy_packet_device(
+                cfg.server_addr,
+                &cfg.token,
+                client_ip,
+                cfg.legacy_cipher_hint.as_deref(),
+            )
+            .await?;
+            let transport =
+                crate::transport::netstack::build_transport_from_packet_device(device, client_ip)
+                    .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
+            (client_ip, transport, Some(request_ip_tunnel))
+        };
+
+        Ok(EasyConnectSession::new(
+            client_ip,
+            self.inner.resources.clone(),
+            self.inner.resolver.clone(),
+            transport,
+        )
+        .with_local_route_overrides(self.local_route_overrides.clone())
+        .with_allow_all_routes(self.allow_all_routes)
+        .with_legacy_data_plane(
+            cfg.server_addr,
+            cfg.token.clone(),
+            cfg.legacy_cipher_hint.clone(),
+        )
+        .with_runtime_resources(request_ip_tunnel, None))
     }
 
     pub fn start_icmp_keepalive<T>(&self, target: T, interval: Duration) -> KeepaliveHandle
