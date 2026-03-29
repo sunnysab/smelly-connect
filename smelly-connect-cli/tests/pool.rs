@@ -417,6 +417,78 @@ async fn pool_prefers_default_keepalive_host_over_vpn_server() {
     );
 }
 
+#[tokio::test]
+async fn pool_disables_icmp_keepalive_when_explicitly_disabled() {
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+        default_keepalive_host = "jwxt.sit.edu.cn"
+        enable_icmp_keepalive = false
+        [pool]
+        prewarm = 0
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+        failure_threshold = 3
+        backoff_base_secs = 30
+        backoff_max_secs = 600
+        allow_request_triggered_probe = true
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+    )
+    .unwrap();
+
+    let pool = smelly_connect_cli::pool::SessionPool::from_config_allow_empty(&cfg)
+        .await
+        .unwrap();
+
+    assert_eq!(pool.keepalive_target_for_test().await, None);
+}
+
+#[tokio::test]
+async fn pool_does_not_fallback_keepalive_target_to_vpn_server() {
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+        [pool]
+        prewarm = 0
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+        failure_threshold = 3
+        backoff_base_secs = 30
+        backoff_max_secs = 600
+        allow_request_triggered_probe = true
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+    )
+    .unwrap();
+
+    let pool = smelly_connect_cli::pool::SessionPool::from_config_allow_empty(&cfg)
+        .await
+        .unwrap();
+
+    assert_eq!(pool.keepalive_target_for_test().await, None);
+}
+
 #[tokio::test(start_paused = true)]
 async fn session_keepalive_failure_marks_live_session_open_before_periodic_healthcheck() {
     let session = smelly_connect::test_support::session::session_with_icmp_result(false);

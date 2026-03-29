@@ -10,6 +10,7 @@ fn parses_sample_config() {
         toml::from_str(include_str!("fixtures/config.sample.toml")).unwrap();
     assert_eq!(cfg.accounts.len(), 2);
     assert_eq!(cfg.pool.prewarm, 2);
+    assert!(cfg.vpn.enable_icmp_keepalive);
     assert_eq!(
         cfg.session_connect_timeout(),
         std::time::Duration::from_secs(7)
@@ -252,6 +253,43 @@ fn invalid_route_protocol_is_rejected() {
 
 #[test]
 fn missing_config_returns_typed_cli_error() {
-    let err = smelly_connect_cli::config::load_typed("/definitely/missing/config.toml").unwrap_err();
-    assert!(matches!(err, smelly_connect_cli::error::CliError::Config(_)));
+    let err =
+        smelly_connect_cli::config::load_typed("/definitely/missing/config.toml").unwrap_err();
+    assert!(matches!(
+        err,
+        smelly_connect_cli::error::CliError::Config(_)
+    ));
+}
+
+#[test]
+fn parses_explicit_icmp_disable_flag_from_config() {
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+        default_keepalive_host = "jwxt.sit.edu.cn"
+        enable_icmp_keepalive = false
+
+        [pool]
+        prewarm = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+    )
+    .unwrap();
+
+    assert!(!cfg.vpn.enable_icmp_keepalive);
 }

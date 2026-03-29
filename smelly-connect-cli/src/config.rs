@@ -25,6 +25,8 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct VpnConfig {
     pub server: String,
+    #[serde(default = "default_enable_icmp_keepalive")]
+    pub enable_icmp_keepalive: bool,
     pub default_keepalive_host: Option<String>,
 }
 
@@ -100,7 +102,10 @@ pub struct LocalDomainRuleConfig {
     pub port_min: u16,
     #[serde(default = "default_port_max")]
     pub port_max: u16,
-    #[serde(default = "default_protocol", deserialize_with = "deserialize_route_protocol")]
+    #[serde(
+        default = "default_protocol",
+        deserialize_with = "deserialize_route_protocol"
+    )]
     pub protocol: smelly_connect::RouteProtocol,
 }
 
@@ -112,7 +117,10 @@ pub struct LocalIpRuleConfig {
     pub port_min: u16,
     #[serde(default = "default_port_max")]
     pub port_max: u16,
-    #[serde(default = "default_protocol", deserialize_with = "deserialize_route_protocol")]
+    #[serde(
+        default = "default_protocol",
+        deserialize_with = "deserialize_route_protocol"
+    )]
     pub protocol: smelly_connect::RouteProtocol,
 }
 
@@ -219,6 +227,13 @@ impl LoggingLevel {
 }
 
 impl AppConfig {
+    pub fn icmp_keepalive_target(&self) -> Option<&str> {
+        if !self.vpn.enable_icmp_keepalive {
+            return None;
+        }
+        self.vpn.default_keepalive_host.as_deref()
+    }
+
     pub fn session_connect_timeout(&self) -> Duration {
         Duration::from_secs(
             self.pool
@@ -244,6 +259,10 @@ impl AppConfig {
             .filter(|secs| *secs > 0)
             .map(Duration::from_secs)
     }
+}
+
+fn default_enable_icmp_keepalive() -> bool {
+    true
 }
 
 pub fn load(path: impl AsRef<Path>) -> Result<AppConfig, String> {

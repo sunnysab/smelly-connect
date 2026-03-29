@@ -2,7 +2,10 @@
 
 [vpn]
 server = "vpn1.sit.edu.cn"
+# Explicitly disable all session/pool ICMP probing when false.
+enable_icmp_keepalive = true
 # Optional session-level keepalive target used by the CLI pool/service layer.
+# If unset, ICMP probing stays disabled instead of falling back to vpn.server.
 default_keepalive_host = "jwxt.sit.edu.cn"
 
 [pool]

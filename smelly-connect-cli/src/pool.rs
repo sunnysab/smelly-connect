@@ -17,9 +17,9 @@ mod selection;
 mod state;
 
 use selection::next_selectable_index;
-use state::{build_pool_summary, open_node, state_label};
 #[cfg(any(test, debug_assertions))]
 use state::next_backoff;
+use state::{build_pool_summary, open_node, state_label};
 
 #[derive(Clone)]
 pub struct PooledSession {
@@ -323,9 +323,11 @@ impl SessionPool {
                 state: AccountState::Ready(
                     PooledSession::new(
                         account_name.to_string(),
-                        Some(smelly_connect::test_support::session::session_with_domain_match(
-                            host, ip,
-                        )),
+                        Some(
+                            smelly_connect::test_support::session::session_with_domain_match(
+                                host, ip,
+                            ),
+                        ),
                     )
                     .into(),
                 ),
@@ -405,8 +407,9 @@ impl SessionPool {
         entries: Vec<(&str, Session)>,
         keepalive_target: &str,
     ) -> Self {
-        let pool = Self::from_live_sessions_with_keepalive_target_for_test(entries, keepalive_target)
-            .await;
+        let pool =
+            Self::from_live_sessions_with_keepalive_target_for_test(entries, keepalive_target)
+                .await;
         pool.arm_keepalives_for_live_sessions_for_test().await;
         pool
     }
@@ -572,11 +575,7 @@ impl SessionPool {
             });
         }
 
-        let keepalive_target = cfg
-            .vpn
-            .default_keepalive_host
-            .clone()
-            .or_else(|| Some(cfg.vpn.server.clone()));
+        let keepalive_target = cfg.icmp_keepalive_target().map(str::to_owned);
         let pool = Self {
             inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
             healthcheck_interval: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
@@ -1137,7 +1136,11 @@ impl SessionPool {
             tokio::spawn(async move {
                 tokio::time::sleep(backoff).await;
                 let mut state = inner.lock().await;
-                if let Some(node) = state.nodes.iter_mut().find(|node| node.account.name == name) {
+                if let Some(node) = state
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.account.name == name)
+                {
                     node.state = AccountState::HalfOpen(account);
                 }
             });
@@ -1203,7 +1206,8 @@ impl SessionPool {
             .iter_mut()
             .find(|node| matches!(node.state, AccountState::Configured(_)))
         {
-            node.state = AccountState::Ready(PooledSession::new(node.account.name.clone(), None).into());
+            node.state =
+                AccountState::Ready(PooledSession::new(node.account.name.clone(), None).into());
             return Ok(());
         }
         Err(PoolError::new("no configurable account remaining"))
@@ -1274,7 +1278,11 @@ impl SessionPool {
                     );
                     tokio::time::sleep(retry_delay).await;
                     let mut state = inner.lock().await;
-                    if let Some(node) = state.nodes.iter_mut().find(|node| node.account.name == name) {
+                    if let Some(node) = state
+                        .nodes
+                        .iter_mut()
+                        .find(|node| node.account.name == name)
+                    {
                         node.state = AccountState::Ready(
                             PooledSession::new(node.account.name.clone(), None).into(),
                         );
@@ -1315,19 +1323,19 @@ impl SessionPool {
         self.refresh_time_based_states().await;
         let mut state = self.inner.lock().await;
         let Some(idx) = next_selectable_index(&mut state, |node| match &node.state {
-            AccountState::Ready(session) | AccountState::Suspect(session) => session.session().is_some(),
+            AccountState::Ready(session) | AccountState::Suspect(session) => {
+                session.session().is_some()
+            }
             _ => false,
         }) else {
             return Ok(None);
         };
 
         match &state.nodes[idx].state {
-            AccountState::Ready(session) | AccountState::Suspect(session) => {
-                Ok(session
-                    .session()
-                    .cloned()
-                    .map(|live| (session.account_name().to_string(), live)))
-            }
+            AccountState::Ready(session) | AccountState::Suspect(session) => Ok(session
+                .session()
+                .cloned()
+                .map(|live| (session.account_name().to_string(), live))),
             _ => Ok(None),
         }
     }
@@ -1366,7 +1374,11 @@ impl SessionPool {
             Ok(session) => {
                 let pooled = self.wrap_live_session(account.name.clone(), session);
                 let mut state = self.inner.lock().await;
-                if let Some(node) = state.nodes.iter_mut().find(|node| node.account.name == name) {
+                if let Some(node) = state
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.account.name == name)
+                {
                     node.state = AccountState::Ready(pooled.into());
                     tracing::info!(account = %account.name, "account ready");
                 }
@@ -1374,7 +1386,11 @@ impl SessionPool {
             }
             Err(err) => {
                 let mut state = self.inner.lock().await;
-                if let Some(node) = state.nodes.iter_mut().find(|node| node.account.name == name) {
+                if let Some(node) = state
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.account.name == name)
+                {
                     open_node(node, err.to_string());
                 }
                 tracing::warn!(account = %account.name, error = %err, "account prewarm failed");
@@ -1563,25 +1579,25 @@ fn build_route_set_snapshot(session: &Session) -> RouteSetSnapshot {
     let mut domain_rules = resources
         .domain_rules
         .iter()
-            .map(|(domain, rule)| DomainRouteSnapshot {
-                domain: domain.clone(),
-                port_min: rule.port_min,
-                port_max: rule.port_max,
-                protocol: rule.protocol.to_string(),
-            })
+        .map(|(domain, rule)| DomainRouteSnapshot {
+            domain: domain.clone(),
+            port_min: rule.port_min,
+            port_max: rule.port_max,
+            protocol: rule.protocol.to_string(),
+        })
         .collect::<Vec<_>>();
     domain_rules.sort_by(|a, b| a.domain.cmp(&b.domain));
 
     let mut ip_rules = resources
         .ip_rules
         .iter()
-            .map(|rule| IpRouteSnapshot {
-                ip_min: rule.ip_min.to_string(),
-                ip_max: rule.ip_max.to_string(),
-                port_min: rule.port_min,
-                port_max: rule.port_max,
-                protocol: rule.protocol.to_string(),
-            })
+        .map(|rule| IpRouteSnapshot {
+            ip_min: rule.ip_min.to_string(),
+            ip_max: rule.ip_max.to_string(),
+            port_min: rule.port_min,
+            port_max: rule.port_max,
+            protocol: rule.protocol.to_string(),
+        })
         .collect::<Vec<_>>();
     ip_rules.sort_by(|a, b| {
         (&a.ip_min, &a.ip_max, a.port_min, a.port_max, &a.protocol).cmp(&(
@@ -1616,25 +1632,25 @@ fn build_local_route_set_snapshot(session: &Session) -> RouteSetSnapshot {
     let mut domain_rules = local
         .domain_rules()
         .iter()
-            .map(|(domain, rule)| DomainRouteSnapshot {
-                domain: domain.clone(),
-                port_min: rule.port_min,
-                port_max: rule.port_max,
-                protocol: rule.protocol.to_string(),
-            })
+        .map(|(domain, rule)| DomainRouteSnapshot {
+            domain: domain.clone(),
+            port_min: rule.port_min,
+            port_max: rule.port_max,
+            protocol: rule.protocol.to_string(),
+        })
         .collect::<Vec<_>>();
     domain_rules.sort_by(|a, b| a.domain.cmp(&b.domain));
 
     let mut ip_rules = local
         .ip_rules()
         .iter()
-            .map(|rule| IpRouteSnapshot {
-                ip_min: rule.ip_min.to_string(),
-                ip_max: rule.ip_max.to_string(),
-                port_min: rule.port_min,
-                port_max: rule.port_max,
-                protocol: rule.protocol.to_string(),
-            })
+        .map(|rule| IpRouteSnapshot {
+            ip_min: rule.ip_min.to_string(),
+            ip_max: rule.ip_max.to_string(),
+            port_min: rule.port_min,
+            port_max: rule.port_max,
+            protocol: rule.protocol.to_string(),
+        })
         .collect::<Vec<_>>();
     ip_rules.sort_by(|a, b| {
         (&a.ip_min, &a.ip_max, a.port_min, a.port_max, &a.protocol).cmp(&(

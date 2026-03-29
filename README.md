@@ -99,6 +99,7 @@ cargo build -p smelly-connect-cli --release --features management-api
 ```toml
 [vpn]
 server = "vpn1.sit.edu.cn"
+enable_icmp_keepalive = true
 default_keepalive_host = "jwxt.sit.edu.cn"
 
 [pool]
