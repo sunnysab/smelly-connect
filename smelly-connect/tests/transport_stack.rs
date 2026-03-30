@@ -45,10 +45,11 @@ async fn session_connect_tcp_returns_async_stream() {
 
 #[tokio::test]
 async fn session_connect_tcp_preserves_timeout_as_structured_transport_error() {
-    let session = smelly_connect::test_support::session::session_with_immediate_timeout_domain_match(
-        "jwxt.sit.edu.cn",
-        "10.0.0.8".parse().unwrap(),
-    );
+    let session =
+        smelly_connect::test_support::session::session_with_immediate_timeout_domain_match(
+            "jwxt.sit.edu.cn",
+            "10.0.0.8".parse().unwrap(),
+        );
     match session.connect_tcp(("jwxt.sit.edu.cn", 443)).await {
         Err(smelly_connect::Error::Transport(
             smelly_connect::error::TransportError::ConnectTimedOut,
@@ -80,4 +81,68 @@ async fn session_keepalive_task_invokes_transport_icmp_ping() {
         counter.load(std::sync::atomic::Ordering::SeqCst) >= 2,
         "expected at least two icmp keepalive attempts"
     );
+}
+
+#[tokio::test]
+async fn session_serializes_concurrent_connect_establishment() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let transport = smelly_connect::transport::TransportStack::new({
+        let active = active.clone();
+        let max_active = max_active.clone();
+        move |_| {
+            let active = active.clone();
+            let max_active = max_active.clone();
+            async move {
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                let (client, _server) = tokio::io::duplex(1024);
+                Ok(smelly_connect::transport::VpnStream::new(client))
+            }
+        }
+    });
+
+    let mut resources = smelly_connect::resource::ResourceSet::default();
+    resources.domain_rules.insert(
+        "jwxt.sit.edu.cn".to_string(),
+        smelly_connect::resource::DomainRule {
+            port_min: 443,
+            port_max: 443,
+            protocol: smelly_connect::RouteProtocol::Tcp,
+        },
+    );
+    let mut system_dns = std::collections::HashMap::new();
+    system_dns.insert(
+        "jwxt.sit.edu.cn".to_string(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(210, 35, 66, 210)),
+    );
+    let session = smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        resources,
+        smelly_connect::resolver::SessionResolver::new(
+            std::collections::HashMap::new(),
+            None,
+            system_dns,
+        ),
+        transport,
+    );
+
+    let first = {
+        let session = session.clone();
+        tokio::spawn(async move { session.connect_tcp(("jwxt.sit.edu.cn", 443)).await })
+    };
+    let second = {
+        let session = session.clone();
+        tokio::spawn(async move { session.connect_tcp(("jwxt.sit.edu.cn", 443)).await })
+    };
+
+    let _ = first.await.unwrap().unwrap();
+    let _ = second.await.unwrap().unwrap();
+
+    assert_eq!(max_active.load(Ordering::SeqCst), 1);
 }

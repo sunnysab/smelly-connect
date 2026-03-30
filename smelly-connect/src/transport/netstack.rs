@@ -19,6 +19,7 @@ use smoltcp::time::{Duration as SmolDuration, Instant};
 use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, Ipv4Cidr};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc::error::TrySendError;
 
 use crate::TargetAddr;
 use crate::transport::datagram::AsyncDatagramSocket;
@@ -50,6 +51,7 @@ struct NetstackState {
     iface: Interface,
     sockets: SocketSet<'static>,
     active_handles: std::collections::HashSet<SocketHandle>,
+    pending_outbound: VecDeque<Vec<u8>>,
     next_port: u16,
     next_icmp_seq: u16,
 }
@@ -138,6 +140,7 @@ impl SmolStack {
                 iface,
                 sockets: SocketSet::new(vec![]),
                 active_handles: std::collections::HashSet::new(),
+                pending_outbound: VecDeque::new(),
                 next_port: 10000,
                 next_icmp_seq: 1,
             }),
@@ -333,18 +336,35 @@ impl SmolStackInner {
         inbound: Option<Vec<u8>>,
         outbound_tx: &mpsc::Sender<Vec<u8>>,
     ) -> io::Result<()> {
-        let outbound_packets = {
+        {
             let mut state = self.state.lock().expect("netstack mutex poisoned");
             if let Some(packet) = inbound {
                 state.device.push_inbound(packet);
             }
             state.poll();
-            state.device.take_outbound()
-        };
+            let outbound_packets = state.device.take_outbound();
+            state.pending_outbound.extend(outbound_packets);
+        }
 
-        for packet in outbound_packets {
-            if outbound_tx.send(packet).await.is_err() {
-                return Err(io::Error::other("packet transport closed"));
+        loop {
+            let packet = {
+                let mut state = self.state.lock().expect("netstack mutex poisoned");
+                state.pending_outbound.pop_front()
+            };
+            let Some(packet) = packet else {
+                break;
+            };
+
+            match outbound_tx.try_send(packet) {
+                Ok(()) => {}
+                Err(TrySendError::Full(packet)) => {
+                    let mut state = self.state.lock().expect("netstack mutex poisoned");
+                    state.pending_outbound.push_front(packet);
+                    break;
+                }
+                Err(TrySendError::Closed(_packet)) => {
+                    return Err(io::Error::other("packet transport closed"));
+                }
             }
         }
         Ok(())
@@ -352,6 +372,9 @@ impl SmolStackInner {
 
     fn next_delay(&self) -> Option<std::time::Duration> {
         let mut state = self.state.lock().expect("netstack mutex poisoned");
+        if !state.pending_outbound.is_empty() {
+            return Some(std::time::Duration::from_millis(1));
+        }
         let now = Instant::now();
         let NetstackState { iface, sockets, .. } = &mut *state;
         iface
@@ -740,5 +763,42 @@ mod tests {
             state.active_handles.is_empty(),
             "timed out connect leaked active socket handles"
         );
+    }
+
+    #[tokio::test]
+    async fn flush_keeps_driver_responsive_when_outbound_channel_is_full() {
+        let (_vpn_tx, vpn_rx) = mpsc::channel(4);
+        let (stack_tx, mut stack_rx) = mpsc::channel(1);
+        let stack = SmolStack::new(Ipv4Addr::new(10, 0, 0, 8), vpn_rx, stack_tx.clone());
+
+        stack_tx.send(vec![9, 9, 9]).await.unwrap();
+        {
+            let mut state = stack.inner.state.lock().expect("netstack mutex poisoned");
+            state.device.outbound.push_back(vec![1, 2, 3, 4]);
+        }
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            stack.inner.flush(None, &stack_tx),
+        )
+        .await
+        .expect("flush should not block on full outbound channel")
+        .expect("flush should succeed");
+
+        {
+            let state = stack.inner.state.lock().expect("netstack mutex poisoned");
+            assert_eq!(state.pending_outbound.len(), 1);
+        }
+
+        let first = stack_rx.recv().await.unwrap();
+        assert_eq!(first, vec![9, 9, 9]);
+
+        stack
+            .inner
+            .flush(None, &stack_tx)
+            .await
+            .expect("flush should retry pending outbound");
+        let second = stack_rx.recv().await.unwrap();
+        assert_eq!(second, vec![1, 2, 3, 4]);
     }
 }

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -91,6 +91,7 @@ struct AccountNode {
 struct PoolState {
     nodes: Vec<AccountNode>,
     cursor: usize,
+    busy_live_connects: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -110,6 +111,7 @@ pub struct SessionPool {
 const DEFAULT_SESSION_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const DEFAULT_VPN_HEALTH_PROBE_ATTEMPTS: usize = 3;
 const DEFAULT_VPN_HEALTH_PROBE_DELAY: Duration = Duration::from_millis(200);
+const RECOVERY_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone)]
 pub struct PoolError {
@@ -262,7 +264,11 @@ impl SessionPool {
             });
         }
         Self {
-            inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            inner: Arc::new(Mutex::new(PoolState {
+                nodes,
+                cursor: 0,
+                busy_live_connects: HashSet::new(),
+            })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
@@ -298,7 +304,11 @@ impl SessionPool {
             })
             .collect();
         Self {
-            inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            inner: Arc::new(Mutex::new(PoolState {
+                nodes,
+                cursor: 0,
+                busy_live_connects: HashSet::new(),
+            })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
@@ -346,7 +356,11 @@ impl SessionPool {
             })
             .collect();
         Self {
-            inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            inner: Arc::new(Mutex::new(PoolState {
+                nodes,
+                cursor: 0,
+                busy_live_connects: HashSet::new(),
+            })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
@@ -384,7 +398,11 @@ impl SessionPool {
             })
             .collect();
         Self {
-            inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            inner: Arc::new(Mutex::new(PoolState {
+                nodes,
+                cursor: 0,
+                busy_live_connects: HashSet::new(),
+            })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
@@ -416,6 +434,64 @@ impl SessionPool {
             Self::from_live_sessions_with_keepalive_target_for_test(entries, keepalive_target)
                 .await;
         pool.arm_keepalives_for_live_sessions_for_test().await;
+        pool
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub async fn from_connecting_recovery_for_test(
+        account_name: &str,
+        session: Session,
+        delay: Duration,
+    ) -> Self {
+        let account = AccountConfig {
+            name: account_name.to_string(),
+            username: account_name.to_string(),
+            password: "pass".to_string(),
+        };
+        let pool = Self {
+            inner: Arc::new(Mutex::new(PoolState {
+                nodes: vec![AccountNode {
+                    account: account.clone(),
+                    state: AccountState::Connecting,
+                    reconnect_session: None,
+                    flaky_retry: false,
+                    consecutive_failures: 3,
+                    failure_threshold: 3,
+                    current_backoff: Duration::from_secs(30),
+                    backoff_base: Duration::from_secs(30),
+                    backoff_max: Duration::from_secs(600),
+                    open_until: None,
+                    live_probe_in_flight: false,
+                }],
+                cursor: 0,
+                busy_live_connects: HashSet::new(),
+            })),
+            healthcheck_interval: Duration::from_secs(60),
+            #[cfg(any(test, debug_assertions))]
+            retry_delay: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(20),
+            local_route_overrides: LocalRouteOverrides::default(),
+            allow_all_routes: false,
+            keepalive_target: None,
+            server: None,
+            allow_request_triggered_probe: true,
+        };
+        let inner = Arc::clone(&pool.inner);
+        let account_name = account_name.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let mut state = inner.lock().await;
+            if let Some(node) = state
+                .nodes
+                .iter_mut()
+                .find(|node| node.account.name == account_name)
+            {
+                node.state = AccountState::Ready(
+                    PooledSession::new(account_name.clone(), Some(session)).into(),
+                );
+                node.consecutive_failures = 0;
+            }
+        });
         pool
     }
 
@@ -465,7 +541,11 @@ impl SessionPool {
             });
         }
         Self {
-            inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            inner: Arc::new(Mutex::new(PoolState {
+                nodes,
+                cursor: 0,
+                busy_live_connects: HashSet::new(),
+            })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
@@ -504,7 +584,11 @@ impl SessionPool {
             });
         }
         Self {
-            inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            inner: Arc::new(Mutex::new(PoolState {
+                nodes,
+                cursor: 0,
+                busy_live_connects: HashSet::new(),
+            })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
@@ -541,6 +625,7 @@ impl SessionPool {
                     live_probe_in_flight: false,
                 }],
                 cursor: 0,
+                busy_live_connects: HashSet::new(),
             })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
@@ -586,7 +671,11 @@ impl SessionPool {
 
         let keepalive_target = cfg.icmp_keepalive_target().map(str::to_owned);
         let pool = Self {
-            inner: Arc::new(Mutex::new(PoolState { nodes, cursor: 0 })),
+            inner: Arc::new(Mutex::new(PoolState {
+                nodes,
+                cursor: 0,
+                busy_live_connects: HashSet::new(),
+            })),
             healthcheck_interval: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
@@ -1048,6 +1137,7 @@ impl SessionPool {
                     },
                 ],
                 cursor: 0,
+                busy_live_connects: HashSet::new(),
             })),
             healthcheck_interval: Duration::from_secs(60),
             retry_delay: Duration::from_secs(1),
@@ -1085,6 +1175,7 @@ impl SessionPool {
                     live_probe_in_flight: false,
                 }],
                 cursor: 0,
+                busy_live_connects: HashSet::new(),
             })),
             healthcheck_interval: Duration::from_secs(60),
             retry_delay: Duration::from_secs(1),
@@ -1358,6 +1449,19 @@ impl SessionPool {
             return Ok(probed);
         }
 
+        if self.has_connecting_nodes().await || self.has_busy_live_connects().await {
+            let deadline = Instant::now() + self.connect_timeout;
+            while Instant::now() < deadline {
+                tokio::time::sleep(RECOVERY_WAIT_POLL_INTERVAL).await;
+                if let Some(ready) = self.next_ready_with_session().await? {
+                    return Ok(ready);
+                }
+                if !self.has_connecting_nodes().await && !self.has_busy_live_connects().await {
+                    break;
+                }
+            }
+        }
+
         Err(PoolError::new("no ready session"))
     }
 
@@ -1370,22 +1474,56 @@ impl SessionPool {
     async fn next_ready_with_session(&self) -> Result<Option<(String, Session)>, PoolError> {
         self.refresh_time_based_states().await;
         let mut state = self.inner.lock().await;
-        let Some(idx) = next_selectable_index(&mut state, |node| match &node.state {
-            AccountState::Ready(session) | AccountState::Suspect(session) => {
-                session.session().is_some()
-            }
-            _ => false,
-        }) else {
+        let selectable_indices: Vec<_> = state
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, node)| match &node.state {
+                AccountState::Ready(session) | AccountState::Suspect(session)
+                    if session.session().is_some()
+                        && !state.busy_live_connects.contains(session.account_name()) =>
+                {
+                    Some(idx)
+                }
+                _ => None,
+            })
+            .collect();
+        if selectable_indices.is_empty() {
             return Ok(None);
-        };
+        }
+        let pos = state.cursor % selectable_indices.len();
+        state.cursor += 1;
+        let idx = selectable_indices[pos];
 
         match &state.nodes[idx].state {
-            AccountState::Ready(session) | AccountState::Suspect(session) => Ok(session
-                .session()
-                .cloned()
-                .map(|live| (session.account_name().to_string(), live))),
+            AccountState::Ready(session) | AccountState::Suspect(session) => {
+                let account_name = session.account_name().to_string();
+                let live = session.session().cloned();
+                if live.is_some() {
+                    state.busy_live_connects.insert(account_name.clone());
+                }
+                Ok(live.map(|live| (account_name, live)))
+            }
             _ => Ok(None),
         }
+    }
+
+    async fn has_connecting_nodes(&self) -> bool {
+        let state = self.inner.lock().await;
+        state
+            .nodes
+            .iter()
+            .any(|node| matches!(node.state, AccountState::Connecting))
+    }
+
+    async fn has_busy_live_connects(&self) -> bool {
+        let state = self.inner.lock().await;
+        !state.busy_live_connects.is_empty()
+    }
+
+    pub async fn finish_live_connect_attempt(&self, account_name: &str) {
+        let mut state = self.inner.lock().await;
+        state.busy_live_connects.remove(account_name);
     }
 
     async fn connect_one_configured(&self) -> Result<(), PoolError> {
@@ -1570,7 +1708,7 @@ impl SessionPool {
         reconnect_session: Option<Session>,
     ) -> Result<Session, PoolError> {
         if let Some(session) = reconnect_session {
-            match session.rebuild_transport().await {
+            match session.rebuild_transport_from_existing_lease().await {
                 Ok(rebuilt) => {
                     tracing::info!(account = %name, "live session transport rebuilt");
                     return Ok(rebuilt);

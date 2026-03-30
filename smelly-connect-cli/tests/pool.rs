@@ -301,6 +301,29 @@ async fn successful_probe_returns_node_to_ready_and_back_into_normal_rotation() 
 }
 
 #[tokio::test(start_paused = true)]
+async fn next_live_session_waits_for_connecting_recovery_before_failing_fast() {
+    let session = smelly_connect::test_support::session::session_with_domain_match(
+        "jwxt.sit.edu.cn",
+        "10.0.0.8".parse().unwrap(),
+    );
+    let pool = smelly_connect_cli::pool::SessionPool::from_connecting_recovery_for_test(
+        "acct-01",
+        session,
+        std::time::Duration::from_secs(2),
+    )
+    .await;
+
+    let next = tokio::spawn({
+        let pool = pool.clone();
+        async move { pool.next_live_session().await }
+    });
+
+    tokio::time::advance(std::time::Duration::from_secs(3)).await;
+    let recovered = next.await.unwrap().unwrap();
+    assert_eq!(recovered.0, "acct-01");
+}
+
+#[tokio::test(start_paused = true)]
 async fn live_session_failure_opens_node_and_request_triggered_probe_can_recover() {
     let session = smelly_connect::test_support::session::session_with_domain_match(
         "jwxt.sit.edu.cn",

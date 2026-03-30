@@ -1,11 +1,22 @@
 use std::sync::Mutex;
 
 use crate::runtime::tasks::keepalive::KeepaliveHandle;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-#[derive(Default)]
 pub(crate) struct SessionRuntime {
     legacy_tunnel: Mutex<Option<smelly_tls::TunnelConnection>>,
     keepalive: Mutex<Option<KeepaliveHandle>>,
+    connect_gate: std::sync::Arc<Semaphore>,
+}
+
+impl Default for SessionRuntime {
+    fn default() -> Self {
+        Self {
+            legacy_tunnel: Mutex::new(None),
+            keepalive: Mutex::new(None),
+            connect_gate: std::sync::Arc::new(Semaphore::new(1)),
+        }
+    }
 }
 
 impl SessionRuntime {
@@ -16,7 +27,23 @@ impl SessionRuntime {
         Self {
             legacy_tunnel: Mutex::new(legacy_tunnel),
             keepalive: Mutex::new(keepalive),
+            connect_gate: std::sync::Arc::new(Semaphore::new(1)),
         }
+    }
+
+    pub(crate) fn take_legacy_tunnel(&self) -> Option<smelly_tls::TunnelConnection> {
+        self.legacy_tunnel
+            .lock()
+            .expect("legacy tunnel mutex poisoned")
+            .take()
+    }
+
+    pub(crate) async fn acquire_connect_permit(&self) -> OwnedSemaphorePermit {
+        self.connect_gate
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("connect gate semaphore closed")
     }
 }
 

@@ -1648,7 +1648,10 @@ where
     if request.method() == Method::CONNECT {
         let (host, port, target) = match resolve_connect_target(&request) {
             Ok(target) => target,
-            Err(_) => return empty_response(StatusCode::BAD_REQUEST),
+            Err(_) => {
+                pool.finish_live_connect_attempt(&account_name).await;
+                return empty_response(StatusCode::BAD_REQUEST);
+            }
         };
         tracing::info!(
             request_id,
@@ -1717,7 +1720,10 @@ where
 
     let (host, port, target, uri) = match resolve_forward_target(&request) {
         Ok(target) => target,
-        Err(_) => return empty_response(StatusCode::BAD_REQUEST),
+        Err(_) => {
+            pool.finish_live_connect_attempt(&account_name).await;
+            return empty_response(StatusCode::BAD_REQUEST);
+        }
     };
     tracing::info!(
         request_id,
@@ -1824,10 +1830,12 @@ async fn handle_live_request(
         let upstream = session.connect_tcp((host.as_str(), port));
         let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
             Ok(upstream) => {
+                pool.finish_live_connect_attempt(&account_name).await;
                 log_upstream_connect_success(request_id, "connect", &target, connect_started);
                 upstream
             }
             Err(err) => {
+                pool.finish_live_connect_attempt(&account_name).await;
                 log_upstream_connect_failure(request_id, "connect", &target, connect_started, &err);
                 if !matches!(err, UpstreamConnectError::RouteRejected) {
                     stats.record_connect_failure();
@@ -1904,10 +1912,12 @@ async fn handle_live_request(
             .await
             {
                 Ok(upstream) => {
+                    pool.finish_live_connect_attempt(&account_name).await;
                     log_upstream_connect_success(request_id, "http", &target, connect_started);
                     Ok(upstream)
                 }
                 Err(err) => {
+                    pool.finish_live_connect_attempt(&account_name).await;
                     log_upstream_connect_failure(
                         request_id,
                         "http",

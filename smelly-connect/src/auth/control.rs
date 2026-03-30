@@ -81,6 +81,14 @@ pub async fn request_ip_via_tunnel(
     Ok(ip)
 }
 
+pub async fn request_ip_via_tunnel_with_conn_debug(
+    addr: SocketAddr,
+    token: &crate::protocol::DerivedToken,
+    legacy_cipher_hint: Option<&str>,
+) -> Result<(Ipv4Addr, TunnelConnection), Error> {
+    request_ip_via_tunnel_with_conn(addr, token, legacy_cipher_hint).await
+}
+
 pub(crate) async fn request_ip_via_tunnel_with_conn(
     addr: SocketAddr,
     token: &crate::protocol::DerivedToken,
@@ -150,6 +158,13 @@ pub async fn spawn_legacy_packet_device(
     let recv = open_recv_tunnel(addr, token, client_ip, legacy_cipher_hint).await?;
     let send = open_send_tunnel(addr, token, client_ip, legacy_cipher_hint).await?;
 
+    packet_device_from_tunnels(recv, send)
+}
+
+pub(crate) fn packet_device_from_tunnels(
+    recv: TunnelConnection,
+    send: TunnelConnection,
+) -> Result<PacketDevice, Error> {
     let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(128);
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(128);
     let mut device = PacketDevice::new(inbound_tx.clone(), inbound_rx, outbound_tx, outbound_rx);
@@ -191,8 +206,8 @@ pub(crate) fn resolve_server_addr(server: &str) -> Result<SocketAddr, Error> {
         .ok_or_else(|| {
             Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(
                 "no resolved address".to_string(),
-        ))
-    })
+            ))
+        })
 }
 
 pub(crate) async fn resolve_server_addr_async(server: &str) -> Result<SocketAddr, Error> {

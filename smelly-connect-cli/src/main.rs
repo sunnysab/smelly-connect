@@ -98,6 +98,15 @@ fn main() {
                     println!("{output}");
                     Ok(())
                 }
+                smelly_connect_cli::cli::TestCommand::LegacyProbe => {
+                    let output =
+                        smelly_connect_cli::commands::test::run_legacy_probe_with_config(
+                            &config_path,
+                        )
+                        .await?;
+                    println!("{output}");
+                    Ok(())
+                }
             },
         }
     });

@@ -30,12 +30,17 @@ fn test_tcp_returns_typed_error_for_missing_port() {
         .build()
         .unwrap();
     let err = rt
-        .block_on(smelly_connect_cli::commands::test::run_tcp_with_config_typed(
-            "tests/fixtures/config.sample.toml",
-            "10.0.0.8",
-        ))
+        .block_on(
+            smelly_connect_cli::commands::test::run_tcp_with_config_typed(
+                "tests/fixtures/config.sample.toml",
+                "10.0.0.8",
+            ),
+        )
         .unwrap_err();
-    assert!(matches!(err, smelly_connect_cli::error::CliError::Command(_)));
+    assert!(matches!(
+        err,
+        smelly_connect_cli::error::CliError::Command(_)
+    ));
 }
 
 #[test]
@@ -45,12 +50,17 @@ fn test_icmp_returns_typed_error_for_missing_config() {
         .build()
         .unwrap();
     let err = rt
-        .block_on(smelly_connect_cli::commands::test::run_icmp_with_config_typed(
-            "/definitely/missing/config.toml",
-            "10.0.0.8",
-        ))
+        .block_on(
+            smelly_connect_cli::commands::test::run_icmp_with_config_typed(
+                "/definitely/missing/config.toml",
+                "10.0.0.8",
+            ),
+        )
         .unwrap_err();
-    assert!(matches!(err, smelly_connect_cli::error::CliError::Config(_)));
+    assert!(matches!(
+        err,
+        smelly_connect_cli::error::CliError::Config(_)
+    ));
 }
 
 #[test]
@@ -60,10 +70,32 @@ fn test_http_returns_typed_error_for_missing_config() {
         .build()
         .unwrap();
     let err = rt
-        .block_on(smelly_connect_cli::commands::test::run_http_with_config_typed(
+        .block_on(
+            smelly_connect_cli::commands::test::run_http_with_config_typed(
+                "/definitely/missing/config.toml",
+                "http://intranet.zju.edu.cn/health",
+            ),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        smelly_connect_cli::error::CliError::Config(_)
+    ));
+}
+
+#[test]
+fn test_legacy_probe_returns_typed_error_for_missing_config() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let err = rt
+        .block_on(smelly_connect_cli::commands::test::run_legacy_probe_with_config_typed(
             "/definitely/missing/config.toml",
-            "http://intranet.zju.edu.cn/health",
         ))
         .unwrap_err();
-    assert!(matches!(err, smelly_connect_cli::error::CliError::Config(_)));
+    assert!(matches!(
+        err,
+        smelly_connect_cli::error::CliError::Config(_)
+    ));
 }

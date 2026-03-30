@@ -52,6 +52,7 @@ pub enum TestCommand {
     Tcp { target: String },
     Icmp { target: String },
     Http { url: String },
+    LegacyProbe,
 }
 
 impl Cli {
