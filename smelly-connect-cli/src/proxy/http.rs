@@ -1990,10 +1990,7 @@ async fn handle_live_session_failure(
     err: &UpstreamConnectError,
 ) {
     match err {
-        UpstreamConnectError::TimedOut => {
-            pool.report_live_session_reconnect_required(account_name, session, format!("{err:?}"))
-                .await;
-        }
+        UpstreamConnectError::TimedOut => {}
         UpstreamConnectError::Failed if should_report_live_session_failure(err) => {
             pool.report_live_session_unhealthy_if_probe_fails(
                 account_name,

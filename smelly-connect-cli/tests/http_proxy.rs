@@ -187,13 +187,13 @@ async fn http_route_rejection_does_not_mark_live_session_open() {
 }
 
 #[tokio::test]
-async fn http_connect_timeout_marks_live_session_open() {
+async fn http_connect_timeout_does_not_mark_live_session_open() {
     let result = smelly_connect_cli::proxy::http::proxy_http_timeout_does_not_open_for_test()
         .await
         .unwrap();
     assert_eq!(result.status_code, 504);
-    assert!(result.state_summary.contains("Open"));
-    assert!(!result.selectable_after_failure);
+    assert!(result.state_summary.contains("Ready"));
+    assert!(result.selectable_after_failure);
 }
 
 #[tokio::test]

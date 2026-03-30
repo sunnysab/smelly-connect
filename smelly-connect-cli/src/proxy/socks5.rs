@@ -1179,14 +1179,7 @@ async fn handle_live_client(
                     if !matches!(err, UpstreamConnectError::RouteRejected) {
                         stats.record_connect_failure();
                     }
-                    if matches!(err, UpstreamConnectError::TimedOut) {
-                        pool.report_live_session_reconnect_required(
-                            &account_name,
-                            &session,
-                            format!("{err:?}"),
-                        )
-                            .await;
-                    } else if !matches!(err, UpstreamConnectError::RouteRejected) {
+                    if !matches!(err, UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut) {
                         pool.report_live_session_unhealthy_if_probe_fails(
                             &account_name,
                             &session,
