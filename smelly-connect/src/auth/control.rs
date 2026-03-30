@@ -3,6 +3,7 @@ use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use smelly_tls::{ClientHelloConfig, TunnelConnection};
+use tracing::info;
 
 use crate::config::EasyConnectConfig;
 use crate::error::{Error, TunnelBootstrapError};
@@ -177,6 +178,7 @@ pub(crate) fn packet_device_from_tunnels(
     tokio::spawn(async move {
         let mut recv = recv;
         while let Ok(packet) = recv.read_application_data().await {
+            log_packet("vpn->stack", &packet);
             let _ = inbound_tx.send(packet).await;
         }
     });
@@ -184,11 +186,38 @@ pub(crate) fn packet_device_from_tunnels(
     tokio::spawn(async move {
         let mut send = send;
         while let Some(packet) = outbound_rx.recv().await {
+            log_packet("stack->vpn", &packet);
             let _ = send.send_application_data(&packet).await;
         }
     });
 
     Ok(device)
+}
+
+fn log_packet(direction: &str, packet: &[u8]) {
+    let description = describe_ipv4_packet(packet)
+        .unwrap_or_else(|| format!("len={} non-ipv4", packet.len()));
+    info!(direction, packet = %description, "legacy tunnel packet");
+}
+
+fn describe_ipv4_packet(packet: &[u8]) -> Option<String> {
+    if packet.len() < 20 || packet[0] >> 4 != 4 {
+        return None;
+    }
+    let ihl = (packet[0] & 0x0f) as usize * 4;
+    if packet.len() < ihl || ihl < 20 {
+        return None;
+    }
+    let proto = packet[9];
+    let src = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+    let dst = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+    Some(format!(
+        "len={} proto={} src={} dst={}",
+        packet.len(),
+        proto,
+        src,
+        dst
+    ))
 }
 
 pub(crate) fn resolve_server_addr(server: &str) -> Result<SocketAddr, Error> {

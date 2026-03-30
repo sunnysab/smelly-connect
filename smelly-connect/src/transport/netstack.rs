@@ -20,6 +20,7 @@ use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Notify, mpsc};
 use tokio::sync::mpsc::error::TrySendError;
+use tracing::{info, warn};
 
 use crate::TargetAddr;
 use crate::transport::datagram::AsyncDatagramSocket;
@@ -177,6 +178,14 @@ impl SmolStack {
                 .get_mut::<tcp::Socket<'static>>(handle)
                 .connect(cx, (remote_ip, addr.port()), local_port)
                 .map_err(|err| io::Error::other(err.to_string()))?;
+            info!(
+                ?handle,
+                local_port,
+                remote_addr = %addr,
+                active_handles = state.active_handles.len(),
+                pending_outbound = state.pending_outbound.len(),
+                "netstack tcp connect started"
+            );
             handle
         };
 
@@ -360,6 +369,11 @@ impl SmolStackInner {
                 Err(TrySendError::Full(packet)) => {
                     let mut state = self.state.lock().expect("netstack mutex poisoned");
                     state.pending_outbound.push_front(packet);
+                    warn!(
+                        pending_outbound = state.pending_outbound.len(),
+                        active_handles = state.active_handles.len(),
+                        "netstack outbound queue backed up"
+                    );
                     break;
                 }
                 Err(TrySendError::Closed(_packet)) => {
@@ -405,6 +419,12 @@ impl SmolStackInner {
         let mut state = self.state.lock().expect("netstack mutex poisoned");
         if state.active_handles.remove(&handle) {
             let _ = state.sockets.remove(handle);
+            info!(
+                ?handle,
+                active_handles = state.active_handles.len(),
+                pending_outbound = state.pending_outbound.len(),
+                "netstack socket removed"
+            );
         }
     }
 }

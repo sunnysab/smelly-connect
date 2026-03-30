@@ -324,9 +324,54 @@ pub async fn run_legacy_probe_with_config_typed(
         .clone()
         .connect()
         .await
-        .map_err(|err| CliError::Command(format!("{err:?}")))?;
+        .map_err(|err| CliError::Command(format!("{err:?}")))?
+        .with_allow_all_routes(true);
     let session_client_ip = full_session.client_ip();
     lines.push(format!("session_client_ip={session_client_ip}"));
+
+    let session_authserver_timeout = run_probe_step(timeout, async {
+        full_session
+            .connect_tcp(("authserver.sit.edu.cn", 443))
+            .await
+            .map(|_| "ok".to_string())
+    })
+    .await;
+    lines.push(format!(
+        "same_session_authserver_connect: {session_authserver_timeout}"
+    ));
+
+    let session_icmp_after_timeout = run_probe_step(timeout, async {
+        full_session
+            .icmp_ping("jwxt.sit.edu.cn".into())
+            .await
+            .map(|_| "ok".to_string())
+    })
+    .await;
+    lines.push(format!(
+        "same_session_icmp_after_authserver_timeout: {session_icmp_after_timeout}"
+    ));
+
+    let session_jwxt_after_timeout = run_probe_step(timeout, async {
+        full_session
+            .connect_tcp(("jwxt.sit.edu.cn", 443))
+            .await
+            .map(|_| "ok".to_string())
+    })
+    .await;
+    lines.push(format!(
+        "same_session_jwxt_connect_after_authserver_timeout: {session_jwxt_after_timeout}"
+    ));
+
+    let session_xg_after_timeout = run_probe_step(timeout, async {
+        full_session
+            .connect_tcp(("xg.sit.edu.cn", 443))
+            .await
+            .map(|_| "ok".to_string())
+    })
+    .await;
+    lines.push(format!(
+        "same_session_xg_connect_after_authserver_timeout: {session_xg_after_timeout}"
+    ));
 
     let postconnect_request_ip = run_probe_step(timeout, async {
         smelly_connect::auth::control::request_ip_via_tunnel(addr, &token, hint).await
