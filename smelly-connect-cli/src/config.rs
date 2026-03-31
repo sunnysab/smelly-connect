@@ -91,8 +91,17 @@ pub struct Socks5Config {
 #[serde(default)]
 pub struct RoutingConfig {
     pub allow_all: bool,
+    pub default_action: RoutingDefaultAction,
     pub domain_rules: Vec<LocalDomainRuleConfig>,
     pub ip_rules: Vec<LocalIpRuleConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutingDefaultAction {
+    #[default]
+    Direct,
+    Block,
 }
 
 #[derive(Debug, Clone, Deserialize)]

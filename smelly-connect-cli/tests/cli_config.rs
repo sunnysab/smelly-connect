@@ -25,6 +25,81 @@ fn parses_sample_config() {
     );
     assert!(!cfg.management.enabled);
     assert_eq!(cfg.management.listen, "127.0.0.1:9090");
+    assert_eq!(
+        cfg.routing.default_action,
+        smelly_connect_cli::config::RoutingDefaultAction::Direct
+    );
+}
+
+#[test]
+fn routing_default_action_defaults_to_direct() {
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+
+        [pool]
+        prewarm = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        cfg.routing.default_action,
+        smelly_connect_cli::config::RoutingDefaultAction::Direct
+    );
+}
+
+#[test]
+fn parses_block_default_action_from_config() {
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+
+        [pool]
+        prewarm = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+
+        [routing]
+        default_action = "block"
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        cfg.routing.default_action,
+        smelly_connect_cli::config::RoutingDefaultAction::Block
+    );
 }
 
 #[test]
@@ -249,6 +324,39 @@ fn invalid_route_protocol_is_rejected() {
     );
 
     assert!(cfg.is_err(), "invalid route protocol should be rejected");
+}
+
+#[test]
+fn invalid_routing_default_action_is_rejected() {
+    let cfg = toml::from_str::<smelly_connect_cli::config::AppConfig>(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+
+        [pool]
+        prewarm = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+
+        [routing]
+        default_action = "drop"
+        "#,
+    );
+
+    assert!(cfg.is_err(), "invalid default action should be rejected");
 }
 
 #[test]

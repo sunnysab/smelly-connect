@@ -37,6 +37,7 @@ udp_associate_idle_timeout_secs = 90
 
 [routing]
 allow_all = false
+default_action = "direct"
 
 [[routing.domain_rules]]
 domain = "*.foo.edu.cn"
