@@ -7,6 +7,26 @@ async fn inspect_route_reports_library_allow_decision() {
 }
 
 #[tokio::test]
+async fn inspect_route_reports_direct_for_unmatched_targets() {
+    let output = smelly_connect_cli::commands::inspect::inspect_unmatched_route_for_test(
+        "example.test",
+        443,
+    )
+    .await;
+    assert!(output.contains("allowed: Direct("));
+}
+
+#[tokio::test]
+async fn inspect_route_reports_rejection_for_blocked_targets() {
+    let output = smelly_connect_cli::commands::inspect::inspect_unmatched_blocked_route_for_test(
+        "example.test",
+        443,
+    )
+    .await;
+    assert!(output.contains("rejected"));
+}
+
+#[tokio::test]
 async fn inspect_session_reports_pool_summary() {
     let output = smelly_connect_cli::commands::inspect::inspect_session_for_test().await;
     assert!(output.contains("ready="));

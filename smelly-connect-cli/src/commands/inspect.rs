@@ -1,5 +1,7 @@
 #[cfg(any(test, debug_assertions))]
 use smelly_connect::test_support;
+#[cfg(any(test, debug_assertions))]
+use smelly_connect::{resolver::SessionResolver, resource::ResourceSet};
 use std::path::Path;
 
 use crate::error::CliError;
@@ -7,10 +9,53 @@ use crate::error::CliError;
 #[cfg(any(test, debug_assertions))]
 pub async fn inspect_route_for_test(host: &str, port: u16) -> String {
     let session = test_support::session::login_harness().ready_session().await;
+    format_route_decision(&session, host, port).await
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn inspect_unmatched_route_for_test(host: &str, port: u16) -> String {
+    let session = unmatched_session_for_test(
+        smelly_connect::domain::route_policy::RoutePolicy::direct_non_resource_targets(),
+    );
+    format_route_decision(&session, host, port).await
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn inspect_unmatched_blocked_route_for_test(host: &str, port: u16) -> String {
+    let session = unmatched_session_for_test(
+        smelly_connect::domain::route_policy::RoutePolicy::block_non_resource_targets(),
+    );
+    format_route_decision(&session, host, port).await
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn format_route_decision(
+    session: &smelly_connect::session::EasyConnectSession,
+    host: &str,
+    port: u16,
+) -> String {
     match session.plan_tcp_connect((host, port)).await {
         Ok(route) => format!("allowed: {route:?}"),
         Err(err) => format!("rejected: {err:?}"),
     }
+}
+
+#[cfg(any(test, debug_assertions))]
+fn unmatched_session_for_test(
+    route_policy: smelly_connect::domain::route_policy::RoutePolicy,
+) -> smelly_connect::session::EasyConnectSession {
+    let mut system_dns = std::collections::HashMap::new();
+    system_dns.insert(
+        "example.test".to_string(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+    );
+    smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        ResourceSet::default(),
+        SessionResolver::new(std::collections::HashMap::new(), None, system_dns),
+        smelly_connect::session::EasyConnectSession::failing_transport("unused"),
+    )
+    .with_route_policy(route_policy)
 }
 
 #[cfg(any(test, debug_assertions))]

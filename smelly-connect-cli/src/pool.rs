@@ -5,13 +5,14 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use smelly_connect::domain::route_policy::RoutePolicy;
 use smelly_connect::{
     CaptchaError, CaptchaHandler, EasyConnectClient, LocalRouteOverrides, Session,
 };
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-use crate::config::{AccountConfig, AppConfig};
+use crate::config::{AccountConfig, AppConfig, RoutingDefaultAction};
 
 mod selection;
 mod state;
@@ -102,6 +103,7 @@ pub struct SessionPool {
     retry_delay: Duration,
     connect_timeout: Duration,
     local_route_overrides: LocalRouteOverrides,
+    route_policy: RoutePolicy,
     allow_all_routes: bool,
     keepalive_target: Option<String>,
     server: Option<String>,
@@ -274,6 +276,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            route_policy: RoutePolicy::default(),
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
@@ -314,6 +317,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            route_policy: RoutePolicy::default(),
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
@@ -366,6 +370,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            route_policy: RoutePolicy::default(),
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
@@ -375,26 +380,39 @@ impl SessionPool {
 
     #[cfg(any(test, debug_assertions))]
     pub async fn from_live_sessions_for_test(entries: Vec<(&str, Session)>) -> Self {
+        Self::from_live_sessions_with_route_policy_for_test(entries, RoutePolicy::default()).await
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub async fn from_live_sessions_with_route_policy_for_test(
+        entries: Vec<(&str, Session)>,
+        route_policy: RoutePolicy,
+    ) -> Self {
+        let local_route_overrides = LocalRouteOverrides::default();
         let nodes = entries
             .into_iter()
-            .map(|(account_name, session)| AccountNode {
-                account: AccountConfig {
-                    name: account_name.to_string(),
-                    username: account_name.to_string(),
-                    password: "pass".to_string(),
-                },
-                state: AccountState::Ready(
-                    PooledSession::new(account_name.to_string(), Some(session)).into(),
-                ),
-                reconnect_session: None,
-                flaky_retry: false,
-                consecutive_failures: 0,
-                failure_threshold: 3,
-                current_backoff: Duration::from_secs(30),
-                backoff_base: Duration::from_secs(30),
-                backoff_max: Duration::from_secs(600),
-                open_until: None,
-                live_probe_in_flight: false,
+            .map(|(account_name, session)| {
+                let session =
+                    apply_pool_routing(session, &local_route_overrides, route_policy, false);
+                AccountNode {
+                    account: AccountConfig {
+                        name: account_name.to_string(),
+                        username: account_name.to_string(),
+                        password: "pass".to_string(),
+                    },
+                    state: AccountState::Ready(
+                        PooledSession::new(account_name.to_string(), Some(session)).into(),
+                    ),
+                    reconnect_session: None,
+                    flaky_retry: false,
+                    consecutive_failures: 0,
+                    failure_threshold: 3,
+                    current_backoff: Duration::from_secs(30),
+                    backoff_base: Duration::from_secs(30),
+                    backoff_max: Duration::from_secs(600),
+                    open_until: None,
+                    live_probe_in_flight: false,
+                }
             })
             .collect();
         Self {
@@ -407,7 +425,8 @@ impl SessionPool {
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
-            local_route_overrides: LocalRouteOverrides::default(),
+            local_route_overrides,
+            route_policy,
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
@@ -471,6 +490,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            route_policy: RoutePolicy::default(),
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
@@ -551,6 +571,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            route_policy: RoutePolicy::default(),
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
@@ -594,6 +615,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            route_policy: RoutePolicy::default(),
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
@@ -632,6 +654,7 @@ impl SessionPool {
             retry_delay: Duration::from_millis(100),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            route_policy: RoutePolicy::default(),
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
@@ -681,6 +704,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
             connect_timeout: cfg.session_connect_timeout(),
             local_route_overrides: build_local_route_overrides(&cfg.routing)?,
+            route_policy: route_policy_from_default_action(cfg.routing.default_action),
             allow_all_routes: cfg.routing.allow_all,
             keepalive_target,
             server: Some(cfg.vpn.server.clone()),
@@ -999,6 +1023,12 @@ impl SessionPool {
     }
 
     fn wrap_live_session(&self, account_name: String, session: Session) -> PooledSession {
+        let session = apply_pool_routing(
+            session,
+            &self.local_route_overrides,
+            self.route_policy,
+            self.allow_all_routes,
+        );
         let keepalive = self.build_keepalive_handle(&account_name, &session);
         PooledSession {
             account_name,
@@ -1143,6 +1173,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            route_policy: RoutePolicy::default(),
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
@@ -1181,6 +1212,7 @@ impl SessionPool {
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
+            route_policy: RoutePolicy::default(),
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
@@ -1498,7 +1530,14 @@ impl SessionPool {
         match &state.nodes[idx].state {
             AccountState::Ready(session) | AccountState::Suspect(session) => {
                 let account_name = session.account_name().to_string();
-                let live = session.session().cloned();
+                let live = session.session().cloned().map(|live| {
+                    apply_pool_routing(
+                        live,
+                        &self.local_route_overrides,
+                        self.route_policy,
+                        self.allow_all_routes,
+                    )
+                });
                 if live.is_some() {
                     state.busy_live_connects.insert(account_name.clone());
                 }
@@ -1552,6 +1591,7 @@ impl SessionPool {
             &account,
             self.connect_timeout,
             &self.local_route_overrides,
+            self.route_policy,
             self.allow_all_routes,
             self.keepalive_target.as_deref(),
         )
@@ -1733,6 +1773,7 @@ impl SessionPool {
             account,
             self.connect_timeout,
             &self.local_route_overrides,
+            self.route_policy,
             self.allow_all_routes,
             self.keepalive_target.as_deref(),
         )
@@ -1768,6 +1809,7 @@ async fn connect_account(
     account: &AccountConfig,
     timeout: Duration,
     local_route_overrides: &LocalRouteOverrides,
+    route_policy: RoutePolicy,
     allow_all_routes: bool,
     _keepalive_target: Option<&str>,
 ) -> Result<Session, PoolError> {
@@ -1785,10 +1827,32 @@ async fn connect_account(
         .await
         .map_err(|_| PoolError::new("session connect timeout"))?
         .map_err(|err| PoolError::new(format!("{err:?}")))?;
-    let session = session
-        .with_local_route_overrides(local_route_overrides.clone())
-        .with_allow_all_routes(allow_all_routes);
+    let session = apply_pool_routing(
+        session,
+        local_route_overrides,
+        route_policy,
+        allow_all_routes,
+    );
     Ok(session)
+}
+
+fn apply_pool_routing(
+    session: Session,
+    local_route_overrides: &LocalRouteOverrides,
+    route_policy: RoutePolicy,
+    allow_all_routes: bool,
+) -> Session {
+    session
+        .with_local_route_overrides(local_route_overrides.clone())
+        .with_route_policy(route_policy)
+        .with_allow_all_routes(allow_all_routes)
+}
+
+fn route_policy_from_default_action(default_action: RoutingDefaultAction) -> RoutePolicy {
+    match default_action {
+        RoutingDefaultAction::Direct => RoutePolicy::direct_non_resource_targets(),
+        RoutingDefaultAction::Block => RoutePolicy::block_non_resource_targets(),
+    }
 }
 
 fn build_route_set_snapshot(session: &Session) -> RouteSetSnapshot {

@@ -15,6 +15,42 @@ async fn pool_selects_ready_sessions_round_robin() {
 }
 
 #[tokio::test]
+async fn pool_applies_block_route_policy_to_returned_live_sessions() {
+    let mut system_dns = std::collections::HashMap::new();
+    system_dns.insert(
+        "example.test".to_string(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+    );
+    let session = smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        smelly_connect::resource::ResourceSet::default(),
+        smelly_connect::resolver::SessionResolver::new(
+            std::collections::HashMap::new(),
+            None,
+            system_dns,
+        ),
+        smelly_connect::session::EasyConnectSession::failing_transport("unused"),
+    );
+    let pool = smelly_connect_cli::pool::SessionPool::from_live_sessions_with_route_policy_for_test(
+        vec![("acct-01", session)],
+        smelly_connect::domain::route_policy::RoutePolicy::block_non_resource_targets(),
+    )
+    .await;
+
+    let (_account_name, session) = pool.next_live_session().await.unwrap();
+    let err = session
+        .plan_tcp_connect(("example.test", 443))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        smelly_connect::Error::RouteDecision(
+            smelly_connect::error::RouteDecisionError::TargetNotAllowed
+        )
+    ));
+}
+
+#[tokio::test]
 async fn pool_lazily_connects_remaining_accounts_on_demand() {
     let pool = smelly_connect_cli::pool::SessionPool::from_test_accounts(4, 1).await;
     pool.ensure_additional_capacity_for_test().await.unwrap();
