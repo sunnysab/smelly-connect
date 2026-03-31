@@ -17,6 +17,7 @@ pub const TLS_RSA_WITH_RC4_128_SHA: u16 = 0x0005;
 pub const TLS_RSA_WITH_AES_128_CBC_SHA: u16 = 0x002f;
 pub const TLS_EMPTY_RENEGOTIATION_INFO_SCSV: u16 = 0x00ff;
 pub const HEARTBEAT_EXTENSION: u16 = 0x000f;
+pub type Tls10KeyBlockParts = ([u8; 20], [u8; 20], [u8; 16], [u8; 16]);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientHelloConfig {
@@ -806,6 +807,21 @@ pub fn derive_tls10_key_block(
 ) -> Vec<u8> {
     let seed = [server_random.as_slice(), client_random.as_slice()].concat();
     tls10_prf(master_secret, b"key expansion", &seed, len)
+}
+
+pub fn split_key_block_for_test(key_block: &[u8]) -> io::Result<Tls10KeyBlockParts> {
+    if key_block.len() < 72 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "short tls10 key block",
+        ));
+    }
+
+    let client_mac = key_block[0..20].try_into().unwrap();
+    let server_mac = key_block[20..40].try_into().unwrap();
+    let client_key = key_block[40..56].try_into().unwrap();
+    let server_key = key_block[56..72].try_into().unwrap();
+    Ok((client_mac, server_mac, client_key, server_key))
 }
 
 pub fn encrypt_rc4_sha1_record(
