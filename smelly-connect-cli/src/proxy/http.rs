@@ -116,6 +116,12 @@ enum UpstreamConnectError {
     RouteRejected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveRouteBackend {
+    Vpn,
+    Direct,
+}
+
 enum ResponseBodyKind {
     None,
     ContentLength(usize),
@@ -817,6 +823,114 @@ pub async fn proxy_connect_for_test() -> Result<ConnectProxyTestResult, String> 
 }
 
 #[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_direct_forward_for_test() -> Result<HttpBodyTestResult, String> {
+    let upstream = spawn_http_upstream().await;
+    let session =
+        unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+    let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+    let addr = spawn_single_live_client_proxy(pool, DEFAULT_CONNECT_TIMEOUT).await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            format!(
+                "GET http://example.test:{}/health HTTP/1.1\r\nHost: example.test:{}\r\nConnection: close\r\n\r\n",
+                upstream.port(),
+                upstream.port()
+            )
+            .as_bytes(),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .await
+        .map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let body = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    Ok(HttpBodyTestResult { body })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_connect_direct_for_test() -> Result<ConnectProxyTestResult, String> {
+    let upstream = spawn_echo_upstream().await;
+    let session =
+        unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+    let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+    let addr = spawn_single_live_client_proxy(pool, DEFAULT_CONNECT_TIMEOUT).await?;
+
+    let mut client = TcpStream::connect(addr)
+        .await
+        .map_err(|err| err.to_string())?;
+    client
+        .write_all(
+            format!(
+                "CONNECT example.test:{} HTTP/1.1\r\nHost: example.test:{}\r\nConnection: close\r\n\r\n",
+                upstream.port(),
+                upstream.port()
+            )
+            .as_bytes(),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let mut header = [0_u8; 128];
+    let n = client
+        .read(&mut header)
+        .await
+        .map_err(|err| err.to_string())?;
+    let header = String::from_utf8_lossy(&header[..n]);
+    if !header.starts_with("HTTP/1.1 200") {
+        return Err(format!("unexpected connect response: {header}"));
+    }
+
+    client
+        .write_all(b"ping")
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut echoed = [0_u8; 4];
+    client
+        .read_exact(&mut echoed)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(ConnectProxyTestResult {
+        account_name: "acct-01".to_string(),
+        echoed_bytes: echoed.to_vec(),
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
+pub async fn proxy_http_direct_failure_does_not_open_for_test()
+-> Result<LiveFailureRecoveryTestResult, String> {
+    let blocker = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|err| err.to_string())?;
+    let blocked_port = blocker.local_addr().map_err(|err| err.to_string())?.port();
+    drop(blocker);
+
+    let session =
+        unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+    let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+    let addr = spawn_single_live_client_proxy(pool.clone(), DEFAULT_CONNECT_TIMEOUT).await?;
+
+    let status = request_connect_status_for_target(addr, "example.test", blocked_port).await?;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    Ok(LiveFailureRecoveryTestResult {
+        status_code: status.status_code,
+        state_summary: pool.state_summary_for_test().await,
+        selectable_after_failure: pool.has_selectable_nodes_for_test().await,
+        recovered_account: "acct-01".to_string(),
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_no_ready_session_for_test() -> Result<NoReadySessionResult, String> {
     let pool = SessionPool::from_failed_accounts(1).await;
     let addr = spawn_test_proxy(pool, |_account_name, _host, _port| async move {
@@ -1032,50 +1146,18 @@ pub async fn proxy_http_live_connect_failure_does_not_wait_for_probe_for_test()
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_route_rejection_does_not_open_for_test()
 -> Result<LiveFailureRecoveryTestResult, String> {
-    let session = smelly_connect::test_support::session::session_with_domain_match(
-        "jwxt.sit.edu.cn",
-        std::net::Ipv4Addr::new(10, 0, 0, 8),
-    );
-    let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|err| err.to_string())?;
-    let addr = listener.local_addr().map_err(|err| err.to_string())?;
-    let serve_pool = pool.clone();
-    tokio::spawn(async move {
-        let Ok((stream, _)) = listener.accept().await else {
-            return;
-        };
-        let _ = handle_live_client(
-            stream,
-            serve_pool,
-            RuntimeStats::default(),
-            DEFAULT_CONNECT_TIMEOUT,
-        )
-        .await;
-    });
+    let session =
+        unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+    let pool = SessionPool::from_live_sessions_with_route_policy_for_test(
+        vec![("acct-01", session)],
+        smelly_connect::domain::route_policy::RoutePolicy::block_non_resource_targets(),
+    )
+    .await;
+    let addr = spawn_single_live_client_proxy(pool.clone(), DEFAULT_CONNECT_TIMEOUT).await?;
 
-    let mut client = TcpStream::connect(addr)
-        .await
-        .map_err(|err| err.to_string())?;
-    client
-        .write_all(
-            b"CONNECT xg.sit.edu.cn:443 HTTP/1.1\r\nHost: xg.sit.edu.cn:443\r\nConnection: close\r\n\r\n",
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    let mut response = Vec::new();
-    client
-        .read_to_end(&mut response)
-        .await
-        .map_err(|err| err.to_string())?;
-    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
-    let status_line = response.lines().next().unwrap_or_default().to_string();
-    let status_code = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+    let status_code = request_connect_status_for_target(addr, "example.test", 443)
+        .await?
+        .status_code;
     tokio::time::sleep(Duration::from_millis(20)).await;
     Ok(LiveFailureRecoveryTestResult {
         status_code,
@@ -1192,12 +1274,8 @@ pub async fn proxy_http_immediate_timeout_status_for_test() -> Result<NoReadySes
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_allow_all_failure_does_not_open_for_test()
 -> Result<LiveFailureRecoveryTestResult, String> {
-    let session = smelly_connect::test_support::session::fake_session_without_match_with_transport(
-        smelly_connect::session::EasyConnectSession::failing_transport(
-            "forced allow-all target failure",
-        ),
-    )
-    .with_allow_all_routes(true);
+    let session = unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST)
+        .with_allow_all_routes(true);
     let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -1217,27 +1295,9 @@ pub async fn proxy_http_allow_all_failure_does_not_open_for_test()
         .await;
     });
 
-    let mut client = TcpStream::connect(addr)
-        .await
-        .map_err(|err| err.to_string())?;
-    client
-        .write_all(
-            b"CONNECT baidu.com:443 HTTP/1.1\r\nHost: baidu.com:443\r\nConnection: close\r\n\r\n",
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    let mut response = Vec::new();
-    client
-        .read_to_end(&mut response)
-        .await
-        .map_err(|err| err.to_string())?;
-    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
-    let status_line = response.lines().next().unwrap_or_default().to_string();
-    let status_code = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+    let status_code = request_connect_status_for_target(addr, "example.test", 443)
+        .await?
+        .status_code;
     Ok(LiveFailureRecoveryTestResult {
         status_code,
         state_summary: pool.state_summary_for_test().await,
@@ -1525,21 +1585,33 @@ async fn request_no_ready_session(addr: SocketAddr) -> Result<NoReadySessionResu
 
 #[cfg(any(test, debug_assertions))]
 async fn request_connect_status(addr: SocketAddr) -> Result<NoReadySessionResult, String> {
+    request_connect_status_for_target(addr, "libdb.zju.edu.cn", 443).await
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn request_connect_status_for_target(
+    addr: SocketAddr,
+    host: &str,
+    port: u16,
+) -> Result<NoReadySessionResult, String> {
     let mut client = TcpStream::connect(addr)
         .await
         .map_err(|err| err.to_string())?;
     client
         .write_all(
-            b"CONNECT libdb.zju.edu.cn:443 HTTP/1.1\r\nHost: libdb.zju.edu.cn:443\r\nConnection: close\r\n\r\n",
+            format!(
+                "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
         )
         .await
         .map_err(|err| err.to_string())?;
-    let mut response = Vec::new();
-    client
-        .read_to_end(&mut response)
+    let mut response = [0_u8; 1024];
+    let n = tokio::time::timeout(Duration::from_secs(2), client.read(&mut response))
         .await
+        .map_err(|_| "timed out waiting for connect response".to_string())?
         .map_err(|err| err.to_string())?;
-    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+    let response = String::from_utf8(response[..n].to_vec()).map_err(|err| err.to_string())?;
     let status_line = response.lines().next().unwrap_or_default().to_string();
     let status_code = status_line
         .split_whitespace()
@@ -1547,6 +1619,45 @@ async fn request_connect_status(addr: SocketAddr) -> Result<NoReadySessionResult
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or_else(|| format!("invalid status line: {status_line}"))?;
     Ok(NoReadySessionResult { status_code })
+}
+
+#[cfg(any(test, debug_assertions))]
+async fn spawn_single_live_client_proxy(
+    pool: SessionPool,
+    connect_timeout: Duration,
+) -> Result<SocketAddr, String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|err| err.to_string())?;
+    let addr = listener.local_addr().map_err(|err| err.to_string())?;
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let _ = handle_live_client(stream, pool, RuntimeStats::default(), connect_timeout).await;
+    });
+    Ok(addr)
+}
+
+#[cfg(any(test, debug_assertions))]
+fn unmatched_live_session_for_test(
+    host: &str,
+    ip: std::net::Ipv4Addr,
+) -> smelly_connect::session::EasyConnectSession {
+    let mut system_dns = std::collections::HashMap::new();
+    system_dns.insert(host.to_string(), std::net::IpAddr::V4(ip));
+    smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        smelly_connect::resource::ResourceSet::default(),
+        smelly_connect::resolver::SessionResolver::new(
+            std::collections::HashMap::new(),
+            None,
+            system_dns,
+        ),
+        smelly_connect::session::EasyConnectSession::failing_transport(
+            "direct route should bypass vpn transport",
+        ),
+    )
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -1827,20 +1938,22 @@ async fn handle_live_request(
             &target,
             connect_timeout,
         );
-        let upstream = session.connect_tcp((host.as_str(), port));
-        let upstream = match connect_session_with_timeout(connect_timeout, upstream).await {
-            Ok(upstream) => {
+        let (upstream, _route_backend) =
+            match connect_live_upstream_with_timeout(connect_timeout, &session, &host, port).await {
+            Ok((upstream, route_backend)) => {
                 pool.finish_live_connect_attempt(&account_name).await;
                 log_upstream_connect_success(request_id, "connect", &target, connect_started);
-                upstream
+                (upstream, route_backend)
             }
-            Err(err) => {
+            Err((err, route_backend)) => {
                 pool.finish_live_connect_attempt(&account_name).await;
                 log_upstream_connect_failure(request_id, "connect", &target, connect_started, &err);
                 if !matches!(err, UpstreamConnectError::RouteRejected) {
                     stats.record_connect_failure();
                 }
-                handle_live_session_failure(&pool, &account_name, &session, &err).await;
+                if matches!(route_backend, LiveRouteBackend::Vpn) {
+                    handle_live_session_failure(&pool, &account_name, &session, &err).await;
+                }
                 return gateway_error_response(&err);
             }
         };
@@ -1895,7 +2008,7 @@ async fn handle_live_request(
     let wants_keep_alive = client_requests_keep_alive(&request);
     let upstream = take_cached_upstream(&upstream_cache, &host, port).await;
     let upstream = match upstream {
-        Some(upstream) => Ok(upstream),
+        Some(upstream) => Ok((upstream, LiveRouteBackend::Direct)),
         None => {
             let connect_started = Instant::now();
             log_upstream_connect_start(
@@ -1905,18 +2018,13 @@ async fn handle_live_request(
                 &target,
                 connect_timeout,
             );
-            match connect_session_with_timeout(
-                connect_timeout,
-                session.connect_tcp((host.as_str(), port)),
-            )
-            .await
-            {
-                Ok(upstream) => {
+            match connect_live_upstream_with_timeout(connect_timeout, &session, &host, port).await {
+                Ok((upstream, route_backend)) => {
                     pool.finish_live_connect_attempt(&account_name).await;
                     log_upstream_connect_success(request_id, "http", &target, connect_started);
-                    Ok(upstream)
+                    Ok((upstream, route_backend))
                 }
-                Err(err) => {
+                Err((err, route_backend)) => {
                     pool.finish_live_connect_attempt(&account_name).await;
                     log_upstream_connect_failure(
                         request_id,
@@ -1925,18 +2033,20 @@ async fn handle_live_request(
                         connect_started,
                         &err,
                     );
-                    Err(err)
+                    Err((err, route_backend))
                 }
             }
         }
     };
     let upstream = match upstream {
-        Ok(upstream) => upstream,
-        Err(err) => {
+        Ok((upstream, _route_backend)) => upstream,
+        Err((err, route_backend)) => {
             if !matches!(err, UpstreamConnectError::RouteRejected) {
                 stats.record_connect_failure();
             }
-            handle_live_session_failure(&pool, &account_name, &session, &err).await;
+            if matches!(route_backend, LiveRouteBackend::Vpn) {
+                handle_live_session_failure(&pool, &account_name, &session, &err).await;
+            }
             return gateway_error_response(&err);
         }
     };
@@ -2525,7 +2635,6 @@ fn record_tunnel_transfer(
     }
 }
 
-#[cfg(any(test, debug_assertions))]
 async fn connect_with_timeout<T, E, Fut>(
     timeout: Duration,
     fut: Fut,
@@ -2538,6 +2647,45 @@ where
         Ok(Ok(value)) => Ok(value),
         Ok(Err(_err)) => Err(UpstreamConnectError::Failed),
         Err(_) => Err(UpstreamConnectError::TimedOut),
+    }
+}
+
+async fn connect_live_upstream_with_timeout(
+    timeout: Duration,
+    session: &smelly_connect::Session,
+    host: &str,
+    port: u16,
+) -> Result<(smelly_connect::transport::VpnStream, LiveRouteBackend), (UpstreamConnectError, LiveRouteBackend)>
+{
+    let route = match session.plan_tcp_connect((host, port)).await {
+        Ok(route) => route,
+        Err(smelly_connect::Error::RouteDecision(
+            smelly_connect::error::RouteDecisionError::TargetNotAllowed,
+        )) => return Err((UpstreamConnectError::RouteRejected, LiveRouteBackend::Direct)),
+        Err(smelly_connect::Error::Transport(
+            smelly_connect::error::TransportError::ConnectTimedOut,
+        )) => return Err((UpstreamConnectError::TimedOut, LiveRouteBackend::Direct)),
+        Err(_err) => return Err((UpstreamConnectError::Failed, LiveRouteBackend::Direct)),
+    };
+
+    match route {
+        smelly_connect::session::RoutePlan::VpnResolved(_) => {
+            connect_session_with_timeout(timeout, session.connect_tcp((host, port)))
+                .await
+                .map(|upstream| (upstream, LiveRouteBackend::Vpn))
+                .map_err(|err| (err, LiveRouteBackend::Vpn))
+        }
+        smelly_connect::session::RoutePlan::Direct(addr) => {
+            connect_with_timeout(timeout, TcpStream::connect(addr))
+                .await
+                .map(|stream| {
+                    (
+                        smelly_connect::transport::VpnStream::new(stream),
+                        LiveRouteBackend::Direct,
+                    )
+                })
+                .map_err(|err| (err, LiveRouteBackend::Direct))
+        }
     }
 }
 

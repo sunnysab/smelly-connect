@@ -112,6 +112,33 @@ async fn http_connect_proxy_tunnels_bytes_through_selected_session() {
 }
 
 #[tokio::test]
+async fn http_proxy_forwards_unmatched_requests_via_direct_route() {
+    let result = smelly_connect_cli::proxy::http::proxy_http_direct_forward_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.body, "ok");
+}
+
+#[tokio::test]
+async fn http_connect_proxy_tunnels_unmatched_targets_via_direct_route() {
+    let result = smelly_connect_cli::proxy::http::proxy_connect_direct_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.echoed_bytes, b"ping");
+}
+
+#[tokio::test]
+async fn http_direct_connect_failure_does_not_mark_live_session_open() {
+    let result =
+        smelly_connect_cli::proxy::http::proxy_http_direct_failure_does_not_open_for_test()
+            .await
+            .unwrap();
+    assert_eq!(result.status_code, 502);
+    assert!(result.state_summary.contains("Ready"));
+    assert!(result.selectable_after_failure);
+}
+
+#[tokio::test]
 async fn http_proxy_fails_fast_when_pool_has_no_ready_session() {
     let result = smelly_connect_cli::proxy::http::proxy_http_no_ready_session_for_test()
         .await

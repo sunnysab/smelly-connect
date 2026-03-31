@@ -1023,12 +1023,6 @@ impl SessionPool {
     }
 
     fn wrap_live_session(&self, account_name: String, session: Session) -> PooledSession {
-        let session = apply_pool_routing(
-            session,
-            &self.local_route_overrides,
-            self.route_policy,
-            self.allow_all_routes,
-        );
         let keepalive = self.build_keepalive_handle(&account_name, &session);
         PooledSession {
             account_name,
@@ -1530,14 +1524,7 @@ impl SessionPool {
         match &state.nodes[idx].state {
             AccountState::Ready(session) | AccountState::Suspect(session) => {
                 let account_name = session.account_name().to_string();
-                let live = session.session().cloned().map(|live| {
-                    apply_pool_routing(
-                        live,
-                        &self.local_route_overrides,
-                        self.route_policy,
-                        self.allow_all_routes,
-                    )
-                });
+                let live = session.session().cloned();
                 if live.is_some() {
                     state.busy_live_connects.insert(account_name.clone());
                 }
