@@ -1,8 +1,51 @@
 #[tokio::test]
-async fn routing_rejects_non_resource_targets_by_default() {
-    let session = smelly_connect::test_support::session::fake_session_without_match();
+async fn routing_returns_direct_for_non_resource_targets_by_default() {
+    let mut system_dns = std::collections::HashMap::new();
+    system_dns.insert(
+        "example.test".to_string(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+    );
+    let session = smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        smelly_connect::resource::ResourceSet::default(),
+        smelly_connect::resolver::SessionResolver::new(
+            std::collections::HashMap::new(),
+            None,
+            system_dns,
+        ),
+        smelly_connect::session::EasyConnectSession::failing_transport("unused"),
+    );
+    let route = session
+        .plan_tcp_connect(("example.test", 443))
+        .await
+        .unwrap();
+    assert!(matches!(
+        route,
+        smelly_connect::session::RoutePlan::Direct(addr)
+            if addr == "127.0.0.1:443".parse().unwrap()
+    ));
+}
+
+#[tokio::test]
+async fn routing_blocks_non_resource_targets_when_policy_is_block() {
+    let mut system_dns = std::collections::HashMap::new();
+    system_dns.insert(
+        "example.test".to_string(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+    );
+    let session = smelly_connect::session::EasyConnectSession::new(
+        "10.0.0.8".parse().unwrap(),
+        smelly_connect::resource::ResourceSet::default(),
+        smelly_connect::resolver::SessionResolver::new(
+            std::collections::HashMap::new(),
+            None,
+            system_dns,
+        ),
+        smelly_connect::session::EasyConnectSession::failing_transport("unused"),
+    )
+        .with_route_policy(smelly_connect::domain::route_policy::RoutePolicy::block_non_resource_targets());
     let err = session
-        .plan_tcp_connect(("example.com", 443))
+        .plan_tcp_connect(("example.test", 443))
         .await
         .unwrap_err();
     assert!(matches!(err, smelly_connect::Error::RouteDecision(_)));
@@ -371,15 +414,14 @@ async fn udp_only_domain_rule_does_not_allow_tcp_connect() {
         smelly_connect::session::EasyConnectSession::failing_transport("unused"),
     );
 
-    let err = session
+    let route = session
         .plan_tcp_connect(("portal.foo.edu.cn", 443))
         .await
-        .unwrap_err();
+        .unwrap();
     assert!(matches!(
-        err,
-        smelly_connect::Error::RouteDecision(
-            smelly_connect::error::RouteDecisionError::TargetNotAllowed
-        )
+        route,
+        smelly_connect::session::RoutePlan::Direct(addr)
+            if addr == "127.0.0.1:443".parse().unwrap()
     ));
 }
 

@@ -4,8 +4,10 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::net::TcpStream;
 use tracing::{info, warn};
 
+use crate::domain::route_policy::RoutePolicy;
 use crate::error::{Error, ProxyError, RouteDecisionError, TransportError};
 use crate::proxy::http::ProxyHandle;
 use crate::resolver::SessionResolver;
@@ -25,6 +27,7 @@ use runtime::SessionRuntime;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoutePlan {
     VpnResolved(SocketAddr),
+    Direct(SocketAddr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +94,7 @@ fn normalize_override_domain(value: &str) -> String {
 pub struct EasyConnectSession {
     inner: Arc<SessionInner>,
     local_route_overrides: LocalRouteOverrides,
+    route_policy: RoutePolicy,
     allow_all_routes: bool,
 }
 
@@ -111,6 +115,7 @@ impl EasyConnectSession {
                 runtime: Arc::new(SessionRuntime::default()),
             }),
             local_route_overrides: LocalRouteOverrides::default(),
+            route_policy: RoutePolicy::default(),
             allow_all_routes: false,
         }
     }
@@ -171,6 +176,11 @@ impl EasyConnectSession {
 
     pub fn with_local_route_overrides(mut self, overrides: LocalRouteOverrides) -> Self {
         self.local_route_overrides = overrides;
+        self
+    }
+
+    pub fn with_route_policy(mut self, route_policy: RoutePolicy) -> Self {
+        self.route_policy = route_policy;
         self
     }
 
@@ -273,6 +283,7 @@ impl EasyConnectSession {
         match route {
             RoutePlan::VpnResolved(addr) => {
                 info!(
+                    route_kind = "vpn",
                     target_host = %host,
                     target_port = port,
                     resolved_addr = %addr,
@@ -284,6 +295,7 @@ impl EasyConnectSession {
                 match self.inner.transport.connect(addr).await {
                     Ok(stream) => {
                         info!(
+                            route_kind = "vpn",
                             target_host = %host,
                             target_port = port,
                             resolved_addr = %addr,
@@ -296,6 +308,47 @@ impl EasyConnectSession {
                     Err(err) => {
                         let mapped = Error::Transport(TransportError::from_io(err));
                         warn!(
+                            route_kind = "vpn",
+                            target_host = %host,
+                            target_port = port,
+                            resolved_addr = %addr,
+                            connect_elapsed_ms = transport_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                            total_elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                            error_kind = session_transport_error_kind(&mapped),
+                            error = ?mapped,
+                            "session tcp connect failed"
+                        );
+                        Err(mapped)
+                    }
+                }
+            }
+            RoutePlan::Direct(addr) => {
+                info!(
+                    route_kind = "direct",
+                    target_host = %host,
+                    target_port = port,
+                    resolved_addr = %addr,
+                    plan_elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                    "session tcp connect planned"
+                );
+                let transport_started = std::time::Instant::now();
+                match TcpStream::connect(addr).await {
+                    Ok(stream) => {
+                        info!(
+                            route_kind = "direct",
+                            target_host = %host,
+                            target_port = port,
+                            resolved_addr = %addr,
+                            connect_elapsed_ms = transport_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                            total_elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                            "session tcp connect established"
+                        );
+                        Ok(VpnStream::new(stream))
+                    }
+                    Err(err) => {
+                        let mapped = Error::Transport(TransportError::from_io(err));
+                        warn!(
+                            route_kind = "direct",
                             target_host = %host,
                             target_port = port,
                             resolved_addr = %addr,
@@ -391,6 +444,7 @@ impl EasyConnectSession {
             transport,
         )
         .with_local_route_overrides(self.local_route_overrides.clone())
+        .with_route_policy(self.route_policy)
         .with_allow_all_routes(self.allow_all_routes)
         .with_legacy_data_plane(
             cfg.server_addr,
@@ -415,6 +469,7 @@ impl EasyConnectSession {
         let resources = self.inner.resources.clone();
         let resolver = self.inner.resolver.clone();
         let local_route_overrides = self.local_route_overrides.clone();
+        let route_policy = self.route_policy;
         let allow_all_routes = self.allow_all_routes;
         let request_ip_tunnel = self.inner.runtime.take_legacy_tunnel();
 
@@ -454,6 +509,7 @@ impl EasyConnectSession {
                 }),
             )
             .with_local_route_overrides(local_route_overrides.clone())
+            .with_route_policy(route_policy)
             .with_allow_all_routes(allow_all_routes)
             .with_legacy_data_plane(server_addr, token.clone(), legacy_cipher_hint.clone())
             .rebuild_transport()
@@ -491,6 +547,7 @@ impl EasyConnectSession {
                 }),
             )
             .with_local_route_overrides(local_route_overrides.clone())
+            .with_route_policy(route_policy)
             .with_allow_all_routes(allow_all_routes)
             .with_legacy_data_plane(server_addr, token.clone(), legacy_cipher_hint.clone())
             .rebuild_transport()
@@ -505,6 +562,7 @@ impl EasyConnectSession {
             transport,
         )
         .with_local_route_overrides(local_route_overrides)
+        .with_route_policy(route_policy)
         .with_allow_all_routes(allow_all_routes)
         .with_legacy_data_plane(server_addr, token, legacy_cipher_hint)
         .with_runtime_resources(request_ip_tunnel, None))
@@ -579,8 +637,64 @@ impl EasyConnectSession {
     where
         T: Into<TargetAddr>,
     {
-        let addr = self.plan_socket_addr(target, RouteProtocol::Tcp).await?;
-        Ok(RoutePlan::VpnResolved(addr))
+        let target = target.into();
+        let host = target.host().to_string();
+        let port = target.port();
+
+        if let Ok(ip) = host.parse::<Ipv4Addr>() {
+            return self.plan_tcp_ip(ip, port);
+        }
+
+        let ip = self
+            .inner
+            .resolver
+            .resolve_for_vpn(&host)
+            .await
+            .map_err(Error::Resolve)?;
+        self.plan_tcp_host(&host, ip, port)
+    }
+
+    fn plan_tcp_host(&self, host: &str, ip: IpAddr, port: u16) -> Result<RoutePlan, Error> {
+        if self.allow_all_routes
+            || self.inner.resources.matches_domain(host, port, RouteProtocol::Tcp)
+            || self
+                .local_route_overrides
+                .matches_domain(host, port, RouteProtocol::Tcp)
+            || self.inner.resources.matches_ip(ip, port, RouteProtocol::Tcp)
+            || self
+                .local_route_overrides
+                .matches_ip(ip, port, RouteProtocol::Tcp)
+        {
+            Ok(RoutePlan::VpnResolved(SocketAddr::new(ip, port)))
+        } else {
+            self.plan_direct_or_block(SocketAddr::new(ip, port))
+        }
+    }
+
+    fn plan_tcp_ip(&self, ip: Ipv4Addr, port: u16) -> Result<RoutePlan, Error> {
+        let addr = SocketAddr::new(IpAddr::V4(ip), port);
+        if self.allow_all_routes
+            || self
+                .inner
+                .resources
+                .matches_ip(IpAddr::V4(ip), port, RouteProtocol::Tcp)
+            || self
+                .local_route_overrides
+                .matches_ip(IpAddr::V4(ip), port, RouteProtocol::Tcp)
+        {
+            Ok(RoutePlan::VpnResolved(addr))
+        } else {
+            self.plan_direct_or_block(addr)
+        }
+    }
+
+    fn plan_direct_or_block(&self, addr: SocketAddr) -> Result<RoutePlan, Error> {
+        match self.route_policy {
+            RoutePolicy::DirectNonResourceTargets => Ok(RoutePlan::Direct(addr)),
+            RoutePolicy::RejectNonResourceTargets => {
+                Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed))
+            }
+        }
     }
 
     async fn plan_socket_addr<T>(
