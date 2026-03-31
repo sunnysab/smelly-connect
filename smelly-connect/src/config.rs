@@ -140,12 +140,9 @@ impl EasyConnectConfig {
             transport,
         )
         .with_legacy_data_plane(server_addr, token, state.legacy_cipher_hint);
-        let keepalive = self
-            .icmp_keepalive
-            .as_ref()
-            .map(|keepalive| {
-                session.start_icmp_keepalive(keepalive.target.clone(), keepalive.interval)
-            });
+        let keepalive = self.icmp_keepalive.as_ref().map(|keepalive| {
+            session.start_icmp_keepalive(keepalive.target.clone(), keepalive.interval)
+        });
         Ok(session.with_runtime_resources(Some(request_ip_tunnel), keepalive))
     }
 }

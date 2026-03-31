@@ -153,12 +153,10 @@ async fn async_token_request_does_not_block_current_thread_runtime() {
         }
     });
 
-    let token = smelly_connect::auth::control::request_token_async(
-        &addr.to_string(),
-        "abcdefghijklmnop",
-    )
-    .await
-    .unwrap();
+    let token =
+        smelly_connect::auth::control::request_token_async(&addr.to_string(), "abcdefghijklmnop")
+            .await
+            .unwrap();
 
     running.store(false, Ordering::SeqCst);
     ticker.await.unwrap();

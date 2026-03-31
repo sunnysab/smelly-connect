@@ -1,5 +1,5 @@
-use crate::pool::RoutesSnapshot;
 use crate::error::CliError;
+use crate::pool::RoutesSnapshot;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use tokio::io::AsyncReadExt;

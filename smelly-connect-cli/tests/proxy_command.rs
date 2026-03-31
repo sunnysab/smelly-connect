@@ -92,7 +92,10 @@ async fn proxy_command_returns_typed_error_when_management_feature_is_missing() 
         .await
         .unwrap_err();
 
-    assert!(matches!(err, smelly_connect_cli::error::CliError::Command(_)));
+    assert!(matches!(
+        err,
+        smelly_connect_cli::error::CliError::Command(_)
+    ));
     let _ = fs::remove_file(path);
 }
 

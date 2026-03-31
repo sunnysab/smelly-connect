@@ -9,8 +9,8 @@ use tokio::io::duplex;
 use tokio::net::UdpSocket;
 
 use crate::config::EasyConnectConfig;
-use crate::resource::{DomainRule, IpRule, ResourceSet};
 use crate::resolver::SessionResolver;
+use crate::resource::{DomainRule, IpRule, ResourceSet};
 use crate::session::{EasyConnectSession, IcmpKeepAliveTarget};
 use crate::transport::{TransportStack, VpnStream, VpnUdpSocket};
 
@@ -234,7 +234,9 @@ fn matched_resources(host: &str, ip: Ipv4Addr) -> (ResourceSet, HashMap<String, 
         port_max: 65535,
         protocol: crate::RouteProtocol::All,
     });
-    resources.static_dns.insert(host.to_string(), IpAddr::V4(ip));
+    resources
+        .static_dns
+        .insert(host.to_string(), IpAddr::V4(ip));
 
     let mut system = HashMap::new();
     system.insert(host.to_string(), IpAddr::V4(ip));

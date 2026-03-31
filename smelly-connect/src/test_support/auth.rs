@@ -63,7 +63,8 @@ pub async fn control_plane_harness() -> ControlPlaneHarness {
                         &mut stream,
                         "200 OK",
                         "text/xml",
-                        include_str!("../../tests/fixtures/login_auth_requires_captcha.xml").as_bytes(),
+                        include_str!("../../tests/fixtures/login_auth_requires_captcha.xml")
+                            .as_bytes(),
                     )
                     .await
                     .unwrap();

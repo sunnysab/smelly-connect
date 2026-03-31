@@ -80,10 +80,11 @@ fn routes_command_returns_typed_error_when_management_is_disabled() {
         .build()
         .unwrap();
     let err = rt
-        .block_on(smelly_connect_cli::commands::routes::run_routes_with_config_typed(
-            &path,
-        ))
+        .block_on(smelly_connect_cli::commands::routes::run_routes_with_config_typed(&path))
         .unwrap_err();
-    assert!(matches!(err, smelly_connect_cli::error::CliError::Command(_)));
+    assert!(matches!(
+        err,
+        smelly_connect_cli::error::CliError::Command(_)
+    ));
     let _ = std::fs::remove_file(path);
 }

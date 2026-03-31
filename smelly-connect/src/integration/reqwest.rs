@@ -50,8 +50,10 @@ struct ReqwestProxyGuard {
 
 impl ReqwestProxyGuard {
     fn new(handle: ProxyHandle) -> Result<Self, Error> {
-        let proxy_url = reqwest::Url::parse(&format!("http://{}", handle.local_addr()))
-            .map_err(|err| Error::Integration(IntegrationError::ClientBuildFailed(err.to_string())))?;
+        let proxy_url =
+            reqwest::Url::parse(&format!("http://{}", handle.local_addr())).map_err(|err| {
+                Error::Integration(IntegrationError::ClientBuildFailed(err.to_string()))
+            })?;
         Ok(Self {
             proxy_url,
             handle: Mutex::new(Some(handle)),

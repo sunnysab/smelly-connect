@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 
-use crate::resource::{DomainRule, IpRule};
 use crate::RouteProtocol;
+use crate::resource::{DomainRule, IpRule};
 
 pub fn domain_rule_matches(
     host: &str,
@@ -16,12 +16,7 @@ pub fn domain_rule_matches(
         && domain_matches(host, domain)
 }
 
-pub fn ip_rule_matches(
-    ip: IpAddr,
-    port: u16,
-    protocol: RouteProtocol,
-    rule: &IpRule,
-) -> bool {
+pub fn ip_rule_matches(ip: IpAddr, port: u16, protocol: RouteProtocol, rule: &IpRule) -> bool {
     route_protocol_matches(protocol, rule.protocol)
         && port >= rule.port_min
         && port <= rule.port_max

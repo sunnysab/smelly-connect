@@ -66,7 +66,10 @@ async fn http_connect_failure_marks_runtime_status_recovering() {
         smelly_connect_cli::proxy::http::proxy_http_connect_failure_runtime_status_for_test()
             .await
             .unwrap();
-    assert_eq!(snapshot.status, smelly_connect_cli::pool::PoolHealthStatus::Recovering);
+    assert_eq!(
+        snapshot.status,
+        smelly_connect_cli::pool::PoolHealthStatus::Recovering
+    );
 }
 
 #[test]
@@ -104,10 +107,11 @@ fn status_command_returns_typed_error_when_management_is_disabled() {
         .build()
         .unwrap();
     let err = rt
-        .block_on(smelly_connect_cli::commands::status::run_status_with_config_typed(
-            &path,
-        ))
+        .block_on(smelly_connect_cli::commands::status::run_status_with_config_typed(&path))
         .unwrap_err();
-    assert!(matches!(err, smelly_connect_cli::error::CliError::Command(_)));
+    assert!(matches!(
+        err,
+        smelly_connect_cli::error::CliError::Command(_)
+    ));
     let _ = std::fs::remove_file(path);
 }

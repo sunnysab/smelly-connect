@@ -471,7 +471,9 @@ fn chunked_wire_complete(body: &[u8]) -> bool {
         let Ok(size_line) = std::str::from_utf8(&body[cursor..line_end]) else {
             return false;
         };
-        let Ok(size) = usize::from_str_radix(size_line.split(';').next().unwrap_or_default().trim(), 16) else {
+        let Ok(size) =
+            usize::from_str_radix(size_line.split(';').next().unwrap_or_default().trim(), 16)
+        else {
             return false;
         };
         cursor = line_end + 2;
@@ -489,7 +491,10 @@ fn chunked_wire_complete(body: &[u8]) -> bool {
     }
 }
 
-fn proxy_ready_session(http_upstream: SocketAddr, tunnel_upstream: SocketAddr) -> EasyConnectSession {
+fn proxy_ready_session(
+    http_upstream: SocketAddr,
+    tunnel_upstream: SocketAddr,
+) -> EasyConnectSession {
     let http_host = "intranet.zju.edu.cn";
     let tunnel_host = "libdb.zju.edu.cn";
     let resolved_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);

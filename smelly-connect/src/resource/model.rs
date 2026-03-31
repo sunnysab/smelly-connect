@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use crate::domain::route_match::{domain_rule_matches, ip_rule_matches};
 use crate::RouteProtocol;
+use crate::domain::route_match::{domain_rule_matches, ip_rule_matches};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainRule {

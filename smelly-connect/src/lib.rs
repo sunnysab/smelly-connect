@@ -26,6 +26,6 @@ pub use facade::client::{EasyConnectClient, EasyConnectClientBuilder};
 pub use proxy::http::ProxyHandle;
 pub use runtime::control_plane::{AuthenticatedSessionSeed, run_control_plane};
 pub use runtime::tasks::keepalive::KeepaliveHandle;
-pub use session::LocalRouteOverrides;
 pub use session::EasyConnectSession as Session;
+pub use session::LocalRouteOverrides;
 pub use target::TargetAddr;

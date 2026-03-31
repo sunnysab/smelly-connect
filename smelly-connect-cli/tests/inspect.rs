@@ -19,9 +19,14 @@ fn inspect_session_returns_typed_error_for_missing_config() {
         .build()
         .unwrap();
     let err = rt
-        .block_on(smelly_connect_cli::commands::inspect::run_session_with_config_typed(
-            "/definitely/missing/config.toml",
-        ))
+        .block_on(
+            smelly_connect_cli::commands::inspect::run_session_with_config_typed(
+                "/definitely/missing/config.toml",
+            ),
+        )
         .unwrap_err();
-    assert!(matches!(err, smelly_connect_cli::error::CliError::Config(_)));
+    assert!(matches!(
+        err,
+        smelly_connect_cli::error::CliError::Config(_)
+    ));
 }
