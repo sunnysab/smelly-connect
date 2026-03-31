@@ -637,12 +637,26 @@ impl EasyConnectSession {
     where
         T: Into<TargetAddr>,
     {
+        self.plan_route(target, RouteProtocol::Tcp).await
+    }
+
+    pub async fn plan_udp_send<T>(&self, target: T) -> Result<RoutePlan, Error>
+    where
+        T: Into<TargetAddr>,
+    {
+        self.plan_route(target, RouteProtocol::Udp).await
+    }
+
+    async fn plan_route<T>(&self, target: T, protocol: RouteProtocol) -> Result<RoutePlan, Error>
+    where
+        T: Into<TargetAddr>,
+    {
         let target = target.into();
         let host = target.host().to_string();
         let port = target.port();
 
         if let Ok(ip) = host.parse::<Ipv4Addr>() {
-            return self.plan_tcp_ip(ip, port);
+            return self.plan_ip_route(ip, port, protocol);
         }
 
         let ip = self
@@ -651,19 +665,25 @@ impl EasyConnectSession {
             .resolve_for_vpn(&host)
             .await
             .map_err(Error::Resolve)?;
-        self.plan_tcp_host(&host, ip, port)
+        self.plan_host_route(&host, ip, port, protocol)
     }
 
-    fn plan_tcp_host(&self, host: &str, ip: IpAddr, port: u16) -> Result<RoutePlan, Error> {
+    fn plan_host_route(
+        &self,
+        host: &str,
+        ip: IpAddr,
+        port: u16,
+        protocol: RouteProtocol,
+    ) -> Result<RoutePlan, Error> {
         if self.allow_all_routes
-            || self.inner.resources.matches_domain(host, port, RouteProtocol::Tcp)
+            || self.inner.resources.matches_domain(host, port, protocol)
             || self
                 .local_route_overrides
-                .matches_domain(host, port, RouteProtocol::Tcp)
-            || self.inner.resources.matches_ip(ip, port, RouteProtocol::Tcp)
+                .matches_domain(host, port, protocol)
+            || self.inner.resources.matches_ip(ip, port, protocol)
             || self
                 .local_route_overrides
-                .matches_ip(ip, port, RouteProtocol::Tcp)
+                .matches_ip(ip, port, protocol)
         {
             Ok(RoutePlan::VpnResolved(SocketAddr::new(ip, port)))
         } else {
@@ -671,16 +691,21 @@ impl EasyConnectSession {
         }
     }
 
-    fn plan_tcp_ip(&self, ip: Ipv4Addr, port: u16) -> Result<RoutePlan, Error> {
+    fn plan_ip_route(
+        &self,
+        ip: Ipv4Addr,
+        port: u16,
+        protocol: RouteProtocol,
+    ) -> Result<RoutePlan, Error> {
         let addr = SocketAddr::new(IpAddr::V4(ip), port);
         if self.allow_all_routes
             || self
                 .inner
                 .resources
-                .matches_ip(IpAddr::V4(ip), port, RouteProtocol::Tcp)
+                .matches_ip(IpAddr::V4(ip), port, protocol)
             || self
                 .local_route_overrides
-                .matches_ip(IpAddr::V4(ip), port, RouteProtocol::Tcp)
+                .matches_ip(IpAddr::V4(ip), port, protocol)
         {
             Ok(RoutePlan::VpnResolved(addr))
         } else {
