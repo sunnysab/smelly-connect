@@ -137,6 +137,7 @@ listen = "127.0.0.1:1080"
 
 [routing]
 allow_all = false
+default_action = "direct"
 
 [[routing.domain_rules]]
 domain = "*.foo.edu.cn"
@@ -185,7 +186,9 @@ smelly-connect-cli --config ./config.toml test http http://intranet.zju.edu.cn/h
 本地补充路由：
 
 - `[routing]` 用于追加本地域名/IP 放行规则，与服务端下发规则做并集
-- `allow_all = true` 时跳过 `TargetNotAllowed` 路由拒绝，所有目标都允许尝试走 VPN
+- `allow_all = true` 时优先级最高，所有目标都强制尝试走 VPN
+- `default_action = "direct"` 是默认行为；未命中服务端规则和本地规则时走本机直连
+- `default_action = "block"` 会恢复旧的未命中即拒绝行为
 - `[[routing.domain_rules]]` 支持精确域名和 `*.example.com` 泛域名
 - `[[routing.ip_rules]]` 支持单 IP 和 `ip_min` 到 `ip_max` 的 IPv4 / IPv6 范围
 - 本地规则支持 `port_min` / `port_max` / `protocol`

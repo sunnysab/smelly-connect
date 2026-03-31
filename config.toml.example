@@ -55,6 +55,8 @@ udp_associate_idle_timeout_secs = 90
 [routing]
 # Bypass route filtering and allow all destinations through the VPN.
 allow_all = false
+# Unmatched targets use the local network by default. Set to "block" to restore reject-on-miss.
+default_action = "direct"
 
 [[routing.domain_rules]]
 domain = "*.foo.edu.cn"
