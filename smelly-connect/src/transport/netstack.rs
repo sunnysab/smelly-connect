@@ -3,7 +3,7 @@ use std::future::{pending, poll_fn};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
@@ -45,6 +45,18 @@ struct SmolStackInner {
     state: Mutex<NetstackState>,
     wake: Notify,
     local_ip: Ipv4Addr,
+}
+
+/// 获取锁，如果锁中毒则恢复并返回锁
+/// 这样单个 task panic 不会导致整个进程崩溃
+fn acquire_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("netstack mutex recovered from poison");
+            poisoned.into_inner()
+        }
+    }
 }
 
 struct NetstackState {
@@ -163,7 +175,7 @@ impl SmolStack {
         }
 
         let handle = {
-            let mut state = self.inner.state.lock().expect("netstack mutex poisoned");
+            let mut state = acquire_lock(&self.inner.state);
             let socket = tcp_socket();
             let handle = state.sockets.add(socket);
             state.active_handles.insert(handle);
@@ -207,7 +219,7 @@ impl SmolStack {
 
     async fn ping(&self, target: Ipv4Addr) -> io::Result<()> {
         let (handle, seq_no) = {
-            let mut state = self.inner.state.lock().expect("netstack mutex poisoned");
+            let mut state = acquire_lock(&self.inner.state);
             let socket = icmp_socket();
             let handle = state.sockets.add(socket);
             state.active_handles.insert(handle);
@@ -241,7 +253,7 @@ impl SmolStack {
             + std::time::Duration::from_millis(ICMP_PING_TIMEOUT_MILLIS);
         let result = loop {
             let maybe_reply = {
-                let mut state = self.inner.state.lock().expect("netstack mutex poisoned");
+                let mut state = acquire_lock(&self.inner.state);
                 let socket = state.sockets.get_mut::<icmp::Socket<'static>>(handle);
                 if socket.can_recv() {
                     let mut buffer = [0_u8; ICMP_BUFFER_SIZE];
@@ -284,7 +296,7 @@ impl SmolStack {
 
     async fn bind_udp(&self) -> io::Result<VpnUdpSocket> {
         let (handle, local_addr) = {
-            let mut state = self.inner.state.lock().expect("netstack mutex poisoned");
+            let mut state = acquire_lock(&self.inner.state);
             let socket = udp_socket();
             let handle = state.sockets.add(socket);
             state.active_handles.insert(handle);
@@ -346,18 +358,25 @@ impl SmolStackInner {
         outbound_tx: &mpsc::Sender<Vec<u8>>,
     ) -> io::Result<()> {
         {
-            let mut state = self.state.lock().expect("netstack mutex poisoned");
+            let mut state = acquire_lock(&self.state);
             if let Some(packet) = inbound {
                 state.device.push_inbound(packet);
             }
-            state.poll();
+            // 批量 poll：多次 poll 直到没有新包产生
+            // 这样可以一次处理多个连接的包，减少轮次
+            for _ in 0..16 {
+                state.poll();
+                if state.device.outbound.is_empty() {
+                    break;
+                }
+            }
             let outbound_packets = state.device.take_outbound();
             state.pending_outbound.extend(outbound_packets);
         }
 
         loop {
             let packet = {
-                let mut state = self.state.lock().expect("netstack mutex poisoned");
+                let mut state = acquire_lock(&self.state);
                 state.pending_outbound.pop_front()
             };
             let Some(packet) = packet else {
@@ -367,7 +386,7 @@ impl SmolStackInner {
             match outbound_tx.try_send(packet) {
                 Ok(()) => {}
                 Err(TrySendError::Full(packet)) => {
-                    let mut state = self.state.lock().expect("netstack mutex poisoned");
+                    let mut state = acquire_lock(&self.state);
                     state.pending_outbound.push_front(packet);
                     warn!(
                         pending_outbound = state.pending_outbound.len(),
@@ -385,7 +404,7 @@ impl SmolStackInner {
     }
 
     fn next_delay(&self) -> Option<std::time::Duration> {
-        let mut state = self.state.lock().expect("netstack mutex poisoned");
+        let mut state = acquire_lock(&self.state);
         if !state.pending_outbound.is_empty() {
             return Some(std::time::Duration::from_millis(1));
         }
@@ -397,7 +416,7 @@ impl SmolStackInner {
     }
 
     fn poll_connect(&self, handle: SocketHandle, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut state = self.state.lock().expect("netstack mutex poisoned");
+        let mut state = acquire_lock(&self.state);
         let socket = state.sockets.get_mut::<tcp::Socket<'static>>(handle);
 
         if socket.may_send() {
@@ -416,7 +435,7 @@ impl SmolStackInner {
     }
 
     fn remove_socket(&self, handle: SocketHandle) {
-        let mut state = self.state.lock().expect("netstack mutex poisoned");
+        let mut state = acquire_lock(&self.state);
         if state.active_handles.remove(&handle) {
             let _ = state.sockets.remove(handle);
             info!(
@@ -538,7 +557,7 @@ impl AsyncRead for SmolTcpStream {
             return Poll::Ready(Ok(()));
         }
 
-        let mut state = self.stack.state.lock().expect("netstack mutex poisoned");
+        let mut state = acquire_lock(&self.stack.state);
         let socket = state.sockets.get_mut::<tcp::Socket<'static>>(self.handle);
 
         if socket.can_recv() {
@@ -570,7 +589,7 @@ impl AsyncWrite for SmolTcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        let mut state = self.stack.state.lock().expect("netstack mutex poisoned");
+        let mut state = acquire_lock(&self.stack.state);
         let socket = state.sockets.get_mut::<tcp::Socket<'static>>(self.handle);
 
         if socket.can_send() {
@@ -593,7 +612,7 @@ impl AsyncWrite for SmolTcpStream {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        let mut state = self.stack.state.lock().expect("netstack mutex poisoned");
+        let mut state = acquire_lock(&self.stack.state);
         let socket = state.sockets.get_mut::<tcp::Socket<'static>>(self.handle);
 
         if socket.send_queue() == 0 {
@@ -605,7 +624,7 @@ impl AsyncWrite for SmolTcpStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        let mut state = self.stack.state.lock().expect("netstack mutex poisoned");
+        let mut state = acquire_lock(&self.stack.state);
         let socket = state.sockets.get_mut::<tcp::Socket<'static>>(self.handle);
         socket.close();
         self.stack.wake.notify_one();
@@ -646,7 +665,7 @@ impl AsyncDatagramSocket for SmolUdpSocket {
                 return Err(io::Error::other("ipv6 unsupported"));
             }
             poll_fn(|cx| {
-                let mut state = self.stack.state.lock().expect("netstack mutex poisoned");
+                let mut state = acquire_lock(&self.stack.state);
                 let socket = state.sockets.get_mut::<udp::Socket<'static>>(self.handle);
                 if socket.can_send() {
                     let target = match target {
@@ -681,7 +700,7 @@ impl AsyncDatagramSocket for SmolUdpSocket {
     {
         Box::pin(async move {
             poll_fn(|cx| {
-                let mut state = self.stack.state.lock().expect("netstack mutex poisoned");
+                let mut state = acquire_lock(&self.stack.state);
                 let socket = state.sockets.get_mut::<udp::Socket<'static>>(self.handle);
                 if socket.can_recv() {
                     let (n, metadata) = socket
@@ -778,7 +797,7 @@ mod tests {
         .await;
         assert!(result.is_err(), "connect should time out in test");
 
-        let state = stack.inner.state.lock().expect("netstack mutex poisoned");
+        let state = acquire_lock(&stack.inner.state);
         assert!(
             state.active_handles.is_empty(),
             "timed out connect leaked active socket handles"
@@ -793,7 +812,7 @@ mod tests {
 
         stack_tx.send(vec![9, 9, 9]).await.unwrap();
         {
-            let mut state = stack.inner.state.lock().expect("netstack mutex poisoned");
+            let mut state = acquire_lock(&stack.inner.state);
             state.device.outbound.push_back(vec![1, 2, 3, 4]);
         }
 
@@ -806,7 +825,7 @@ mod tests {
         .expect("flush should succeed");
 
         {
-            let state = stack.inner.state.lock().expect("netstack mutex poisoned");
+            let state = acquire_lock(&stack.inner.state);
             assert_eq!(state.pending_outbound.len(), 1);
         }
 

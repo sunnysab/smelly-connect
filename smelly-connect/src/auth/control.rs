@@ -166,8 +166,8 @@ pub(crate) fn packet_device_from_tunnels(
     recv: TunnelConnection,
     send: TunnelConnection,
 ) -> Result<PacketDevice, Error> {
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(128);
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(128);
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(1024);
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1024);
     let mut device = PacketDevice::new(inbound_tx.clone(), inbound_rx, outbound_tx, outbound_rx);
     let mut outbound_rx = device.take_outbound_rx().ok_or_else(|| {
         Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(
