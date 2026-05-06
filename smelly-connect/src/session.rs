@@ -81,7 +81,7 @@ impl LocalRouteOverrides {
     }
 }
 
-fn normalize_override_domain(value: &str) -> String {
+pub fn normalize_override_domain(value: &str) -> String {
     let trimmed = value.trim();
     if let Some(rest) = trimmed.strip_prefix("*.") {
         format!(".{rest}")

@@ -296,14 +296,14 @@ fn is_header_too_large(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::InvalidData && err.to_string() == HEADER_TOO_LARGE_MESSAGE
 }
 
-fn find_header_end(buffer: &[u8]) -> Option<usize> {
+pub fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .map(|idx| idx + 4)
 }
 
-fn parse_content_length(headers: &[&str]) -> Option<usize> {
+pub fn parse_content_length(headers: &[&str]) -> Option<usize> {
     headers.iter().find_map(|header| {
         header.split_once(':').and_then(|(name, value)| {
             name.eq_ignore_ascii_case("content-length")
@@ -313,7 +313,7 @@ fn parse_content_length(headers: &[&str]) -> Option<usize> {
     })
 }
 
-fn has_chunked_transfer_encoding(headers: &[&str]) -> bool {
+pub fn has_chunked_transfer_encoding(headers: &[&str]) -> bool {
     headers.iter().any(|header| {
         header.split_once(':').is_some_and(|(name, value)| {
             name.eq_ignore_ascii_case("transfer-encoding")

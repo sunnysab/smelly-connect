@@ -9,6 +9,7 @@ use smelly_connect::domain::route_policy::RoutePolicy;
 use smelly_connect::{
     CaptchaError, CaptchaHandler, EasyConnectClient, LocalRouteOverrides, Session,
 };
+use smelly_connect::session::normalize_override_domain;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
@@ -2043,11 +2044,3 @@ fn build_local_route_overrides(
     Ok(LocalRouteOverrides::new(domain_rules, ip_rules))
 }
 
-fn normalize_override_domain(value: &str) -> String {
-    let trimmed = value.trim();
-    if let Some(rest) = trimmed.strip_prefix("*.") {
-        format!(".{rest}")
-    } else {
-        trimmed.to_string()
-    }
-}
