@@ -191,9 +191,13 @@ log "Duration reached, waiting for in-flight requests..."
 # Kill keepalive first so it doesn't block wait
 kill "$KEEPALIVE_PID" 2>/dev/null || true
 wait "$KEEPALIVE_PID" 2>/dev/null || true
-# Wait for remaining curl workers with timeout
+# Wait for remaining curl workers in the current shell so every finished
+# request has a chance to append its result before we summarize.
 if (( in_flight > 0 )); then
-  timeout 15 bash -c 'while wait -n 2>/dev/null; do :; done' 2>/dev/null || true
+  while (( in_flight > 0 )); do
+    wait -n 2>/dev/null || true
+    in_flight=$((in_flight - 1))
+  done
 fi
 
 # ── summary ──
@@ -220,7 +224,7 @@ log "=== Results ==="
   echo ""
 
   echo "[latency_percentiles]"
-  awk -F'\t' 'NR>1 && $7+0 > 0 { print $7+0 }' "$RESULTS_FILE" | sort -n | {
+  awk -F'\t' 'NR>1 && $6+0 > 0 { print $6+0 }' "$RESULTS_FILE" | sort -n | {
     readarray -t vals
     n=${#vals[@]}
     if (( n > 0 )); then
@@ -241,7 +245,7 @@ log "=== Results ==="
   echo ""
 
   echo "[slowest_10]"
-  awk -F'\t' 'NR>1 { print $7 "\t" $0 }' "$RESULTS_FILE" | sort -rn | head -10 | cut -f2-
+  awk -F'\t' 'NR>1 { print $6 "\t" $0 }' "$RESULTS_FILE" | sort -rn | head -10 | cut -f2-
   echo ""
 
   echo "[keepalive_health]"
