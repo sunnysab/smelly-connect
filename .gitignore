@@ -1,3 +1,4 @@
 .worktrees/
 /target/
 /tmp/
+/config.toml
