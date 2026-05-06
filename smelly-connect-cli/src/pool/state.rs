@@ -76,6 +76,7 @@ pub(super) fn build_pool_summary(state: &PoolState) -> PoolSummary {
         half_open_nodes,
         connecting_nodes,
         configured_nodes,
+        total_reconnections: state.total_reconnections,
     }
 }
 

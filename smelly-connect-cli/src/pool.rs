@@ -93,6 +93,7 @@ struct PoolState {
     nodes: Vec<AccountNode>,
     cursor: usize,
     busy_live_connects: HashSet<String>,
+    total_reconnections: u64,
 }
 
 #[derive(Clone)]
@@ -159,6 +160,7 @@ pub struct PoolSummary {
     pub half_open_nodes: usize,
     pub connecting_nodes: usize,
     pub configured_nodes: usize,
+    pub total_reconnections: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -270,6 +272,7 @@ impl SessionPool {
                 nodes,
                 cursor: 0,
                 busy_live_connects: HashSet::new(),
+                total_reconnections: 0,
             })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
@@ -311,6 +314,7 @@ impl SessionPool {
                 nodes,
                 cursor: 0,
                 busy_live_connects: HashSet::new(),
+                total_reconnections: 0,
             })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
@@ -364,6 +368,7 @@ impl SessionPool {
                 nodes,
                 cursor: 0,
                 busy_live_connects: HashSet::new(),
+                total_reconnections: 0,
             })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
@@ -420,6 +425,7 @@ impl SessionPool {
                 nodes,
                 cursor: 0,
                 busy_live_connects: HashSet::new(),
+                total_reconnections: 0,
             })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
@@ -484,6 +490,7 @@ impl SessionPool {
                 }],
                 cursor: 0,
                 busy_live_connects: HashSet::new(),
+                total_reconnections: 0,
             })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
@@ -565,6 +572,7 @@ impl SessionPool {
                 nodes,
                 cursor: 0,
                 busy_live_connects: HashSet::new(),
+                total_reconnections: 0,
             })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
@@ -609,6 +617,7 @@ impl SessionPool {
                 nodes,
                 cursor: 0,
                 busy_live_connects: HashSet::new(),
+                total_reconnections: 0,
             })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
@@ -648,6 +657,7 @@ impl SessionPool {
                 }],
                 cursor: 0,
                 busy_live_connects: HashSet::new(),
+                total_reconnections: 0,
             })),
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
@@ -698,6 +708,7 @@ impl SessionPool {
                 nodes,
                 cursor: 0,
                 busy_live_connects: HashSet::new(),
+                total_reconnections: 0,
             })),
             healthcheck_interval: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
             #[cfg(any(test, debug_assertions))]
@@ -1162,6 +1173,7 @@ impl SessionPool {
                 ],
                 cursor: 0,
                 busy_live_connects: HashSet::new(),
+                total_reconnections: 0,
             })),
             healthcheck_interval: Duration::from_secs(60),
             retry_delay: Duration::from_secs(1),
@@ -1201,6 +1213,7 @@ impl SessionPool {
                 }],
                 cursor: 0,
                 busy_live_connects: HashSet::new(),
+                total_reconnections: 0,
             })),
             healthcheck_interval: Duration::from_secs(60),
             retry_delay: Duration::from_secs(1),
@@ -1697,6 +1710,7 @@ impl SessionPool {
         node.open_until = None;
         node.reconnect_session = None;
         node.state = AccountState::Ready(Box::new(session));
+        state.total_reconnections += 1;
         tracing::info!(account = %name, "request-triggered recovery probe succeeded");
         Ok(())
     }
@@ -1737,6 +1751,7 @@ impl SessionPool {
         if let Some(session) = reconnect_session {
             match session.rebuild_transport_from_existing_lease().await {
                 Ok(rebuilt) => {
+                    self.inner.lock().await.total_reconnections += 1;
                     tracing::info!(account = %name, "live session transport rebuilt");
                     return Ok(rebuilt);
                 }

@@ -33,6 +33,8 @@ struct PoolSummary {
     half_open_nodes: usize,
     connecting_nodes: usize,
     configured_nodes: usize,
+    #[serde(default)]
+    total_reconnections: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,7 +177,7 @@ fn format_status(listen: &str, health: HealthResponse, stats: RuntimeSnapshot) -
         format!("management={listen}"),
         format!("status={}", health.status),
         format!(
-            "pool total={} selectable={} ready={} suspect={} open={} half_open={} connecting={} configured={}",
+            "pool total={} selectable={} ready={} suspect={} open={} half_open={} connecting={} configured={} reconnects={}",
             pool.total_nodes,
             pool.selectable_nodes,
             pool.ready_nodes,
@@ -183,7 +185,8 @@ fn format_status(listen: &str, health: HealthResponse, stats: RuntimeSnapshot) -
             pool.open_nodes,
             pool.half_open_nodes,
             pool.connecting_nodes,
-            pool.configured_nodes
+            pool.configured_nodes,
+            pool.total_reconnections,
         ),
         format_protocol("total", &stats.total),
         format_protocol("http", &stats.http),
