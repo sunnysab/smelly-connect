@@ -114,6 +114,23 @@ pub fn capture_http_connect_tunnel_log_for_test() -> Vec<String> {
 }
 
 #[cfg(any(test, debug_assertions))]
+pub fn capture_pool_recovery_log_for_test() -> Vec<String> {
+    capture_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, || {
+        tracing::warn!(
+            account = "acct-01",
+            reason = "forced timeout",
+            failure_threshold = 3,
+            "live session retired and queued for reconnect"
+        );
+        tracing::info!(
+            account = "acct-01",
+            reconnects = 4_u64,
+            "request-triggered recovery probe succeeded"
+        );
+    })
+}
+
+#[cfg(any(test, debug_assertions))]
 pub fn capture_socks5_request_log_for_test() -> Vec<String> {
     capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
         let _ = crate::proxy::socks5::proxy_socks5_for_test().await;

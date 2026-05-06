@@ -847,7 +847,8 @@ impl SessionPool {
                 open_node(node, error.clone());
                 tracing::warn!(
                     account = %account_name,
-                    error = %error,
+                    reason = %error,
+                    failure_threshold = node.failure_threshold,
                     "live session marked open after proxy failure"
                 );
             }
@@ -878,7 +879,8 @@ impl SessionPool {
                 });
                 tracing::warn!(
                     account = %account_name,
-                    error = %error,
+                    reason = %error,
+                    failure_threshold = node.failure_threshold,
                     "live session marked unhealthy after vpn probe failures"
                 );
             }
@@ -911,7 +913,8 @@ impl SessionPool {
                 });
                 tracing::warn!(
                     account = %account_name,
-                    error = %error,
+                    reason = %error,
+                    failure_threshold = node.failure_threshold,
                     "live session retired and queued for reconnect"
                 );
             }
@@ -1708,7 +1711,11 @@ impl SessionPool {
         node.reconnect_session = None;
         node.state = AccountState::Ready(Box::new(session));
         state.total_reconnections += 1;
-        tracing::info!(account = %name, "request-triggered recovery probe succeeded");
+        tracing::info!(
+            account = %name,
+            reconnects = state.total_reconnections,
+            "request-triggered recovery probe succeeded"
+        );
         Ok(())
     }
 
@@ -1748,8 +1755,16 @@ impl SessionPool {
         if let Some(session) = reconnect_session {
             match session.rebuild_transport_from_existing_lease().await {
                 Ok(rebuilt) => {
-                    self.inner.lock().await.total_reconnections += 1;
-                    tracing::info!(account = %name, "live session transport rebuilt");
+                    let reconnects = {
+                        let mut state = self.inner.lock().await;
+                        state.total_reconnections += 1;
+                        state.total_reconnections
+                    };
+                    tracing::info!(
+                        account = %name,
+                        reconnects,
+                        "live session transport rebuilt"
+                    );
                     return Ok(rebuilt);
                 }
                 Err(err) => {

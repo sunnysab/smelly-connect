@@ -167,6 +167,24 @@ fn http_connect_tunnel_logs_relay_completion_bytes() {
     );
 }
 
+#[test]
+fn pool_recovery_logs_include_reason_and_reconnect_count() {
+    let events = smelly_connect_cli::logging::capture_pool_recovery_log_for_test();
+    assert!(
+        events
+            .iter()
+            .any(|line| line.contains("live session retired and queued for reconnect"))
+    );
+    assert!(events.iter().any(|line| line.contains("reason=\"forced timeout\"")));
+    assert!(events.iter().any(|line| line.contains("failure_threshold=")));
+    assert!(events.iter().any(|line| line.contains("reconnects=")));
+    assert!(
+        events
+            .iter()
+            .any(|line| line.contains("request-triggered recovery probe succeeded"))
+    );
+}
+
 #[tokio::test]
 async fn socks5_connect_failure_marks_runtime_status_recovering() {
     let snapshot =
