@@ -165,7 +165,7 @@ while true; do
   if (( now - last_report >= 30 )); then
     total_reqs=$((req_id))
     ok_reqs=$(awk -F'\t' 'NR>1 && $5>=200 && $5<400 {n++} END{print n+0}' "$RESULTS_FILE")
-    fail_reqs=$(awk -F'\t' 'NR>1 && ($5<200 || $5>=400) && $5!="000" {n++} END{print n+0}' "$RESULTS_FILE")
+    fail_reqs=$(awk -F'\t' 'NR>1 && ($5<200 || $5>=400) {n++} END{print n+0}' "$RESULTS_FILE")
     timeout_reqs=$(awk -F'\t' 'NR>1 && $4!=0 {n++} END{print n+0}' "$RESULTS_FILE")
     log "  [${elapsed}s/${DURATION}s] reqs=$total_reqs ok=$ok_reqs fail=$fail_reqs timeout=$timeout_reqs in_flight=$in_flight"
     last_report=$now

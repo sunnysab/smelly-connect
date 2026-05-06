@@ -1,6 +1,8 @@
 use crate::cli::ProxyCommand;
 use crate::error::CliError;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::Notify;
 
 pub async fn run_proxy(
     config_path: impl AsRef<Path>,
@@ -30,31 +32,38 @@ pub async fn run_proxy_typed(
         "starting proxy service"
     );
 
+    let shutdown = Arc::new(Notify::new());
     let mut tasks = tokio::task::JoinSet::new();
     if config.proxy.http.enabled {
         let listen_http = config.proxy.http.listen.clone();
         let pool = pool.clone();
         let stats = stats.clone();
+        let shutdown = shutdown.clone();
         tasks.spawn(async move {
-            crate::proxy::http::serve_http(listen_http, pool, stats, upstream_tcp_connect_timeout)
-                .await
-                .map_err(|err| format!("http listener failed: {err}"))
+            let result = crate::proxy::http::serve_http(
+                listen_http, pool, stats, upstream_tcp_connect_timeout,
+            )
+            .await;
+            shutdown.notify_one();
+            result.map_err(|err| format!("http listener failed: {err}"))
         });
     }
     if config.proxy.socks5.enabled {
         let listen_socks5 = config.proxy.socks5.listen.clone();
         let pool = pool.clone();
         let stats = stats.clone();
+        let shutdown = shutdown.clone();
         tasks.spawn(async move {
-            crate::proxy::socks5::serve_socks5(
+            let result = crate::proxy::socks5::serve_socks5(
                 listen_socks5,
                 pool,
                 stats,
                 upstream_tcp_connect_timeout,
                 udp_associate_idle_timeout,
             )
-            .await
-            .map_err(|err| format!("socks5 listener failed: {err}"))
+            .await;
+            shutdown.notify_one();
+            result.map_err(|err| format!("socks5 listener failed: {err}"))
         });
     }
     #[cfg(feature = "management-api")]
@@ -81,11 +90,15 @@ pub async fn run_proxy_typed(
         return Err(CliError::Command("no proxy listener enabled".to_string()));
     }
 
+    // Wait for first listener to finish
     let Some(result) = tasks.join_next().await else {
         return Err(CliError::Command(
             "no proxy listener remained running".to_string(),
         ));
     };
+
+    // Notify other listeners to shut down too
+    shutdown.notify_waiters();
 
     match result {
         Ok(Ok(())) => Err(CliError::Command(
