@@ -36,7 +36,7 @@ use smelly_connect::proxy::http::{
 
 use super::common::{
     LiveRouteBackend, UpstreamConnectError, connect_live_upstream_with_timeout,
-    connect_with_timeout, should_report_live_session_failure,
+    connect_with_timeout,
 };
 
 type ProxyBody = BoxBody<Bytes, io::Error>;
@@ -2133,17 +2133,13 @@ async fn handle_live_session_failure(
     session: &smelly_connect::Session,
     err: &UpstreamConnectError,
 ) {
-    match err {
-        UpstreamConnectError::TimedOut => {}
-        UpstreamConnectError::Failed if should_report_live_session_failure(err) => {
-            pool.report_live_session_unhealthy_if_probe_fails(
-                account_name,
-                session,
-                format!("{err:?}"),
-            )
-            .await;
-        }
-        UpstreamConnectError::RouteRejected | UpstreamConnectError::Failed => {}
+    if matches!(err, UpstreamConnectError::Failed) {
+        pool.report_live_session_unhealthy_if_probe_fails(
+            account_name,
+            session,
+            format!("{err:?}"),
+        )
+        .await;
     }
 }
 

@@ -15,10 +15,6 @@ pub enum LiveRouteBackend {
     Direct,
 }
 
-pub fn should_report_live_session_failure(err: &UpstreamConnectError) -> bool {
-    !matches!(err, UpstreamConnectError::RouteRejected)
-}
-
 pub async fn connect_with_timeout<T, E, Fut>(
     timeout: Duration,
     fut: Fut,

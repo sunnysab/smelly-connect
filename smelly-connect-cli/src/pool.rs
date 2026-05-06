@@ -27,6 +27,7 @@ use state::{build_pool_summary, open_node, state_label};
 pub struct PooledSession {
     account_name: String,
     session: Option<Session>,
+    // Held solely for its Drop side-effect: dropping this stops the ICMP keepalive task.
     _keepalive: Option<Arc<std::sync::Mutex<smelly_connect::KeepaliveHandle>>>,
 }
 
