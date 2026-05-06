@@ -20,7 +20,7 @@ use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Notify, mpsc};
 use tokio::sync::mpsc::error::TrySendError;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::TargetAddr;
 use crate::transport::datagram::AsyncDatagramSocket;
@@ -200,7 +200,7 @@ impl SmolStack {
                 .get_mut::<tcp::Socket<'static>>(handle)
                 .connect(cx, (remote_ip, addr.port()), local_port)
                 .map_err(|err| io::Error::other(err.to_string()))?;
-            info!(
+            debug!(
                 ?handle,
                 local_port,
                 remote_addr = %addr,
@@ -447,7 +447,7 @@ impl SmolStackInner {
         let mut state = acquire_lock(&self.state);
         if state.active_handles.remove(&handle) {
             let _ = state.sockets.remove(handle);
-            info!(
+            debug!(
                 ?handle,
                 active_handles = state.active_handles.len(),
                 pending_outbound = state.pending_outbound.len(),
