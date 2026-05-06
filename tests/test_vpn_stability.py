@@ -73,9 +73,22 @@ def test_settings_default_timeout_is_30_seconds():
 
     assert first.urls == ("https://xg.sit.edu.cn/",)
     assert first.keepalive_url == "https://jwxt.sit.edu.cn/"
+    assert first.fresh_tcp_per_request is False
     assert first.connect_timeout == 30.0
     assert first.max_time == 30.0
     assert first.out_dir != second.out_dir
+
+
+def test_settings_supports_fresh_tcp_per_request_mode():
+    module = load_module()
+
+    settings = module.load_settings(
+        [],
+        {"FRESH_TCP_PER_REQUEST": "1"},
+        now=1_700_000_000.0,
+    )
+
+    assert settings.fresh_tcp_per_request is True
 
 
 def test_run_load_test_writes_summary_and_results(tmp_path):
@@ -107,6 +120,31 @@ def test_run_load_test_writes_summary_and_results(tmp_path):
     assert "connect_timeout=30.0s" in summary_text
     assert "max_time=30.0s" in summary_text
     assert "\t200\t" in results_text
+
+
+def test_run_load_test_supports_fresh_tcp_per_request_mode(tmp_path):
+    module = load_module()
+
+    with LocalHttpServer(status_code=200) as server:
+        settings = module.load_settings(
+            [server.url],
+            {
+                "PROXY_URL": "",
+                "KEEPALIVE_INT": "0",
+                "DURATION": "0.20",
+                "CONCURRENCY": "2",
+                "RAMP_UP": "0",
+                "FRESH_TCP_PER_REQUEST": "1",
+                "OUT_DIR": str(tmp_path / "fresh"),
+            },
+            now=1_700_000_000.0,
+        )
+
+        result = asyncio.run(module.run_load_test(settings))
+
+    assert result.total_requests > 0
+    assert result.ok_requests == result.total_requests
+    assert result.fail_requests == 0
 
 
 def test_run_load_test_records_timeout_failures(tmp_path):

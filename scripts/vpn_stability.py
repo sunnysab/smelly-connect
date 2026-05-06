@@ -33,6 +33,7 @@ class Settings:
     out_dir: Path
     insecure: bool
     head_request: bool
+    fresh_tcp_per_request: bool
     keepalive_url: str
     keepalive_interval: float
     report_interval: float
@@ -149,6 +150,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--report-interval", type=float)
     return p
 
+    p.add_argument("--fresh-tcp-per-request", action="store_true")
 
 def load_settings(
     argv: list[str] | tuple[str, ...],
@@ -199,6 +201,10 @@ def load_settings(
             args.keepalive_int if args.keepalive_int is not None else values.get("KEEPALIVE_INT", 30)
         ),
         report_interval=float(
+        fresh_tcp_per_request=env_bool(
+            "1" if args.fresh_tcp_per_request else values.get("FRESH_TCP_PER_REQUEST"),
+            default=False,
+        ),
             args.report_interval
             if args.report_interval is not None
             else values.get("REPORT_INTERVAL", DEFAULT_REPORT_INTERVAL)
@@ -277,6 +283,25 @@ async def keepalive_loop(
     settings: Settings,
     stop_event: asyncio.Event,
     health_path: Path,
+async def execute_request_with_fresh_client(
+    settings: Settings,
+    request_id: int,
+    url: str,
+    timeout: httpx.Timeout,
+    limits: httpx.Limits,
+) -> RequestResult:
+    async with httpx.AsyncClient(
+        proxy=settings.proxy_url,
+        verify=not settings.insecure,
+        timeout=timeout,
+        limits=limits,
+        trust_env=False,
+        follow_redirects=False,
+        headers={"Connection": "close"},
+    ) as client:
+        return await execute_request(client, settings, request_id, url)
+
+
     stats: Stats,
 ) -> None:
     while not stop_event.is_set():
@@ -410,6 +435,10 @@ async def run_load_test(settings: Settings) -> RunResult:
     pending: set[asyncio.Task[RequestResult]] = set()
     started = time.perf_counter()
     last_report = started
+    log(
+        "request_mode="
+        + ("fresh_tcp_per_request" if settings.fresh_tcp_per_request else "shared_client")
+    )
     next_request_id = 0
 
     results_file = results_path.open("a", encoding="utf-8", buffering=1)
@@ -431,7 +460,17 @@ async def run_load_test(settings: Settings) -> RunResult:
             while len(pending) < want:
                 next_request_id += 1
                 url = settings.urls[(next_request_id - 1) % len(settings.urls)]
-                pending.add(asyncio.create_task(execute_request(client, settings, next_request_id, url)))
+                if settings.fresh_tcp_per_request:
+                    task = execute_request_with_fresh_client(
+                        settings,
+                        next_request_id,
+                        url,
+                        timeout,
+                        limits,
+                    )
+                else:
+                    task = execute_request(client, settings, next_request_id, url)
+                pending.add(asyncio.create_task(task))
 
             if pending:
                 done, pending = await asyncio.wait(
