@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use smelly_connect::domain::route_policy::RoutePolicy;
+use smelly_connect::session::normalize_override_domain;
 use smelly_connect::{
     CaptchaError, CaptchaHandler, EasyConnectClient, LocalRouteOverrides, Session,
 };
-use smelly_connect::session::normalize_override_domain;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
@@ -19,8 +19,9 @@ mod selection;
 mod state;
 
 use selection::next_selectable_index;
+use state::disable_node;
 #[cfg(any(test, debug_assertions))]
-use state::{disable_node, next_backoff};
+use state::next_backoff;
 use state::{build_pool_summary, open_node, state_label};
 
 #[derive(Clone)]
@@ -118,9 +119,12 @@ const DEFAULT_VPN_HEALTH_PROBE_ATTEMPTS: usize = 3;
 const DEFAULT_VPN_HEALTH_PROBE_DELAY: Duration = Duration::from_millis(200);
 const RECOVERY_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-#[derive(Debug, Clone)]
-pub struct PoolError {
-    message: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PoolError {
+    Message(String),
+    ClientBuildFailed(smelly_connect::Error),
+    SessionConnectFailed(smelly_connect::Error),
+    SessionConnectTimeout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,15 +223,37 @@ pub struct RoutesSnapshot {
 
 impl PoolError {
     fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
+        Self::Message(message.into())
+    }
+
+    fn client_build_failed(error: smelly_connect::Error) -> Self {
+        Self::ClientBuildFailed(error)
+    }
+
+    fn session_connect_failed(error: smelly_connect::Error) -> Self {
+        Self::SessionConnectFailed(error)
+    }
+
+    pub fn underlying_error(&self) -> Option<&smelly_connect::Error> {
+        match self {
+            Self::ClientBuildFailed(error) | Self::SessionConnectFailed(error) => Some(error),
+            Self::Message(_) | Self::SessionConnectTimeout => None,
         }
     }
 }
 
 impl Display for PoolError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+        match self {
+            Self::Message(message) => f.write_str(message),
+            Self::ClientBuildFailed(error) => {
+                write!(f, "pool client build failed: {error:?}")
+            }
+            Self::SessionConnectFailed(error) => {
+                write!(f, "pool session connect failed: {error:?}")
+            }
+            Self::SessionConnectTimeout => f.write_str("session connect timeout"),
+        }
     }
 }
 
@@ -332,7 +358,7 @@ impl SessionPool {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(feature = "test-utils")]
     pub async fn from_named_ready_live_accounts<const N: usize>(
         entries: [(&str, &str, std::net::Ipv4Addr); N],
     ) -> Self {
@@ -1867,12 +1893,12 @@ async fn connect_account(
             ))
         }))
         .build()
-        .map_err(|err| PoolError::new(format!("{err:?}")))?;
+        .map_err(PoolError::client_build_failed)?;
 
     let session = tokio::time::timeout(timeout, client.connect())
         .await
-        .map_err(|_| PoolError::new("session connect timeout"))?
-        .map_err(|err| PoolError::new(format!("{err:?}")))?;
+        .map_err(|_| PoolError::SessionConnectTimeout)?
+        .map_err(PoolError::session_connect_failed)?;
     let session = apply_pool_routing(
         session,
         local_route_overrides,
@@ -1888,10 +1914,25 @@ fn apply_pool_routing(
     route_policy: RoutePolicy,
     allow_all_routes: bool,
 ) -> Session {
+    let merged_local_route_overrides =
+        merge_local_route_overrides(session.local_route_overrides(), local_route_overrides);
     session
-        .with_local_route_overrides(local_route_overrides.clone())
+        .with_local_route_overrides(merged_local_route_overrides)
         .with_route_policy(route_policy)
         .with_allow_all_routes(allow_all_routes)
+}
+
+fn merge_local_route_overrides(
+    session_local_route_overrides: &LocalRouteOverrides,
+    pool_local_route_overrides: &LocalRouteOverrides,
+) -> LocalRouteOverrides {
+    let mut domain_rules = session_local_route_overrides.domain_rules().clone();
+    domain_rules.extend(pool_local_route_overrides.domain_rules().clone());
+
+    let mut ip_rules = session_local_route_overrides.ip_rules().to_vec();
+    ip_rules.extend_from_slice(pool_local_route_overrides.ip_rules());
+
+    LocalRouteOverrides::new(domain_rules, ip_rules)
 }
 
 fn route_policy_from_default_action(default_action: RoutingDefaultAction) -> RoutePolicy {
@@ -2045,3 +2086,18 @@ fn build_local_route_overrides(
     Ok(LocalRouteOverrides::new(domain_rules, ip_rules))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::PoolError;
+
+    #[test]
+    fn pool_error_preserves_typed_smelly_connect_error() {
+        let source = smelly_connect::Error::Transport(
+            smelly_connect::error::TransportError::ConnectTimedOut,
+        );
+        let err = PoolError::session_connect_failed(source.clone());
+
+        assert!(matches!(err, PoolError::SessionConnectFailed(_)));
+        assert_eq!(err.underlying_error(), Some(&source));
+    }
+}
