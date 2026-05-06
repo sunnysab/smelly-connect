@@ -14,7 +14,7 @@ impl Default for SessionRuntime {
         Self {
             legacy_tunnel: Mutex::new(None),
             keepalive: Mutex::new(None),
-            connect_gate: std::sync::Arc::new(Semaphore::new(1)),
+            connect_gate: std::sync::Arc::new(Semaphore::new(16)),
         }
     }
 }
