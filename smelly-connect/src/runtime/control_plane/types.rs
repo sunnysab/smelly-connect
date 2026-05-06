@@ -9,8 +9,6 @@ pub struct ControlPlaneState {
     pub legacy_cipher_hint: Option<String>,
     pub resources: ResourceSet,
     pub token: Option<DerivedToken>,
-    pub sslctx_key: Option<[u8; 16]>,
-    pub conf_metadata: Option<crate::kernel::control::ConfMetadata>,
 }
 
 #[derive(Clone)]

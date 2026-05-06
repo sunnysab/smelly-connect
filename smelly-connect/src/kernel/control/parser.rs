@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use roxmltree::Document;
 
-use super::messages::{ConfMetadata, LoginAuthChallenge, ResourceDocument};
+use super::messages::{LoginAuthChallenge, ResourceDocument};
 use crate::RouteProtocol;
 use crate::resource::{DomainRule, IpRule, ResourceSet};
 
@@ -89,12 +89,6 @@ pub fn parse_resource_document(body: &str) -> Result<ResourceDocument, roxmltree
         }
     }
 
-    if let Some(other) = doc.descendants().find(|n| n.has_tag_name("Other")) {
-        if let Some(sslctx) = other.attribute("sslctx") {
-            resources.sslctx = Some(sslctx.to_string());
-        }
-    }
-
     if let Some(dns) = doc.descendants().find(|n| n.has_tag_name("Dns")) {
         if let Some(remote) = dns.attribute("dnsserver") {
             resources.remote_dns_server = Some(remote.to_string());
@@ -115,28 +109,20 @@ pub fn parse_resource_document(body: &str) -> Result<ResourceDocument, roxmltree
     Ok(resources)
 }
 
-/// Parse metadata from a `/por/conf.csp` response.
-pub fn parse_conf_metadata(body: &str) -> Result<ConfMetadata, roxmltree::Error> {
-    let doc = Document::parse(body)?;
-    let mut meta = ConfMetadata::default();
-
-    if let Some(other) = doc.descendants().find(|n| n.has_tag_name("Other")) {
-        meta.login_name = other.attribute("login_name").map(ToOwned::to_owned);
-        meta.is_relogin = other.attribute("isRelogin").map(ToOwned::to_owned);
-    }
-
-    if let Some(service) = doc.descendants().find(|n| n.has_tag_name("Service")) {
-        meta.svpn_id = service.attribute("SvpnID").map(ToOwned::to_owned);
-    }
-
-    if let Some(mline) = doc.descendants().find(|n| n.has_tag_name("Mline")) {
-        meta.mline_enable = mline.attribute("enable") == Some("1");
-        if let Some(list) = mline.attribute("list") {
-            meta.mline_list = list.split(';').map(ToOwned::to_owned).collect();
+fn normalize_domain(value: &str) -> String {
+    let trimmed = value
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let host = trimmed.split('/').next().unwrap_or_default();
+    let host = host.split(['?', '#']).next().unwrap_or_default().trim();
+    let host = match host.rsplit_once(':') {
+        Some((head, tail)) if !head.is_empty() && tail.chars().all(|ch| ch.is_ascii_digit()) => {
+            head
         }
-    }
-
-    Ok(meta)
+        _ => host,
+    };
+    host.trim_matches('*').trim().to_string()
 }
 
 fn extract_tag<'a>(body: &'a str, tag: &str) -> Option<&'a str> {
@@ -168,20 +154,4 @@ fn parse_ip_rule(value: &str) -> Option<(IpAddr, IpAddr)> {
     let start = parts.next()?.parse::<Ipv4Addr>().ok()?;
     let end = parts.next()?.parse::<Ipv4Addr>().ok()?;
     Some((IpAddr::V4(start), IpAddr::V4(end)))
-}
-
-fn normalize_domain(value: &str) -> String {
-    let trimmed = value
-        .trim()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
-    let host = trimmed.split('/').next().unwrap_or_default();
-    let host = host.split(['?', '#']).next().unwrap_or_default().trim();
-    let host = match host.rsplit_once(':') {
-        Some((head, tail)) if !head.is_empty() && tail.chars().all(|ch| ch.is_ascii_digit()) => {
-            head
-        }
-        _ => host,
-    };
-    host.trim_matches('*').trim().to_string()
 }
