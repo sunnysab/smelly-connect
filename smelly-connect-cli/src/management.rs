@@ -8,6 +8,7 @@ use serde::Serialize;
 #[cfg(any(test, debug_assertions))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 #[cfg(any(test, debug_assertions))]
 use tokio::net::TcpStream;
 
@@ -36,6 +37,7 @@ pub async fn serve_management(
     listen: String,
     pool: SessionPool,
     runtime_stats: RuntimeStats,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
     let listener = TcpListener::bind(listen)
         .await
@@ -43,6 +45,12 @@ pub async fn serve_management(
     let local_addr = listener.local_addr().map_err(|err| err.to_string())?;
     tracing::info!(listen = %local_addr, "management api listening");
     axum::serve(listener, router(pool, runtime_stats))
+        .with_graceful_shutdown(async move {
+            if *shutdown.borrow() {
+                return;
+            }
+            let _ = shutdown.changed().await;
+        })
         .await
         .map_err(|err| err.to_string())
 }

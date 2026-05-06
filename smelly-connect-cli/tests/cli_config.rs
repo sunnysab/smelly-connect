@@ -20,6 +20,10 @@ fn parses_sample_config() {
         std::time::Duration::from_secs(3)
     );
     assert_eq!(
+        cfg.shutdown_drain_timeout(),
+        std::time::Duration::from_secs(12)
+    );
+    assert_eq!(
         cfg.udp_associate_idle_timeout(),
         Some(std::time::Duration::from_secs(90))
     );
@@ -137,6 +141,10 @@ fn legacy_connect_timeout_still_applies_when_split_fields_are_absent() {
     assert_eq!(
         cfg.upstream_tcp_connect_timeout(),
         std::time::Duration::from_secs(20)
+    );
+    assert_eq!(
+        cfg.shutdown_drain_timeout(),
+        std::time::Duration::from_secs(30)
     );
     assert_eq!(cfg.udp_associate_idle_timeout(), None);
 }

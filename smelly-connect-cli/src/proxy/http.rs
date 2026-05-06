@@ -23,7 +23,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirec
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::task::JoinSet;
 
 use crate::pool::SessionPool;
 #[cfg(any(test, debug_assertions))]
@@ -825,8 +826,7 @@ pub async fn proxy_connect_for_test() -> Result<ConnectProxyTestResult, String> 
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_direct_forward_for_test() -> Result<HttpBodyTestResult, String> {
     let upstream = spawn_http_upstream().await;
-    let session =
-        unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+    let session = unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
     let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
     let addr = spawn_single_live_client_proxy(pool, DEFAULT_CONNECT_TIMEOUT).await?;
 
@@ -861,8 +861,7 @@ pub async fn proxy_http_direct_forward_for_test() -> Result<HttpBodyTestResult, 
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_connect_direct_for_test() -> Result<ConnectProxyTestResult, String> {
     let upstream = spawn_echo_upstream().await;
-    let session =
-        unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+    let session = unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
     let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
     let addr = spawn_single_live_client_proxy(pool, DEFAULT_CONNECT_TIMEOUT).await?;
 
@@ -915,8 +914,7 @@ pub async fn proxy_http_direct_failure_does_not_open_for_test()
     let blocked_port = blocker.local_addr().map_err(|err| err.to_string())?.port();
     drop(blocker);
 
-    let session =
-        unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+    let session = unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
     let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
     let addr = spawn_single_live_client_proxy(pool.clone(), DEFAULT_CONNECT_TIMEOUT).await?;
 
@@ -1146,8 +1144,7 @@ pub async fn proxy_http_live_connect_failure_does_not_wait_for_probe_for_test()
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_http_route_rejection_does_not_open_for_test()
 -> Result<LiveFailureRecoveryTestResult, String> {
-    let session =
-        unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+    let session = unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
     let pool = SessionPool::from_live_sessions_with_route_policy_for_test(
         vec![("acct-01", session)],
         smelly_connect::domain::route_policy::RoutePolicy::block_non_resource_targets(),
@@ -1312,12 +1309,24 @@ pub async fn serve_http(
     stats: RuntimeStats,
     connect_timeout: Duration,
 ) -> Result<(), String> {
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    serve_http_with_shutdown(listen, pool, stats, connect_timeout, shutdown_rx).await
+}
+
+pub async fn serve_http_with_shutdown(
+    listen: String,
+    pool: SessionPool,
+    stats: RuntimeStats,
+    connect_timeout: Duration,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), String> {
     serve_http_with_limit(
         listen,
         pool,
         stats,
         connect_timeout,
         DEFAULT_MAX_IN_FLIGHT_CONNECTIONS,
+        shutdown,
     )
     .await
 }
@@ -1328,43 +1337,78 @@ async fn serve_http_with_limit(
     stats: RuntimeStats,
     connect_timeout: Duration,
     max_in_flight_connections: usize,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
     let listener = TcpListener::bind(listen)
         .await
         .map_err(|err| err.to_string())?;
     let local_addr = listener.local_addr().map_err(|err| err.to_string())?;
     let limiter = Arc::new(Semaphore::new(max_in_flight_connections));
+    let mut clients = JoinSet::new();
+    let mut shutting_down = *shutdown.borrow();
     tracing::info!(
         protocol = tracing::field::display("http"),
         listen = %local_addr,
         "http proxy listening"
     );
     loop {
-        let (stream, _) = listener.accept().await.map_err(|err| err.to_string())?;
-        let permit = limiter.clone().try_acquire_owned();
-        let pool = pool.clone();
-        let stats = stats.clone();
-        match permit {
-            Ok(permit) => {
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    if let Err(err) = handle_live_client(stream, pool, stats, connect_timeout).await
-                    {
-                        tracing::warn!(
-                            protocol = tracing::field::display("http"),
-                            error = %err,
-                            "live proxy request failed"
-                        );
-                    }
-                });
+        if shutting_down && clients.is_empty() {
+            break;
+        }
+
+        tokio::select! {
+            changed = shutdown.changed(), if !shutting_down => {
+                match changed {
+                    Ok(()) | Err(_) => shutting_down = true,
+                }
             }
-            Err(_) => {
-                tokio::spawn(async move {
-                    let _ = reject_over_capacity_http(stream).await;
-                });
+            result = clients.join_next(), if !clients.is_empty() => {
+                if let Some(Err(err)) = result {
+                    tracing::warn!(
+                        protocol = tracing::field::display("http"),
+                        error = %err,
+                        "http connection task failed"
+                    );
+                }
+            }
+            accepted = listener.accept(), if !shutting_down => {
+                let (stream, _) = accepted.map_err(|err| err.to_string())?;
+                let permit = limiter.clone().try_acquire_owned();
+                let pool = pool.clone();
+                let stats = stats.clone();
+                match permit {
+                    Ok(permit) => {
+                        clients.spawn(async move {
+                            let _permit = permit;
+                            if let Err(err) = handle_live_client(stream, pool, stats, connect_timeout).await
+                            {
+                                tracing::warn!(
+                                    protocol = tracing::field::display("http"),
+                                    error = %err,
+                                    "live proxy request failed"
+                                );
+                            }
+                        });
+                    }
+                    Err(_) => {
+                        clients.spawn(async move {
+                            let _ = reject_over_capacity_http(stream).await;
+                        });
+                    }
+                }
             }
         }
     }
+    while let Some(result) = clients.join_next().await {
+        if let Err(err) = result {
+            tracing::warn!(
+                protocol = tracing::field::display("http"),
+                error = %err,
+                "http connection task failed during shutdown"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -1850,13 +1894,7 @@ where
         Some(upstream) => Ok(upstream),
         None => {
             let connect_started = Instant::now();
-            log_upstream_connect_start(
-                request_id,
-                "http",
-                &account_name,
-                &target,
-                connect_timeout,
-            );
+            log_upstream_connect_start(request_id, "http", &account_name, &target, connect_timeout);
             match connect_with_timeout(connect_timeout, connector(account_name, host.clone(), port))
                 .await
             {
@@ -1938,8 +1976,14 @@ async fn handle_live_request(
             &target,
             connect_timeout,
         );
-        let (upstream, _route_backend) =
-            match connect_live_upstream_with_timeout(connect_timeout, &session, &host, port).await {
+        let (upstream, _route_backend) = match connect_live_upstream_with_timeout(
+            connect_timeout,
+            &session,
+            &host,
+            port,
+        )
+        .await
+        {
             Ok((upstream, route_backend)) => {
                 pool.finish_live_connect_attempt(&account_name).await;
                 log_upstream_connect_success(request_id, "connect", &target, connect_started);
@@ -2011,13 +2055,7 @@ async fn handle_live_request(
         Some(upstream) => Ok((upstream, LiveRouteBackend::Direct)),
         None => {
             let connect_started = Instant::now();
-            log_upstream_connect_start(
-                request_id,
-                "http",
-                &account_name,
-                &target,
-                connect_timeout,
-            );
+            log_upstream_connect_start(request_id, "http", &account_name, &target, connect_timeout);
             match connect_live_upstream_with_timeout(connect_timeout, &session, &host, port).await {
                 Ok((upstream, route_backend)) => {
                     pool.finish_live_connect_attempt(&account_name).await;
@@ -2655,13 +2693,20 @@ async fn connect_live_upstream_with_timeout(
     session: &smelly_connect::Session,
     host: &str,
     port: u16,
-) -> Result<(smelly_connect::transport::VpnStream, LiveRouteBackend), (UpstreamConnectError, LiveRouteBackend)>
-{
+) -> Result<
+    (smelly_connect::transport::VpnStream, LiveRouteBackend),
+    (UpstreamConnectError, LiveRouteBackend),
+> {
     let route = match session.plan_tcp_connect((host, port)).await {
         Ok(route) => route,
         Err(smelly_connect::Error::RouteDecision(
             smelly_connect::error::RouteDecisionError::TargetNotAllowed,
-        )) => return Err((UpstreamConnectError::RouteRejected, LiveRouteBackend::Direct)),
+        )) => {
+            return Err((
+                UpstreamConnectError::RouteRejected,
+                LiveRouteBackend::Direct,
+            ));
+        }
         Err(smelly_connect::Error::Transport(
             smelly_connect::error::TransportError::ConnectTimedOut,
         )) => return Err((UpstreamConnectError::TimedOut, LiveRouteBackend::Direct)),

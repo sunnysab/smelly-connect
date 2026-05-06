@@ -18,7 +18,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 #[cfg(any(test, debug_assertions))]
 use tokio::sync::Mutex;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
+use tokio::task::JoinSet;
 #[cfg(any(test, debug_assertions))]
 use tokio::time::Instant;
 
@@ -262,8 +263,7 @@ pub async fn proxy_socks5_udp_associate_for_test() -> Result<Socks5ProxyTestResu
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_direct_connect_for_test() -> Result<Socks5ProxyTestResult, String> {
     let upstream = spawn_echo_upstream().await;
-    let session =
-        unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+    let session = unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
     let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
     let addr = spawn_live_test_socks5(pool, RuntimeStats::default(), DEFAULT_CONNECT_TIMEOUT, None)
         .await?;
@@ -311,11 +311,9 @@ pub async fn proxy_socks5_direct_connect_for_test() -> Result<Socks5ProxyTestRes
 }
 
 #[cfg(any(test, debug_assertions))]
-pub async fn proxy_socks5_direct_udp_associate_for_test()
--> Result<Socks5ProxyTestResult, String> {
+pub async fn proxy_socks5_direct_udp_associate_for_test() -> Result<Socks5ProxyTestResult, String> {
     let upstream = spawn_udp_echo_upstream().await;
-    let session =
-        unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+    let session = unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
     let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
     let addr = spawn_live_test_socks5(pool, RuntimeStats::default(), DEFAULT_CONNECT_TIMEOUT, None)
         .await?;
@@ -699,6 +697,26 @@ pub async fn serve_socks5(
     connect_timeout: Duration,
     udp_associate_idle_timeout: Option<Duration>,
 ) -> Result<(), String> {
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    serve_socks5_with_shutdown(
+        listen,
+        pool,
+        stats,
+        connect_timeout,
+        udp_associate_idle_timeout,
+        shutdown_rx,
+    )
+    .await
+}
+
+pub async fn serve_socks5_with_shutdown(
+    listen: String,
+    pool: SessionPool,
+    stats: RuntimeStats,
+    connect_timeout: Duration,
+    udp_associate_idle_timeout: Option<Duration>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), String> {
     serve_socks5_with_limit(
         listen,
         pool,
@@ -706,6 +724,7 @@ pub async fn serve_socks5(
         connect_timeout,
         udp_associate_idle_timeout,
         DEFAULT_MAX_IN_FLIGHT_CONNECTIONS,
+        shutdown,
     )
     .await
 }
@@ -717,50 +736,85 @@ async fn serve_socks5_with_limit(
     connect_timeout: Duration,
     udp_associate_idle_timeout: Option<Duration>,
     max_in_flight_connections: usize,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
     let listener = TcpListener::bind(listen)
         .await
         .map_err(|err| err.to_string())?;
     let local_addr = listener.local_addr().map_err(|err| err.to_string())?;
     let limiter = Arc::new(Semaphore::new(max_in_flight_connections));
+    let mut clients = JoinSet::new();
+    let mut shutting_down = *shutdown.borrow();
     tracing::info!(
         protocol = tracing::field::display("socks5"),
         listen = %local_addr,
         "socks5 proxy listening"
     );
     loop {
-        let (stream, _) = listener.accept().await.map_err(|err| err.to_string())?;
-        let permit = limiter.clone().try_acquire_owned();
-        let pool = pool.clone();
-        let stats = stats.clone();
-        match permit {
-            Ok(permit) => {
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    if let Err(err) = handle_live_client(
-                        stream,
-                        pool,
-                        stats,
-                        connect_timeout,
-                        udp_associate_idle_timeout,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            protocol = tracing::field::display("socks5"),
-                            error = %err,
-                            "live proxy request failed"
-                        );
-                    }
-                });
+        if shutting_down && clients.is_empty() {
+            break;
+        }
+
+        tokio::select! {
+            changed = shutdown.changed(), if !shutting_down => {
+                match changed {
+                    Ok(()) | Err(_) => shutting_down = true,
+                }
             }
-            Err(_) => {
-                tokio::spawn(async move {
-                    let _ = reject_over_capacity_socks5(stream).await;
-                });
+            result = clients.join_next(), if !clients.is_empty() => {
+                if let Some(Err(err)) = result {
+                    tracing::warn!(
+                        protocol = tracing::field::display("socks5"),
+                        error = %err,
+                        "socks5 connection task failed"
+                    );
+                }
+            }
+            accepted = listener.accept(), if !shutting_down => {
+                let (stream, _) = accepted.map_err(|err| err.to_string())?;
+                let permit = limiter.clone().try_acquire_owned();
+                let pool = pool.clone();
+                let stats = stats.clone();
+                match permit {
+                    Ok(permit) => {
+                        clients.spawn(async move {
+                            let _permit = permit;
+                            if let Err(err) = handle_live_client(
+                                stream,
+                                pool,
+                                stats,
+                                connect_timeout,
+                                udp_associate_idle_timeout,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    protocol = tracing::field::display("socks5"),
+                                    error = %err,
+                                    "live proxy request failed"
+                                );
+                            }
+                        });
+                    }
+                    Err(_) => {
+                        clients.spawn(async move {
+                            let _ = reject_over_capacity_socks5(stream).await;
+                        });
+                    }
+                }
             }
         }
     }
+    while let Some(result) = clients.join_next().await {
+        if let Err(err) = result {
+            tracing::warn!(
+                protocol = tracing::field::display("socks5"),
+                error = %err,
+                "socks5 connection task failed during shutdown"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -843,8 +897,7 @@ pub async fn proxy_socks5_allow_all_failure_does_not_open_for_test()
 #[cfg(any(test, debug_assertions))]
 pub async fn proxy_socks5_route_rejection_does_not_open_for_test()
 -> Result<Socks5LiveFailureRecoveryTestResult, String> {
-    let session =
-        unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+    let session = unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
     let pool = SessionPool::from_live_sessions_with_route_policy_for_test(
         vec![("acct-01", session)],
         smelly_connect::domain::route_policy::RoutePolicy::block_non_resource_targets(),
@@ -1281,35 +1334,36 @@ async fn handle_live_client(
                 match connect_live_upstream_with_timeout(connect_timeout, &session, &host, port)
                     .await
                 {
-                Ok((upstream, _route_backend)) => {
-                    pool.finish_live_connect_attempt(&account_name).await;
-                    upstream
-                }
-                Err((err, route_backend)) => {
-                    pool.finish_live_connect_attempt(&account_name).await;
-                    if !matches!(err, UpstreamConnectError::RouteRejected) {
-                        stats.record_connect_failure();
+                    Ok((upstream, _route_backend)) => {
+                        pool.finish_live_connect_attempt(&account_name).await;
+                        upstream
                     }
-                    if matches!(route_backend, LiveRouteBackend::Vpn)
-                        && !matches!(
-                            err,
-                            UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
-                        )
-                    {
-                        pool.report_live_session_unhealthy_if_probe_fails(
-                            &account_name,
-                            &session,
-                            format!("{err:?}"),
-                        )
-                        .await;
+                    Err((err, route_backend)) => {
+                        pool.finish_live_connect_attempt(&account_name).await;
+                        if !matches!(err, UpstreamConnectError::RouteRejected) {
+                            stats.record_connect_failure();
+                        }
+                        if matches!(route_backend, LiveRouteBackend::Vpn)
+                            && !matches!(
+                                err,
+                                UpstreamConnectError::RouteRejected
+                                    | UpstreamConnectError::TimedOut
+                            )
+                        {
+                            pool.report_live_session_unhealthy_if_probe_fails(
+                                &account_name,
+                                &session,
+                                format!("{err:?}"),
+                            )
+                            .await;
+                        }
+                        proto
+                            .reply_error(&map_socks5_reply_error(&err))
+                            .await
+                            .map_err(|reply_err| reply_err.to_string())?;
+                        return Ok(());
                     }
-                    proto
-                        .reply_error(&map_socks5_reply_error(&err))
-                        .await
-                        .map_err(|reply_err| reply_err.to_string())?;
-                    return Ok(());
-                }
-            };
+                };
             stats.record_connect_success();
             let connection = stats.open_connection(ProxyProtocol::Socks5);
             let mut client = proto
@@ -1525,13 +1579,20 @@ async fn connect_live_upstream_with_timeout(
     session: &smelly_connect::Session,
     host: &str,
     port: u16,
-) -> Result<(smelly_connect::transport::VpnStream, LiveRouteBackend), (UpstreamConnectError, LiveRouteBackend)>
-{
+) -> Result<
+    (smelly_connect::transport::VpnStream, LiveRouteBackend),
+    (UpstreamConnectError, LiveRouteBackend),
+> {
     let route = match session.plan_tcp_connect((host, port)).await {
         Ok(route) => route,
         Err(smelly_connect::Error::RouteDecision(
             smelly_connect::error::RouteDecisionError::TargetNotAllowed,
-        )) => return Err((UpstreamConnectError::RouteRejected, LiveRouteBackend::Direct)),
+        )) => {
+            return Err((
+                UpstreamConnectError::RouteRejected,
+                LiveRouteBackend::Direct,
+            ));
+        }
         Err(smelly_connect::Error::Transport(
             smelly_connect::error::TransportError::ConnectTimedOut,
         )) => return Err((UpstreamConnectError::TimedOut, LiveRouteBackend::Direct)),

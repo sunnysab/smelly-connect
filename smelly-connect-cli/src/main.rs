@@ -32,70 +32,68 @@ fn main() {
         .build()
         .expect("build runtime");
     let result = rt.block_on(async move {
-        let shutdown = async {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("install ctrl-c handler");
-            tracing::info!("received SIGINT, shutting down gracefully...");
-        };
-        tokio::select! {
-            result = async {
-                match cli.command {
-                    smelly_connect_cli::cli::Command::Proxy(command) => {
-                        smelly_connect_cli::commands::proxy::run_proxy(&config_path, &command).await
-                    }
-                    smelly_connect_cli::cli::Command::Routes => {
-                        let output = smelly_connect_cli::commands::routes::run_routes_with_config(&config_path).await?;
-                        println!("{output}");
-                        Ok(())
-                    }
-                    smelly_connect_cli::cli::Command::Status(command) => {
-                        let output = smelly_connect_cli::commands::status::run_status_with_config_and_management_api(
-                            &config_path,
-                            command.management_api.clone(),
-                        ).await?;
-                        println!("{output}");
-                        Ok(())
-                    }
-                    smelly_connect_cli::cli::Command::Inspect(cmd) => match cmd {
-                        smelly_connect_cli::cli::InspectCommand::Route { host, port } => {
-                            let output = smelly_connect_cli::commands::inspect::run_route_with_config(&config_path, &host, port).await?;
-                            println!("{output}");
-                            Ok(())
-                        }
-                        smelly_connect_cli::cli::InspectCommand::Session => {
-                            let output = smelly_connect_cli::commands::inspect::run_session_with_config(&config_path).await?;
-                            println!("{output}");
-                            Ok(())
-                        }
+        match cli.command {
+            smelly_connect_cli::cli::Command::Proxy(command) => {
+                let result = smelly_connect_cli::commands::proxy::run_proxy_with_shutdown(
+                    &config_path,
+                    &command,
+                    async {
+                        tokio::signal::ctrl_c()
+                            .await
+                            .expect("install ctrl-c handler");
+                        tracing::info!("received SIGINT, shutting down gracefully...");
                     },
-                    smelly_connect_cli::cli::Command::Test(cmd) => match cmd {
-                        smelly_connect_cli::cli::TestCommand::Tcp { target } => {
-                            let output = smelly_connect_cli::commands::test::run_tcp_with_config(&config_path, &target).await?;
-                            println!("{output}");
-                            Ok(())
-                        }
-                        smelly_connect_cli::cli::TestCommand::Icmp { target } => {
-                            let output = smelly_connect_cli::commands::test::run_icmp_with_config(&config_path, &target).await?;
-                            println!("{output}");
-                            Ok(())
-                        }
-                        smelly_connect_cli::cli::TestCommand::Http { url } => {
-                            let output = smelly_connect_cli::commands::test::run_http_with_config(&config_path, &url).await?;
-                            println!("{output}");
-                            Ok(())
-                        }
-                        smelly_connect_cli::cli::TestCommand::LegacyProbe => {
-                            let output = smelly_connect_cli::commands::test::run_legacy_probe_with_config(&config_path).await?;
-                            println!("{output}");
-                            Ok(())
-                        }
-                    },
-                }
-            } => { result },
-            _ = shutdown => {
+                )
+                .await;
                 tracing::info!("shutdown complete");
+                result
+            }
+            smelly_connect_cli::cli::Command::Routes => {
+                let output = smelly_connect_cli::commands::routes::run_routes_with_config(&config_path).await?;
+                println!("{output}");
                 Ok(())
+            }
+            smelly_connect_cli::cli::Command::Status(command) => {
+                let output = smelly_connect_cli::commands::status::run_status_with_config_and_management_api(
+                    &config_path,
+                    command.management_api.clone(),
+                ).await?;
+                println!("{output}");
+                Ok(())
+            }
+            smelly_connect_cli::cli::Command::Inspect(cmd) => match cmd {
+                smelly_connect_cli::cli::InspectCommand::Route { host, port } => {
+                    let output = smelly_connect_cli::commands::inspect::run_route_with_config(&config_path, &host, port).await?;
+                    println!("{output}");
+                    Ok(())
+                }
+                smelly_connect_cli::cli::InspectCommand::Session => {
+                    let output = smelly_connect_cli::commands::inspect::run_session_with_config(&config_path).await?;
+                    println!("{output}");
+                    Ok(())
+                }
+            },
+            smelly_connect_cli::cli::Command::Test(cmd) => match cmd {
+                smelly_connect_cli::cli::TestCommand::Tcp { target } => {
+                    let output = smelly_connect_cli::commands::test::run_tcp_with_config(&config_path, &target).await?;
+                    println!("{output}");
+                    Ok(())
+                }
+                smelly_connect_cli::cli::TestCommand::Icmp { target } => {
+                    let output = smelly_connect_cli::commands::test::run_icmp_with_config(&config_path, &target).await?;
+                    println!("{output}");
+                    Ok(())
+                }
+                smelly_connect_cli::cli::TestCommand::Http { url } => {
+                    let output = smelly_connect_cli::commands::test::run_http_with_config(&config_path, &url).await?;
+                    println!("{output}");
+                    Ok(())
+                }
+                smelly_connect_cli::cli::TestCommand::LegacyProbe => {
+                    let output = smelly_connect_cli::commands::test::run_legacy_probe_with_config(&config_path).await?;
+                    println!("{output}");
+                    Ok(())
+                }
             },
         }
     });

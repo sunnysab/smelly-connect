@@ -69,6 +69,8 @@ pub struct AccountConfig {
 pub struct ProxyConfig {
     #[serde(default)]
     pub upstream_tcp_connect_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub shutdown_drain_timeout_secs: Option<u64>,
     pub http: ListenerConfig,
     pub socks5: Socks5Config,
 }
@@ -259,6 +261,10 @@ impl AppConfig {
                 .unwrap_or(self.pool.connect_timeout_secs)
                 .max(1),
         )
+    }
+
+    pub fn shutdown_drain_timeout(&self) -> Duration {
+        Duration::from_secs(self.proxy.shutdown_drain_timeout_secs.unwrap_or(30))
     }
 
     pub fn udp_associate_idle_timeout(&self) -> Option<Duration> {

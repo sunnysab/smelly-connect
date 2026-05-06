@@ -15,6 +15,7 @@ allow_request_triggered_probe = true
 
 [proxy]
 upstream_tcp_connect_timeout_secs = 3
+shutdown_drain_timeout_secs = 12
 
 [[accounts]]
 name = "acct-01"
