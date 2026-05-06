@@ -32,6 +32,7 @@ pub(super) fn build_pool_summary(state: &PoolState) -> PoolSummary {
     let mut ready_nodes = 0;
     let mut suspect_nodes = 0;
     let mut open_nodes = 0;
+    let mut disabled_auth_nodes = 0;
     let mut timed_open_nodes = 0;
     let mut half_open_nodes = 0;
     let mut connecting_nodes = 0;
@@ -45,6 +46,13 @@ pub(super) fn build_pool_summary(state: &PoolState) -> PoolSummary {
             AccountState::Suspect(_) => suspect_nodes += 1,
             AccountState::Open(_) => {
                 open_nodes += 1;
+                if matches!(
+                    &node.state,
+                    AccountState::Open(AccountFailure { message })
+                        if message.contains("ControlPlane(AuthFlowFailed(\"MissingSuccessMarker\"))")
+                ) {
+                    disabled_auth_nodes += 1;
+                }
                 if node.open_until.is_some() {
                     timed_open_nodes += 1;
                 }
@@ -73,6 +81,7 @@ pub(super) fn build_pool_summary(state: &PoolState) -> PoolSummary {
         ready_nodes,
         suspect_nodes,
         open_nodes,
+        disabled_auth_nodes,
         half_open_nodes,
         connecting_nodes,
         configured_nodes,

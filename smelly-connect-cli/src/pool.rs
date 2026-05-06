@@ -157,6 +157,7 @@ pub struct PoolSummary {
     pub ready_nodes: usize,
     pub suspect_nodes: usize,
     pub open_nodes: usize,
+    pub disabled_auth_nodes: usize,
     pub half_open_nodes: usize,
     pub connecting_nodes: usize,
     pub configured_nodes: usize,

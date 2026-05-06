@@ -281,6 +281,8 @@ async fn auth_failure_does_not_reenter_half_open_after_backoff_expiry() {
     assert!(pool.state_summary_for_test().await.contains("Open"));
     assert!(!pool.state_summary_for_test().await.contains("HalfOpen"));
     assert!(!pool.has_selectable_nodes_for_test().await);
+    assert_eq!(pool.summary().await.open_nodes, 1);
+    assert_eq!(pool.summary().await.disabled_auth_nodes, 1);
 }
 
 #[tokio::test(start_paused = true)]

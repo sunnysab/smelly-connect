@@ -30,6 +30,8 @@ struct PoolSummary {
     ready_nodes: usize,
     suspect_nodes: usize,
     open_nodes: usize,
+    #[serde(default)]
+    disabled_auth_nodes: usize,
     half_open_nodes: usize,
     connecting_nodes: usize,
     configured_nodes: usize,
@@ -203,12 +205,13 @@ fn format_status(listen: &str, health: HealthResponse, stats: RuntimeSnapshot) -
         format!("management={listen}"),
         format!("status={}", health.status),
         format!(
-            "pool total={} selectable={} ready={} suspect={} open={} half_open={} connecting={} configured={} reconnects={}",
+            "pool total={} selectable={} ready={} suspect={} open={} disabled_auth={} half_open={} connecting={} configured={} reconnects={}",
             pool.total_nodes,
             pool.selectable_nodes,
             pool.ready_nodes,
             pool.suspect_nodes,
             pool.open_nodes,
+            pool.disabled_auth_nodes,
             pool.half_open_nodes,
             pool.connecting_nodes,
             pool.configured_nodes,
