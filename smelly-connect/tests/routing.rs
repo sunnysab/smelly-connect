@@ -43,7 +43,9 @@ async fn routing_blocks_non_resource_targets_when_policy_is_block() {
         ),
         smelly_connect::session::EasyConnectSession::failing_transport("unused"),
     )
-        .with_route_policy(smelly_connect::domain::route_policy::RoutePolicy::block_non_resource_targets());
+    .with_route_policy(
+        smelly_connect::domain::route_policy::RoutePolicy::block_non_resource_targets(),
+    );
     let err = session
         .plan_tcp_connect(("example.test", 443))
         .await

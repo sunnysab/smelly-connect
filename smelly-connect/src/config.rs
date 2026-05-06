@@ -113,13 +113,12 @@ impl EasyConnectConfig {
         let token =
             crate::auth::control::request_token_async(&self.server, &state.authorized_twfid)
                 .await?;
-        let (client_ip, request_ip_tunnel) =
-            crate::auth::control::request_ip_via_tunnel_with_conn(
-                server_addr,
-                &token,
-                state.legacy_cipher_hint.as_deref(),
-            )
-            .await?;
+        let (client_ip, request_ip_tunnel) = crate::auth::control::request_ip_via_tunnel_with_conn(
+            server_addr,
+            &token,
+            state.legacy_cipher_hint.as_deref(),
+        )
+        .await?;
         tracing::info!(%client_ip, "IP assigned via legacy TLS tunnel");
         // IMPORTANT: request_ip_tunnel MUST stay alive — the server requires
         // this connection to remain open for the data tunnels to work.

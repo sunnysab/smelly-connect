@@ -35,6 +35,10 @@ impl RuntimeStats {
                 + socks5.client_to_upstream_bytes,
             upstream_to_client_bytes: http.upstream_to_client_bytes
                 + socks5.upstream_to_client_bytes,
+            service_unavailable_no_ready_session: http.service_unavailable_no_ready_session
+                + socks5.service_unavailable_no_ready_session,
+            service_unavailable_over_capacity: http.service_unavailable_over_capacity
+                + socks5.service_unavailable_over_capacity,
         };
         let status = self.effective_status(pool.status);
         pool.status = status;
@@ -54,6 +58,18 @@ impl RuntimeStats {
 
     pub fn record_connect_failure(&self) {
         self.consecutive_connect_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_service_unavailable_no_ready_session(&self, protocol: ProxyProtocol) {
+        self.protocol_stats(protocol)
+            .service_unavailable_no_ready_session
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_service_unavailable_over_capacity(&self, protocol: ProxyProtocol) {
+        self.protocol_stats(protocol)
+            .service_unavailable_over_capacity
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -78,6 +94,16 @@ impl RuntimeStats {
         if let Some(value) = values.get("upstream_to_client_bytes") {
             stats
                 .upstream_to_client_bytes
+                .store(*value, Ordering::Relaxed);
+        }
+        if let Some(value) = values.get("service_unavailable_no_ready_session") {
+            stats
+                .service_unavailable_no_ready_session
+                .store(*value, Ordering::Relaxed);
+        }
+        if let Some(value) = values.get("service_unavailable_over_capacity") {
+            stats
+                .service_unavailable_over_capacity
                 .store(*value, Ordering::Relaxed);
         }
     }
@@ -119,6 +145,8 @@ struct ProtocolStats {
     total_connections: Arc<AtomicU64>,
     client_to_upstream_bytes: Arc<AtomicU64>,
     upstream_to_client_bytes: Arc<AtomicU64>,
+    service_unavailable_no_ready_session: Arc<AtomicU64>,
+    service_unavailable_over_capacity: Arc<AtomicU64>,
 }
 
 impl ProtocolStats {
@@ -137,6 +165,12 @@ impl ProtocolStats {
             total_connections: self.total_connections.load(Ordering::Relaxed),
             client_to_upstream_bytes: self.client_to_upstream_bytes.load(Ordering::Relaxed),
             upstream_to_client_bytes: self.upstream_to_client_bytes.load(Ordering::Relaxed),
+            service_unavailable_no_ready_session: self
+                .service_unavailable_no_ready_session
+                .load(Ordering::Relaxed),
+            service_unavailable_over_capacity: self
+                .service_unavailable_over_capacity
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -177,6 +211,8 @@ pub struct ProtocolStatsSnapshot {
     pub total_connections: u64,
     pub client_to_upstream_bytes: u64,
     pub upstream_to_client_bytes: u64,
+    pub service_unavailable_no_ready_session: u64,
+    pub service_unavailable_over_capacity: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

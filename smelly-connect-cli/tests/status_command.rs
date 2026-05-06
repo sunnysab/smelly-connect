@@ -33,19 +33,25 @@ async fn status_command_reports_health_and_runtime_stats() {
                 "current_connections":3,
                 "total_connections":9,
                 "client_to_upstream_bytes":120,
-                "upstream_to_client_bytes":240
+                "upstream_to_client_bytes":240,
+                "service_unavailable_no_ready_session": 4,
+                "service_unavailable_over_capacity": 1
             },
             "http":{
                 "current_connections":1,
                 "total_connections":4,
                 "client_to_upstream_bytes":40,
-                "upstream_to_client_bytes":90
+                "upstream_to_client_bytes":90,
+                "service_unavailable_no_ready_session": 3,
+                "service_unavailable_over_capacity": 1
             },
             "socks5":{
                 "current_connections":2,
                 "total_connections":5,
                 "client_to_upstream_bytes":80,
-                "upstream_to_client_bytes":150
+                "upstream_to_client_bytes":150,
+                "service_unavailable_no_ready_session": 1,
+                "service_unavailable_over_capacity": 0
             }
         }"#,
     )
@@ -55,9 +61,9 @@ async fn status_command_reports_health_and_runtime_stats() {
     assert!(output.contains("management=127.0.0.1:19090"));
     assert!(output.contains("status=healthy"));
     assert!(output.contains("pool total=2 selectable=2 ready=2"));
-    assert!(output.contains("total current=3 total=9 c2u=120 B u2c=240 B"));
-    assert!(output.contains("http current=1 total=4 c2u=40 B u2c=90 B"));
-    assert!(output.contains("socks5 current=2 total=5 c2u=80 B u2c=150 B"));
+    assert!(output.contains("total current=3 total=9 c2u=120 B u2c=240 B svc503_no_ready=4 svc503_over_capacity=1"));
+    assert!(output.contains("http current=1 total=4 c2u=40 B u2c=90 B svc503_no_ready=3 svc503_over_capacity=1"));
+    assert!(output.contains("socks5 current=2 total=5 c2u=80 B u2c=150 B svc503_no_ready=1 svc503_over_capacity=0"));
 }
 
 #[tokio::test]

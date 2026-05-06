@@ -18,8 +18,8 @@ use smoltcp::socket::udp::{
 use smoltcp::time::{Duration as SmolDuration, Instant};
 use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, Ipv4Cidr};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{Notify, mpsc};
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{Notify, mpsc};
 use tracing::{debug, warn};
 
 use crate::TargetAddr;
@@ -151,7 +151,10 @@ impl SmolStack {
         });
         // Use 0.0.0.0 as gateway to indicate directly reachable destination
         // (point-to-point tunnel, no next-hop needed)
-        iface.routes_mut().add_default_ipv4_route(Ipv4Addr::UNSPECIFIED).unwrap();
+        iface
+            .routes_mut()
+            .add_default_ipv4_route(Ipv4Addr::UNSPECIFIED)
+            .unwrap();
 
         let inner = Arc::new(SmolStackInner {
             state: Mutex::new(NetstackState {

@@ -80,6 +80,8 @@ async fn management_stats_endpoint_reports_connection_and_traffic_counters() {
     http.insert("total_connections", 2_u64);
     http.insert("client_to_upstream_bytes", 30_u64);
     http.insert("upstream_to_client_bytes", 70_u64);
+    http.insert("service_unavailable_no_ready_session", 5_u64);
+    http.insert("service_unavailable_over_capacity", 2_u64);
     stats.seed_protocol_for_test("http", http);
 
     let body = smelly_connect_cli::management::fetch_json_for_test(pool, stats, "/stats")
@@ -90,6 +92,8 @@ async fn management_stats_endpoint_reports_connection_and_traffic_counters() {
     assert_eq!(json["http"]["total_connections"], 2);
     assert_eq!(json["http"]["client_to_upstream_bytes"], 30);
     assert_eq!(json["http"]["upstream_to_client_bytes"], 70);
+    assert_eq!(json["http"]["service_unavailable_no_ready_session"], 5);
+    assert_eq!(json["http"]["service_unavailable_over_capacity"], 2);
     assert!(json["pool"].get("nodes").is_none());
 }
 

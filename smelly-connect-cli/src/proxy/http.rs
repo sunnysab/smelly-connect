@@ -1391,6 +1391,7 @@ async fn serve_http_with_limit(
                         });
                     }
                     Err(_) => {
+                        stats.record_service_unavailable_over_capacity(ProxyProtocol::Http);
                         clients.spawn(async move {
                             let _ = reject_over_capacity_http(stream).await;
                         });
@@ -1796,6 +1797,9 @@ where
         Ok(name) => name,
         Err(_) => {
             log_no_ready_session(request_id, "http");
+            if let Some(stats) = &stats {
+                stats.record_service_unavailable_no_ready_session(ProxyProtocol::Http);
+            }
             return empty_response(StatusCode::SERVICE_UNAVAILABLE);
         }
     };
@@ -1951,6 +1955,7 @@ async fn handle_live_request(
         Ok(ready) => ready,
         Err(_) => {
             log_no_ready_session(request_id, "http");
+            stats.record_service_unavailable_no_ready_session(ProxyProtocol::Http);
             return empty_response(StatusCode::SERVICE_UNAVAILABLE);
         }
     };

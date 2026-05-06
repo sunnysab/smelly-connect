@@ -31,11 +31,12 @@ async fn pool_applies_block_route_policy_to_returned_live_sessions() {
         ),
         smelly_connect::session::EasyConnectSession::failing_transport("unused"),
     );
-    let pool = smelly_connect_cli::pool::SessionPool::from_live_sessions_with_route_policy_for_test(
-        vec![("acct-01", session)],
-        smelly_connect::domain::route_policy::RoutePolicy::block_non_resource_targets(),
-    )
-    .await;
+    let pool =
+        smelly_connect_cli::pool::SessionPool::from_live_sessions_with_route_policy_for_test(
+            vec![("acct-01", session)],
+            smelly_connect::domain::route_policy::RoutePolicy::block_non_resource_targets(),
+        )
+        .await;
 
     let (_account_name, session) = pool.next_live_session().await.unwrap();
     let err = session
@@ -306,9 +307,11 @@ async fn timed_out_live_session_recovery_prefers_transport_rebuild_before_relogi
             Ok(smelly_connect::transport::VpnStream::new(client))
         }))
     });
-    let pool =
-        smelly_connect_cli::pool::SessionPool::from_live_sessions_for_test(vec![("acct-01", session.clone())])
-            .await;
+    let pool = smelly_connect_cli::pool::SessionPool::from_live_sessions_for_test(vec![(
+        "acct-01",
+        session.clone(),
+    )])
+    .await;
 
     pool.report_live_session_reconnect_required("acct-01", &session, "forced timeout")
         .await;
@@ -396,6 +399,37 @@ async fn pool_live_session_selection_keeps_shared_session_storage() {
         std::ptr::eq(session.resources(), selected.resources()),
         "selected live session should share underlying storage with the source session"
     );
+}
+
+#[tokio::test]
+async fn concurrent_live_session_selection_can_reuse_same_account() {
+    let session = smelly_connect::test_support::session::session_with_domain_match(
+        "jwxt.sit.edu.cn",
+        std::net::Ipv4Addr::new(10, 0, 0, 8),
+    );
+    let pool = smelly_connect_cli::pool::SessionPool::from_live_sessions_for_test(vec![(
+        "acct-01",
+        session,
+    )])
+    .await;
+
+    let first = tokio::spawn({
+        let pool = pool.clone();
+        async move { pool.next_live_session().await }
+    });
+    let second = tokio::spawn({
+        let pool = pool.clone();
+        async move { pool.next_live_session().await }
+    });
+
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_millis(50), async {
+        tokio::join!(first, second)
+    })
+    .await
+    .expect("concurrent live session selection should not serialize on one account");
+
+    assert_eq!(first.unwrap().unwrap().0, "acct-01");
+    assert_eq!(second.unwrap().unwrap().0, "acct-01");
 }
 
 #[tokio::test]

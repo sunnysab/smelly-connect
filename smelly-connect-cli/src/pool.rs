@@ -1256,7 +1256,8 @@ impl SessionPool {
 
     #[cfg(any(test, debug_assertions))]
     pub async fn try_request_triggered_probe_for_test(&self) -> Result<PooledSession, PoolError> {
-        let Some((name, account, _reconnect_session)) = self.claim_request_triggered_probe().await?
+        let Some((name, account, _reconnect_session)) =
+            self.claim_request_triggered_probe().await?
         else {
             return Err(PoolError::new("no ready session"));
         };
@@ -1519,8 +1520,7 @@ impl SessionPool {
             .enumerate()
             .filter_map(|(idx, node)| match &node.state {
                 AccountState::Ready(session) | AccountState::Suspect(session)
-                    if session.session().is_some()
-                        && !state.busy_live_connects.contains(session.account_name()) =>
+                    if session.session().is_some() =>
                 {
                     Some(idx)
                 }
@@ -1538,9 +1538,6 @@ impl SessionPool {
             AccountState::Ready(session) | AccountState::Suspect(session) => {
                 let account_name = session.account_name().to_string();
                 let live = session.session().cloned();
-                if live.is_some() {
-                    state.busy_live_connects.insert(account_name.clone());
-                }
                 Ok(live.map(|live| (account_name, live)))
             }
             _ => Ok(None),

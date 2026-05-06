@@ -391,7 +391,9 @@ impl EasyConnectSession {
             ))
         })?;
         #[cfg(any(test, debug_assertions))]
-        let (client_ip, transport, request_ip_tunnel) = if let Some(rebuilder) = &cfg.transport_rebuilder {
+        let (client_ip, transport, request_ip_tunnel) = if let Some(rebuilder) =
+            &cfg.transport_rebuilder
+        {
             (self.inner.client_ip, rebuilder()?, None)
         } else {
             let (client_ip, request_ip_tunnel) =
@@ -408,11 +410,9 @@ impl EasyConnectSession {
                 cfg.legacy_cipher_hint.as_deref(),
             )
             .await?;
-            let transport = crate::transport::netstack::build_transport_from_packet_device(
-                device,
-                client_ip,
-            )
-            .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
+            let transport =
+                crate::transport::netstack::build_transport_from_packet_device(device, client_ip)
+                    .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
             (client_ip, transport, Some(request_ip_tunnel))
         };
         #[cfg(not(any(test, debug_assertions)))]
@@ -555,17 +555,14 @@ impl EasyConnectSession {
             return Ok(rebuilt);
         };
 
-        Ok(EasyConnectSession::new(
-            client_ip,
-            resources,
-            resolver,
-            transport,
+        Ok(
+            EasyConnectSession::new(client_ip, resources, resolver, transport)
+                .with_local_route_overrides(local_route_overrides)
+                .with_route_policy(route_policy)
+                .with_allow_all_routes(allow_all_routes)
+                .with_legacy_data_plane(server_addr, token, legacy_cipher_hint)
+                .with_runtime_resources(request_ip_tunnel, None),
         )
-        .with_local_route_overrides(local_route_overrides)
-        .with_route_policy(route_policy)
-        .with_allow_all_routes(allow_all_routes)
-        .with_legacy_data_plane(server_addr, token, legacy_cipher_hint)
-        .with_runtime_resources(request_ip_tunnel, None))
     }
 
     pub fn start_icmp_keepalive<T>(&self, target: T, interval: Duration) -> KeepaliveHandle
@@ -681,9 +678,7 @@ impl EasyConnectSession {
                 .local_route_overrides
                 .matches_domain(host, port, protocol)
             || self.inner.resources.matches_ip(ip, port, protocol)
-            || self
-                .local_route_overrides
-                .matches_ip(ip, port, protocol)
+            || self.local_route_overrides.matches_ip(ip, port, protocol)
         {
             Ok(RoutePlan::VpnResolved(SocketAddr::new(ip, port)))
         } else {
@@ -751,9 +746,7 @@ impl EasyConnectSession {
                 .local_route_overrides
                 .matches_domain(&host, port, protocol)
             && !self.inner.resources.matches_ip(ip, port, protocol)
-            && !self
-                .local_route_overrides
-                .matches_ip(ip, port, protocol)
+            && !self.local_route_overrides.matches_ip(ip, port, protocol)
         {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }

@@ -797,6 +797,7 @@ async fn serve_socks5_with_limit(
                         });
                     }
                     Err(_) => {
+                        stats.record_service_unavailable_over_capacity(ProxyProtocol::Socks5);
                         clients.spawn(async move {
                             let _ = reject_over_capacity_socks5(stream).await;
                         });
@@ -1255,6 +1256,9 @@ where
                 protocol = tracing::field::display("socks5"),
                 "no ready session"
             );
+            if let Some(stats) = &stats {
+                stats.record_service_unavailable_no_ready_session(ProxyProtocol::Socks5);
+            }
             proto
                 .reply_error(&ReplyError::NetworkUnreachable)
                 .await
@@ -1312,6 +1316,7 @@ async fn handle_live_client(
                 protocol = tracing::field::display("socks5"),
                 "no ready session"
             );
+            stats.record_service_unavailable_no_ready_session(ProxyProtocol::Socks5);
             proto
                 .reply_error(&ReplyError::NetworkUnreachable)
                 .await

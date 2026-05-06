@@ -90,9 +90,11 @@ fn test_legacy_probe_returns_typed_error_for_missing_config() {
         .build()
         .unwrap();
     let err = rt
-        .block_on(smelly_connect_cli::commands::test::run_legacy_probe_with_config_typed(
-            "/definitely/missing/config.toml",
-        ))
+        .block_on(
+            smelly_connect_cli::commands::test::run_legacy_probe_with_config_typed(
+                "/definitely/missing/config.toml",
+            ),
+        )
         .unwrap_err();
     assert!(matches!(
         err,

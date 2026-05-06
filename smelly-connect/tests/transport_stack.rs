@@ -85,8 +85,8 @@ async fn session_keepalive_task_invokes_transport_icmp_ping() {
 
 #[tokio::test]
 async fn session_serializes_concurrent_connect_establishment() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let active = Arc::new(AtomicUsize::new(0));
     let max_active = Arc::new(AtomicUsize::new(0));

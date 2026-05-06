@@ -38,10 +38,9 @@ async fn socks5_proxy_supports_direct_tcp_connect_for_unmatched_targets() {
 
 #[tokio::test]
 async fn socks5_proxy_supports_direct_udp_associate_for_unmatched_targets() {
-    let result =
-        smelly_connect_cli::proxy::socks5::proxy_socks5_direct_udp_associate_for_test()
-            .await
-            .unwrap();
+    let result = smelly_connect_cli::proxy::socks5::proxy_socks5_direct_udp_associate_for_test()
+        .await
+        .unwrap();
     assert_eq!(result.echoed_bytes, b"ping");
 }
 

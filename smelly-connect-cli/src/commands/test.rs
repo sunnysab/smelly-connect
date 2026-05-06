@@ -134,9 +134,7 @@ pub async fn run_http_with_config(
         .map_err(|err| err.to_string())
 }
 
-pub async fn run_legacy_probe_with_config(
-    config_path: impl AsRef<Path>,
-) -> Result<String, String> {
+pub async fn run_legacy_probe_with_config(config_path: impl AsRef<Path>) -> Result<String, String> {
     run_legacy_probe_with_config_typed(config_path)
         .await
         .map_err(|err| err.to_string())
@@ -188,11 +186,13 @@ pub async fn run_legacy_probe_with_config_typed(
         account.username.clone(),
         account.password.clone(),
     )
-    .with_captcha_handler(smelly_connect::CaptchaHandler::from_async(|_, _| async move {
-        Err(smelly_connect::CaptchaError::new(
-            "captcha callback not configured for legacy probe",
-        ))
-    }));
+    .with_captcha_handler(smelly_connect::CaptchaHandler::from_async(
+        |_, _| async move {
+            Err(smelly_connect::CaptchaError::new(
+                "captcha callback not configured for legacy probe",
+            ))
+        },
+    ));
 
     let state = smelly_connect::run_control_plane(&cfg)
         .await
@@ -228,8 +228,8 @@ pub async fn run_legacy_probe_with_config_typed(
             "10.0.0.8".parse().unwrap(),
             hint,
         )
-            .await
-            .map(|_| "ok".to_string())
+        .await
+        .map(|_| "ok".to_string())
     })
     .await;
     lines.push(format!("preconnect_open_recv: {preconnect_recv}"));
@@ -241,16 +241,17 @@ pub async fn run_legacy_probe_with_config_typed(
             "10.0.0.8".parse().unwrap(),
             hint,
         )
-            .await
-            .map(|_| "ok".to_string())
+        .await
+        .map(|_| "ok".to_string())
     })
     .await;
     lines.push(format!("preconnect_open_send: {preconnect_send}"));
 
     let preconnect_hold_request_ip_and_open_recv = run_probe_step(timeout, async {
-        let (ip, _conn) =
-            smelly_connect::auth::control::request_ip_via_tunnel_with_conn_debug(addr, &token, hint)
-                .await?;
+        let (ip, _conn) = smelly_connect::auth::control::request_ip_via_tunnel_with_conn_debug(
+            addr, &token, hint,
+        )
+        .await?;
         smelly_connect::auth::control::open_recv_tunnel(addr, &token, ip, hint)
             .await
             .map(|_| format!("ok ip={ip}"))
@@ -261,9 +262,10 @@ pub async fn run_legacy_probe_with_config_typed(
     ));
 
     let preconnect_hold_request_ip_and_open_send = run_probe_step(timeout, async {
-        let (ip, _conn) =
-            smelly_connect::auth::control::request_ip_via_tunnel_with_conn_debug(addr, &token, hint)
-                .await?;
+        let (ip, _conn) = smelly_connect::auth::control::request_ip_via_tunnel_with_conn_debug(
+            addr, &token, hint,
+        )
+        .await?;
         smelly_connect::auth::control::open_send_tunnel(addr, &token, ip, hint)
             .await
             .map(|_| format!("ok ip={ip}"))
@@ -274,9 +276,10 @@ pub async fn run_legacy_probe_with_config_typed(
     ));
 
     let preconnect_second_pair_same_lease = run_probe_step(timeout, async {
-        let (ip, _lease) =
-            smelly_connect::auth::control::request_ip_via_tunnel_with_conn_debug(addr, &token, hint)
-                .await?;
+        let (ip, _lease) = smelly_connect::auth::control::request_ip_via_tunnel_with_conn_debug(
+            addr, &token, hint,
+        )
+        .await?;
         let recv1 = smelly_connect::auth::control::open_recv_tunnel(addr, &token, ip, hint).await?;
         let send1 = smelly_connect::auth::control::open_send_tunnel(addr, &token, ip, hint).await?;
         let recv2 = smelly_connect::auth::control::open_recv_tunnel(addr, &token, ip, hint)
@@ -297,9 +300,10 @@ pub async fn run_legacy_probe_with_config_typed(
     ));
 
     let preconnect_second_pair_after_drop = run_probe_step(timeout, async {
-        let (ip, _lease) =
-            smelly_connect::auth::control::request_ip_via_tunnel_with_conn_debug(addr, &token, hint)
-                .await?;
+        let (ip, _lease) = smelly_connect::auth::control::request_ip_via_tunnel_with_conn_debug(
+            addr, &token, hint,
+        )
+        .await?;
         let recv1 = smelly_connect::auth::control::open_recv_tunnel(addr, &token, ip, hint).await?;
         let send1 = smelly_connect::auth::control::open_send_tunnel(addr, &token, ip, hint).await?;
         drop(recv1);
@@ -380,41 +384,36 @@ pub async fn run_legacy_probe_with_config_typed(
     lines.push(format!("postconnect_request_ip: {postconnect_request_ip}"));
 
     let postconnect_recv = run_probe_step(timeout, async {
-        smelly_connect::auth::control::open_recv_tunnel(
-            addr,
-            &token,
-            session_client_ip,
-            hint,
-        )
-        .await
-        .map(|_| "ok".to_string())
+        smelly_connect::auth::control::open_recv_tunnel(addr, &token, session_client_ip, hint)
+            .await
+            .map(|_| "ok".to_string())
     })
     .await;
-    lines.push(format!("postconnect_open_recv_with_session_ip: {postconnect_recv}"));
+    lines.push(format!(
+        "postconnect_open_recv_with_session_ip: {postconnect_recv}"
+    ));
 
     let postconnect_send = run_probe_step(timeout, async {
-        smelly_connect::auth::control::open_send_tunnel(
-            addr,
-            &token,
-            session_client_ip,
-            hint,
-        )
-        .await
-        .map(|_| "ok".to_string())
+        smelly_connect::auth::control::open_send_tunnel(addr, &token, session_client_ip, hint)
+            .await
+            .map(|_| "ok".to_string())
     })
     .await;
-    lines.push(format!("postconnect_open_send_with_session_ip: {postconnect_send}"));
+    lines.push(format!(
+        "postconnect_open_send_with_session_ip: {postconnect_send}"
+    ));
 
     let same_conn_recv = run_probe_step(timeout, async {
-        let (ip, mut conn) =
-            smelly_connect::auth::control::request_ip_via_tunnel_with_conn_debug(addr, &token, hint)
-                .await?;
+        let (ip, mut conn) = smelly_connect::auth::control::request_ip_via_tunnel_with_conn_debug(
+            addr, &token, hint,
+        )
+        .await?;
         let payload = smelly_connect::protocol::build_recv_handshake(&token, ip);
-        conn.send_application_data(&payload)
-            .await
-            .map_err(|err| smelly_connect::Error::TunnelBootstrap(
+        conn.send_application_data(&payload).await.map_err(|err| {
+            smelly_connect::Error::TunnelBootstrap(
                 smelly_connect::error::TunnelBootstrapError::HandshakeFailed(err.to_string()),
-            ))?;
+            )
+        })?;
         let reply = conn.read_application_data().await.map_err(|err| {
             smelly_connect::Error::TunnelBootstrap(
                 smelly_connect::error::TunnelBootstrapError::HandshakeFailed(err.to_string()),
@@ -430,15 +429,16 @@ pub async fn run_legacy_probe_with_config_typed(
     lines.push(format!("same_conn_recv_after_request_ip: {same_conn_recv}"));
 
     let same_conn_send = run_probe_step(timeout, async {
-        let (ip, mut conn) =
-            smelly_connect::auth::control::request_ip_via_tunnel_with_conn_debug(addr, &token, hint)
-                .await?;
+        let (ip, mut conn) = smelly_connect::auth::control::request_ip_via_tunnel_with_conn_debug(
+            addr, &token, hint,
+        )
+        .await?;
         let payload = smelly_connect::protocol::build_send_handshake(&token, ip);
-        conn.send_application_data(&payload)
-            .await
-            .map_err(|err| smelly_connect::Error::TunnelBootstrap(
+        conn.send_application_data(&payload).await.map_err(|err| {
+            smelly_connect::Error::TunnelBootstrap(
                 smelly_connect::error::TunnelBootstrapError::HandshakeFailed(err.to_string()),
-            ))?;
+            )
+        })?;
         let reply = conn.read_application_data().await.map_err(|err| {
             smelly_connect::Error::TunnelBootstrap(
                 smelly_connect::error::TunnelBootstrapError::HandshakeFailed(err.to_string()),
@@ -463,27 +463,17 @@ pub async fn run_legacy_probe_with_config_typed(
     lines.push(format!("postdrop_request_ip: {postdrop_request_ip}"));
 
     let postdrop_open_recv = run_probe_step(timeout, async {
-        smelly_connect::auth::control::open_recv_tunnel(
-            addr,
-            &token,
-            session_client_ip,
-            hint,
-        )
-        .await
-        .map(|_| "ok".to_string())
+        smelly_connect::auth::control::open_recv_tunnel(addr, &token, session_client_ip, hint)
+            .await
+            .map(|_| "ok".to_string())
     })
     .await;
     lines.push(format!("postdrop_open_recv: {postdrop_open_recv}"));
 
     let postdrop_open_send = run_probe_step(timeout, async {
-        smelly_connect::auth::control::open_send_tunnel(
-            addr,
-            &token,
-            session_client_ip,
-            hint,
-        )
-        .await
-        .map(|_| "ok".to_string())
+        smelly_connect::auth::control::open_send_tunnel(addr, &token, session_client_ip, hint)
+            .await
+            .map(|_| "ok".to_string())
     })
     .await;
     lines.push(format!("postdrop_open_send: {postdrop_open_send}"));
@@ -500,7 +490,9 @@ pub async fn run_legacy_probe_with_config_typed(
         smelly_connect::auth::control::request_ip_via_tunnel(addr, &refreshed_token, hint).await
     })
     .await;
-    lines.push(format!("refreshed_token_request_ip: {refreshed_request_ip}"));
+    lines.push(format!(
+        "refreshed_token_request_ip: {refreshed_request_ip}"
+    ));
 
     let refreshed_open_recv = run_probe_step(timeout, async {
         smelly_connect::auth::control::open_recv_tunnel(

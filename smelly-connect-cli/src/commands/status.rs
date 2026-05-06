@@ -43,6 +43,10 @@ struct ProtocolStats {
     total_connections: u64,
     client_to_upstream_bytes: u64,
     upstream_to_client_bytes: u64,
+    #[serde(default)]
+    service_unavailable_no_ready_session: u64,
+    #[serde(default)]
+    service_unavailable_over_capacity: u64,
 }
 
 pub async fn run_status() -> Result<(), String> {
@@ -219,11 +223,13 @@ fn format_status(listen: &str, health: HealthResponse, stats: RuntimeSnapshot) -
 
 fn format_protocol(name: &str, stats: &ProtocolStats) -> String {
     format!(
-        "{name} current={} total={} c2u={} u2c={}",
+        "{name} current={} total={} c2u={} u2c={} svc503_no_ready={} svc503_over_capacity={}",
         stats.current_connections,
         stats.total_connections,
         format_bytes(stats.client_to_upstream_bytes),
-        format_bytes(stats.upstream_to_client_bytes)
+        format_bytes(stats.upstream_to_client_bytes),
+        stats.service_unavailable_no_ready_session,
+        stats.service_unavailable_over_capacity,
     )
 }
 
