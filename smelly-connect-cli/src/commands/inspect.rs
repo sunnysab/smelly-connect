@@ -63,7 +63,7 @@ pub async fn run_session_with_config_typed(
     ))
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 mod tests {
     use smelly_connect::test_support;
     use smelly_connect::{resolver::SessionResolver, resource::ResourceSet};
@@ -116,11 +116,12 @@ mod tests {
     }
 
     pub async fn inspect_session_for_test() -> String {
-        let pool = crate::pool::SessionPool::from_named_ready_accounts(["acct-01", "acct-02"]).await;
+        let pool =
+            crate::pool::SessionPool::from_named_ready_accounts(["acct-01", "acct-02"]).await;
         let ready = pool.ready_count().await;
         format!("ready={ready}")
     }
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::*;

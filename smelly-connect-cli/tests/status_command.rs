@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 #[tokio::test]
 async fn status_command_reports_health_and_runtime_stats() {
     let output = smelly_connect_cli::commands::status::run_status_for_test(
@@ -63,9 +65,15 @@ async fn status_command_reports_health_and_runtime_stats() {
     assert!(output.contains("management=127.0.0.1:19090"));
     assert!(output.contains("status=healthy"));
     assert!(output.contains("pool total=2 selectable=2 ready=2 suspect=0 open=0 disabled_auth=0"));
-    assert!(output.contains("total current=3 total=9 c2u=120 B u2c=240 B svc503_no_ready=4 svc503_over_capacity=1"));
-    assert!(output.contains("http current=1 total=4 c2u=40 B u2c=90 B svc503_no_ready=3 svc503_over_capacity=1"));
-    assert!(output.contains("socks5 current=2 total=5 c2u=80 B u2c=150 B svc503_no_ready=1 svc503_over_capacity=0"));
+    assert!(output.contains(
+        "total current=3 total=9 c2u=120 B u2c=240 B svc503_no_ready=4 svc503_over_capacity=1"
+    ));
+    assert!(output.contains(
+        "http current=1 total=4 c2u=40 B u2c=90 B svc503_no_ready=3 svc503_over_capacity=1"
+    ));
+    assert!(output.contains(
+        "socks5 current=2 total=5 c2u=80 B u2c=150 B svc503_no_ready=1 svc503_over_capacity=0"
+    ));
 }
 
 #[tokio::test]

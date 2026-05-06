@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = []
 management-api = ["dep:axum"]
+test-utils = ["smelly-connect/test-utils"]
 
 [lib]
 name = "smelly_connect_cli"

@@ -1,16 +1,16 @@
 use std::path::Path;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 use std::sync::Arc;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 use smelly_connect::test_support;
 
 use crate::error::CliError;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub async fn run_tcp_for_test(target: &str) -> Result<String, String> {
     let session = test_support::session::login_harness().ready_session().await;
     let (host, port) = split_target(target)?;
@@ -21,7 +21,7 @@ pub async fn run_tcp_for_test(target: &str) -> Result<String, String> {
     Ok(format!("tcp ok: {host}:{port}"))
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub async fn run_icmp_for_test(target: &str) -> Result<String, String> {
     let counter = Arc::new(AtomicUsize::new(0));
     let session = test_support::session::session_with_icmp_ping(counter);
@@ -32,7 +32,7 @@ pub async fn run_icmp_for_test(target: &str) -> Result<String, String> {
     Ok(format!("icmp ok: {target}"))
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub async fn run_http_for_test(url: &str) -> Result<String, String> {
     let harness = test_support::integration::reqwest_harness().await;
     let client = harness
@@ -536,7 +536,7 @@ where
     }
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 fn split_target(target: &str) -> Result<(String, u16), String> {
     split_target_typed(target).map_err(|err| err.to_string())
 }

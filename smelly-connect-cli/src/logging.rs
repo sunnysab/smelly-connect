@@ -78,38 +78,38 @@ fn level_filter(level: &LoggingLevel) -> LevelFilter {
     }
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_config_load_error_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_http_connect_log_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_http_connect_tunnel_log_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_http_live_failure_warn_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_http_request_log_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_http_timeout_diagnostic_log_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_invalid_logging_config_error_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_level_filter_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_no_ready_session_warn_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_one_info_line_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_pool_events_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_pool_recovery_log_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_socks5_live_failure_warn_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::capture_socks5_request_log_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::init_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};

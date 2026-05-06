@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 #[tokio::test]
 async fn pool_prewarms_first_n_accounts() {
     let pool = smelly_connect_cli::pool::SessionPool::from_test_accounts(4, 2).await;
@@ -264,9 +266,11 @@ async fn open_node_reenters_via_timer_into_half_open_after_backoff_expiry() {
 
 #[test]
 fn auth_failure_message_is_treated_as_permanent_disable() {
-    assert!(smelly_connect_cli::pool::is_permanent_auth_failure_for_test(
-        "ControlPlane(AuthFlowFailed(\"MissingSuccessMarker\"))"
-    ));
+    assert!(
+        smelly_connect_cli::pool::is_permanent_auth_failure_for_test(
+            "ControlPlane(AuthFlowFailed(\"MissingSuccessMarker\"))"
+        )
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -431,8 +435,7 @@ async fn concurrent_live_session_selection_can_reuse_same_account() {
         std::net::Ipv4Addr::new(10, 0, 0, 8),
     );
     let pool = smelly_connect_cli::pool::SessionPool::from_live_sessions_for_test(vec![(
-        "acct-01",
-        session,
+        "acct-01", session,
     )])
     .await;
 

@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 #[tokio::test]
 async fn test_tcp_reports_success_on_connect() {
     let output = smelly_connect_cli::commands::test::run_tcp_for_test("10.0.0.8:443")

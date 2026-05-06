@@ -26,46 +26,44 @@ use smelly_connect::proxy::http::{
     find_header_end, has_chunked_transfer_encoding, parse_content_length,
 };
 
-use super::common::{
-    LiveRouteBackend, UpstreamConnectError, connect_live_upstream_with_timeout,
-    connect_with_timeout,
-};
+#[cfg(feature = "test-utils")]
+use super::common::connect_with_timeout;
+use super::common::{LiveRouteBackend, UpstreamConnectError, connect_live_upstream_with_timeout};
 
 type ProxyBody = BoxBody<Bytes, io::Error>;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const DEFAULT_MAX_IN_FLIGHT_CONNECTIONS: usize = 1024;
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::HttpProxyTestResult;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::HttpBodyTestResult;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::ReusedUpstreamTestResult;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::StreamingResponseTestResult;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::ConnectProxyTestResult;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::NoReadySessionResult;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::HttpStatusBodyTestResult;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::TimeoutTestResult;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::LiveFailureRecoveryTestResult;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::LiveFailureLatencyTestResult;
-
 
 enum ResponseBodyKind {
     None,
@@ -218,91 +216,91 @@ impl ChunkedResponseDecoder {
     }
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_origin_form_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_origin_form_ipv6_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_body_completes_for_keep_alive_upstream_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_reuses_upstream_connection_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_streams_request_body_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_streams_chunked_request_body_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_expect_continue_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_strips_proxy_authorization_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_streams_response_body_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_head_response_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_rejects_oversized_response_headers_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_connect_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_direct_forward_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_connect_direct_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_direct_failure_does_not_open_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_no_ready_session_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_no_ready_session_sequence_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_runtime_stats_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_connect_failure_runtime_status_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_connect_timeout_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_connect_failure_status_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_connect_timeout_status_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_live_connect_failure_recovery_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_live_connect_failure_does_not_wait_for_probe_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_route_rejection_does_not_open_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_timeout_does_not_open_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_immediate_timeout_status_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_allow_all_failure_does_not_open_for_test;
 
 pub async fn serve_http(
@@ -414,16 +412,11 @@ async fn serve_http_with_limit(
     Ok(())
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_live_failure_for_test;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_over_capacity_for_test;
-
-
-
-
-
 
 async fn reject_over_capacity_http(mut stream: TcpStream) -> io::Result<()> {
     stream
@@ -433,12 +426,6 @@ async fn reject_over_capacity_http(mut stream: TcpStream) -> io::Result<()> {
         .await?;
     stream.shutdown().await
 }
-
-
-
-
-
-
 
 async fn handle_live_client(
     client: TcpStream,
@@ -470,7 +457,6 @@ async fn handle_live_client(
         .await
         .map_err(|err| err.to_string())
 }
-
 
 async fn handle_live_request(
     request: Request<Incoming>,
@@ -1464,31 +1450,15 @@ fn split_host_port(target: &str, default_port: u16) -> Result<(&str, u16), Strin
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 mod tests {
     // Imports not provided by `use super::*` (these were formerly cfg-gated at the top level)
+    use crate::runtime::RuntimeSnapshot;
     use std::future::Future;
     use std::net::SocketAddr;
     use tokio::sync::Mutex;
-    use crate::runtime::RuntimeSnapshot;
 
     use super::*;
-
 
     #[derive(Debug, Clone)]
     pub struct HttpProxyTestResult {
@@ -1778,8 +1748,8 @@ mod tests {
         Ok(HttpBodyTestResult { body })
     }
 
-    pub async fn proxy_http_streams_chunked_request_body_for_test() -> Result<HttpBodyTestResult, String>
-    {
+    pub async fn proxy_http_streams_chunked_request_body_for_test()
+    -> Result<HttpBodyTestResult, String> {
         let upstream = spawn_chunked_request_body_echo_upstream().await;
         let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
         let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
@@ -1878,8 +1848,8 @@ mod tests {
         Ok(HttpBodyTestResult { body })
     }
 
-    pub async fn proxy_http_strips_proxy_authorization_for_test() -> Result<HttpBodyTestResult, String>
-    {
+    pub async fn proxy_http_strips_proxy_authorization_for_test()
+    -> Result<HttpBodyTestResult, String> {
         let upstream = spawn_proxy_auth_capture_upstream().await;
         let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
         let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
@@ -2091,7 +2061,8 @@ mod tests {
 
     pub async fn proxy_http_direct_forward_for_test() -> Result<HttpBodyTestResult, String> {
         let upstream = spawn_http_upstream().await;
-        let session = unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+        let session =
+            unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
         let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
         let addr = spawn_single_live_client_proxy(pool, DEFAULT_CONNECT_TIMEOUT).await?;
 
@@ -2125,7 +2096,8 @@ mod tests {
 
     pub async fn proxy_connect_direct_for_test() -> Result<ConnectProxyTestResult, String> {
         let upstream = spawn_echo_upstream().await;
-        let session = unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+        let session =
+            unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
         let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
         let addr = spawn_single_live_client_proxy(pool, DEFAULT_CONNECT_TIMEOUT).await?;
 
@@ -2177,7 +2149,8 @@ mod tests {
         let blocked_port = blocker.local_addr().map_err(|err| err.to_string())?.port();
         drop(blocker);
 
-        let session = unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+        let session =
+            unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
         let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
         let addr = spawn_single_live_client_proxy(pool.clone(), DEFAULT_CONNECT_TIMEOUT).await?;
 
@@ -2246,8 +2219,8 @@ mod tests {
         Ok(stats.snapshot(pool.summary().await))
     }
 
-    pub async fn proxy_http_connect_failure_runtime_status_for_test() -> Result<RuntimeSnapshot, String>
-    {
+    pub async fn proxy_http_connect_failure_runtime_status_for_test()
+    -> Result<RuntimeSnapshot, String> {
         let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
         let stats = RuntimeStats::default();
         let addr = spawn_test_proxy_with_stats(
@@ -2397,7 +2370,8 @@ mod tests {
 
     pub async fn proxy_http_route_rejection_does_not_open_for_test()
     -> Result<LiveFailureRecoveryTestResult, String> {
-        let session = unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
+        let session =
+            unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
         let pool = SessionPool::from_live_sessions_with_route_policy_for_test(
             vec![("acct-01", session)],
             smelly_connect::domain::route_policy::RoutePolicy::block_non_resource_targets(),
@@ -2471,8 +2445,8 @@ mod tests {
         })
     }
 
-    pub async fn proxy_http_immediate_timeout_status_for_test() -> Result<NoReadySessionResult, String>
-    {
+    pub async fn proxy_http_immediate_timeout_status_for_test()
+    -> Result<NoReadySessionResult, String> {
         let session =
             smelly_connect::test_support::session::session_with_immediate_timeout_domain_match(
                 "jwxt.sit.edu.cn",
@@ -2521,8 +2495,9 @@ mod tests {
 
     pub async fn proxy_http_allow_all_failure_does_not_open_for_test()
     -> Result<LiveFailureRecoveryTestResult, String> {
-        let session = unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST)
-            .with_allow_all_routes(true);
+        let session =
+            unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST)
+                .with_allow_all_routes(true);
         let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -2565,7 +2540,8 @@ mod tests {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
-            if let Err(err) = handle_live_client(stream, pool, stats, DEFAULT_CONNECT_TIMEOUT).await {
+            if let Err(err) = handle_live_client(stream, pool, stats, DEFAULT_CONNECT_TIMEOUT).await
+            {
                 tracing::warn!(
                     protocol = tracing::field::display("http"),
                     error = %err,
@@ -2712,8 +2688,8 @@ mod tests {
                     Ok(permit) => {
                         tokio::spawn(async move {
                             let _permit = permit;
-                            let _ =
-                                handle_client(stream, pool, stats, connect_timeout, connector).await;
+                            let _ = handle_client(stream, pool, stats, connect_timeout, connector)
+                                .await;
                         });
                     }
                     Err(_) => {
@@ -2800,7 +2776,8 @@ mod tests {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
-            let _ = handle_live_client(stream, pool, RuntimeStats::default(), connect_timeout).await;
+            let _ =
+                handle_live_client(stream, pool, RuntimeStats::default(), connect_timeout).await;
         });
         Ok(addr)
     }
@@ -2922,7 +2899,13 @@ mod tests {
                     upstream
                 }
                 Err(err) => {
-                    log_upstream_connect_failure(request_id, "connect", &target, connect_started, &err);
+                    log_upstream_connect_failure(
+                        request_id,
+                        "connect",
+                        &target,
+                        connect_started,
+                        &err,
+                    );
                     if let Some(stats) = &stats {
                         stats.record_connect_failure();
                     }
@@ -2985,9 +2968,18 @@ mod tests {
             Some(upstream) => Ok(upstream),
             None => {
                 let connect_started = Instant::now();
-                log_upstream_connect_start(request_id, "http", &account_name, &target, connect_timeout);
-                match connect_with_timeout(connect_timeout, connector(account_name, host.clone(), port))
-                    .await
+                log_upstream_connect_start(
+                    request_id,
+                    "http",
+                    &account_name,
+                    &target,
+                    connect_timeout,
+                );
+                match connect_with_timeout(
+                    connect_timeout,
+                    connector(account_name, host.clone(), port),
+                )
+                .await
                 {
                     Ok(upstream) => {
                         log_upstream_connect_success(request_id, "http", &target, connect_started);
@@ -3124,13 +3116,14 @@ mod tests {
             let mut body_complete = false;
 
             loop {
-                let n = match tokio::time::timeout(Duration::from_millis(200), socket.read(&mut chunk))
-                    .await
-                {
-                    Ok(Ok(n)) => n,
-                    Ok(Err(err)) => panic!("upstream read failed: {err}"),
-                    Err(_) => break,
-                };
+                let n =
+                    match tokio::time::timeout(Duration::from_millis(200), socket.read(&mut chunk))
+                        .await
+                    {
+                        Ok(Ok(n)) => n,
+                        Ok(Err(err)) => panic!("upstream read failed: {err}"),
+                        Err(_) => break,
+                    };
                 if n == 0 {
                     break;
                 }
@@ -3184,13 +3177,14 @@ mod tests {
             let mut chunk = [0_u8; 1024];
 
             loop {
-                let n = match tokio::time::timeout(Duration::from_millis(200), socket.read(&mut chunk))
-                    .await
-                {
-                    Ok(Ok(n)) => n,
-                    Ok(Err(err)) => panic!("upstream read failed: {err}"),
-                    Err(_) => break,
-                };
+                let n =
+                    match tokio::time::timeout(Duration::from_millis(200), socket.read(&mut chunk))
+                        .await
+                    {
+                        Ok(Ok(n)) => n,
+                        Ok(Err(err)) => panic!("upstream read failed: {err}"),
+                        Err(_) => break,
+                    };
                 if n == 0 {
                     break;
                 }
@@ -3260,7 +3254,9 @@ mod tests {
                 }
             }
             socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello")
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello",
+                )
                 .await
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(250)).await;

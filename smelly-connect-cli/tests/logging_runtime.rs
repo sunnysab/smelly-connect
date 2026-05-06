@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 #[test]
 fn logging_mode_off_disables_operational_tracing() {
     let result = smelly_connect_cli::logging::init_for_test("off", "info", None);
@@ -175,8 +177,16 @@ fn pool_recovery_logs_include_reason_and_reconnect_count() {
             .iter()
             .any(|line| line.contains("live session retired and queued for reconnect"))
     );
-    assert!(events.iter().any(|line| line.contains("reason=\"forced timeout\"")));
-    assert!(events.iter().any(|line| line.contains("failure_threshold=")));
+    assert!(
+        events
+            .iter()
+            .any(|line| line.contains("reason=\"forced timeout\""))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|line| line.contains("failure_threshold="))
+    );
     assert!(events.iter().any(|line| line.contains("reconnects=")));
     assert!(
         events

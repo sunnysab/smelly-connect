@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 #[tokio::test]
 async fn routing_returns_direct_for_non_resource_targets_by_default() {
     let mut system_dns = std::collections::HashMap::new();

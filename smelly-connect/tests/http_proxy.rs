@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 #[tokio::test]
 async fn proxy_forwards_http_requests_through_session() {
     let harness = smelly_connect::test_support::proxy::http_proxy_harness().await;

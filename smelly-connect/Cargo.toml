@@ -7,6 +7,10 @@ edition = "2024"
 name = "smelly_connect"
 path = "src/lib.rs"
 
+[features]
+default = []
+test-utils = []
+
 [dependencies]
 rsa = "0.9"
 smelly-tls = { path = "../smelly-tls", features = ["tokio"] }

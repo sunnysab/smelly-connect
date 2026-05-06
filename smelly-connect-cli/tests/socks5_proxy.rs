@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 #[tokio::test]
 async fn socks5_proxy_supports_tcp_connect() {
     let result = smelly_connect_cli::proxy::socks5::proxy_socks5_for_test()

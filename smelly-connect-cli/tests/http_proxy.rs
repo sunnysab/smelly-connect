@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 #[tokio::test]
 async fn http_proxy_uses_pool_and_forwards_requests() {
     let result = smelly_connect_cli::proxy::http::proxy_http_for_test()

@@ -12,6 +12,7 @@ pub mod resource;
 mod runtime;
 pub mod session;
 pub mod target;
+#[cfg(feature = "test-utils")]
 pub mod test_support;
 pub mod transport;
 

@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 #[tokio::test]
 async fn resolver_falls_back_from_remote_dns_to_system_dns() {
     let resolver = smelly_connect::test_support::resolver::resolver_with_failing_remote();

@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 #[tokio::test]
 async fn packet_device_forwards_frames_between_channels_and_stack() {
     let harness = smelly_connect::test_support::transport::packet_harness();

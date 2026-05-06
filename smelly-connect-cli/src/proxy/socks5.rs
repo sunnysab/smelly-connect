@@ -14,10 +14,9 @@ use tokio::task::JoinSet;
 use crate::pool::SessionPool;
 use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 
-use super::common::{
-    LiveRouteBackend, UpstreamConnectError, connect_live_upstream_with_timeout,
-    connect_with_timeout,
-};
+#[cfg(feature = "test-utils")]
+use super::common::connect_with_timeout;
+use super::common::{LiveRouteBackend, UpstreamConnectError, connect_live_upstream_with_timeout};
 
 const DEFAULT_MAX_IN_FLIGHT_CONNECTIONS: usize = 1024;
 
@@ -459,62 +458,62 @@ fn map_socks5_reply_error(err: &UpstreamConnectError) -> ReplyError {
 // Re-exports for integration tests
 // ---------------------------------------------------------------------------
 
-#[cfg(any(test, debug_assertions))]
-pub use tests::Socks5ProxyTestResult;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::Socks5FailureResult;
-#[cfg(any(test, debug_assertions))]
-pub use tests::TimeoutTestResult;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 pub use tests::Socks5LiveFailureRecoveryTestResult;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_ipv6_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_udp_associate_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_direct_connect_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_direct_udp_associate_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_udp_associate_idle_timeout_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_no_ready_session_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_no_ready_session_sequence_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_runtime_stats_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_connect_failure_runtime_status_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_connect_timeout_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_connect_failure_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_timeout_reply_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_rejects_unsupported_methods_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_rejects_unsupported_command_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_rejects_unsupported_atyp_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_live_failure_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_over_capacity_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
+pub use tests::Socks5ProxyTestResult;
+#[cfg(feature = "test-utils")]
+pub use tests::TimeoutTestResult;
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_socks5_allow_all_failure_does_not_open_for_test;
-#[cfg(any(test, debug_assertions))]
-pub use tests::proxy_socks5_route_rejection_does_not_open_for_test;
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_connect_failure_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_connect_failure_runtime_status_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_connect_timeout_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_direct_connect_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_direct_udp_associate_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_ipv6_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_live_failure_for_test;
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_socks5_live_timeout_reply_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_no_ready_session_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_no_ready_session_sequence_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_over_capacity_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_rejects_unsupported_atyp_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_rejects_unsupported_command_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_rejects_unsupported_methods_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_route_rejection_does_not_open_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_runtime_stats_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_timeout_reply_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_udp_associate_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_udp_associate_idle_timeout_for_test;
 
 // ---------------------------------------------------------------------------
 // Test module
 // ---------------------------------------------------------------------------
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(feature = "test-utils")]
 mod tests {
     use std::collections::HashMap;
     use std::future::Future;
@@ -673,8 +672,7 @@ mod tests {
 
         client
             .write_all(&[
-                0x05, 0x01, 0x00, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01,
-                0xbb,
+                0x05, 0x01, 0x00, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xbb,
             ])
             .await
             .map_err(|err| err.to_string())?;
@@ -796,8 +794,8 @@ mod tests {
         })
     }
 
-    pub async fn proxy_socks5_direct_udp_associate_for_test(
-    ) -> Result<Socks5ProxyTestResult, String> {
+    pub async fn proxy_socks5_direct_udp_associate_for_test()
+    -> Result<Socks5ProxyTestResult, String> {
         let upstream = spawn_udp_echo_upstream().await;
         let session =
             unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
@@ -963,8 +961,8 @@ mod tests {
             .map_err(|err| err.to_string())?;
         client
             .write_all(&[
-                0x05, 0x01, 0x00, 0x03, 0x10, b'l', b'i', b'b', b'd', b'b', b'.', b'z', b'j',
-                b'u', b'.', b'e', b'd', b'u', b'.', b'c', b'n', 0x01, 0xbb,
+                0x05, 0x01, 0x00, 0x03, 0x10, b'l', b'i', b'b', b'd', b'b', b'.', b'z', b'j', b'u',
+                b'.', b'e', b'd', b'u', b'.', b'c', b'n', 0x01, 0xbb,
             ])
             .await
             .map_err(|err| err.to_string())?;
@@ -996,8 +994,8 @@ mod tests {
         Ok(stats.snapshot(pool.summary().await))
     }
 
-    pub async fn proxy_socks5_connect_failure_runtime_status_for_test(
-    ) -> Result<RuntimeSnapshot, String> {
+    pub async fn proxy_socks5_connect_failure_runtime_status_for_test()
+    -> Result<RuntimeSnapshot, String> {
         let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
         let stats = RuntimeStats::default();
         let addr = spawn_test_socks5_with_stats(
@@ -1038,8 +1036,8 @@ mod tests {
             .map_err(|err| err.to_string())?;
         client
             .write_all(&[
-                0x05, 0x01, 0x00, 0x03, 0x10, b'l', b'i', b'b', b'd', b'b', b'.', b'z', b'j',
-                b'u', b'.', b'e', b'd', b'u', b'.', b'c', b'n', 0x01, 0xbb,
+                0x05, 0x01, 0x00, 0x03, 0x10, b'l', b'i', b'b', b'd', b'b', b'.', b'z', b'j', b'u',
+                b'.', b'e', b'd', b'u', b'.', b'c', b'n', 0x01, 0xbb,
             ])
             .await
             .map_err(|err| err.to_string())?;
@@ -1078,8 +1076,8 @@ mod tests {
         request_connect_failure(addr).await
     }
 
-    pub async fn proxy_socks5_rejects_unsupported_methods_for_test(
-    ) -> Result<Socks5FailureResult, String> {
+    pub async fn proxy_socks5_rejects_unsupported_methods_for_test()
+    -> Result<Socks5FailureResult, String> {
         let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
         let addr = spawn_test_socks5(pool, |_account_name, _host, _port| async move {
             Err(io::Error::other("unexpected connector use"))
@@ -1103,8 +1101,8 @@ mod tests {
         })
     }
 
-    pub async fn proxy_socks5_rejects_unsupported_command_for_test(
-    ) -> Result<Socks5FailureResult, String> {
+    pub async fn proxy_socks5_rejects_unsupported_command_for_test()
+    -> Result<Socks5FailureResult, String> {
         let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
         let addr = spawn_test_socks5(pool, |_account_name, _host, _port| async move {
             Err(io::Error::other("unexpected connector use"))
@@ -1137,8 +1135,8 @@ mod tests {
         })
     }
 
-    pub async fn proxy_socks5_rejects_unsupported_atyp_for_test(
-    ) -> Result<Socks5FailureResult, String> {
+    pub async fn proxy_socks5_rejects_unsupported_atyp_for_test()
+    -> Result<Socks5FailureResult, String> {
         let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
         let addr = spawn_test_socks5(pool, |_account_name, _host, _port| async move {
             Err(io::Error::other("unexpected connector use"))
@@ -1220,8 +1218,8 @@ mod tests {
         result
     }
 
-    pub async fn proxy_socks5_allow_all_failure_does_not_open_for_test(
-    ) -> Result<Socks5LiveFailureRecoveryTestResult, String> {
+    pub async fn proxy_socks5_allow_all_failure_does_not_open_for_test()
+    -> Result<Socks5LiveFailureRecoveryTestResult, String> {
         let session =
             unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST)
                 .with_allow_all_routes(true);
@@ -1242,8 +1240,8 @@ mod tests {
         })
     }
 
-    pub async fn proxy_socks5_route_rejection_does_not_open_for_test(
-    ) -> Result<Socks5LiveFailureRecoveryTestResult, String> {
+    pub async fn proxy_socks5_route_rejection_does_not_open_for_test()
+    -> Result<Socks5LiveFailureRecoveryTestResult, String> {
         let session =
             unmatched_live_session_for_test("example.test", std::net::Ipv4Addr::LOCALHOST);
         let pool = SessionPool::from_live_sessions_with_route_policy_for_test(
@@ -1281,7 +1279,10 @@ mod tests {
         request_connect_failure(addr).await
     }
 
-    async fn spawn_test_socks5<F, Fut>(pool: SessionPool, connector: F) -> Result<SocketAddr, String>
+    async fn spawn_test_socks5<F, Fut>(
+        pool: SessionPool,
+        connector: F,
+    ) -> Result<SocketAddr, String>
     where
         F: Fn(String, String, u16) -> Fut + Clone + Send + Sync + 'static,
         Fut: Future<Output = io::Result<TcpStream>> + Send + 'static,
@@ -1383,9 +1384,8 @@ mod tests {
                     Ok(permit) => {
                         tokio::spawn(async move {
                             let _permit = permit;
-                            let _ =
-                                handle_client(stream, pool, stats, connect_timeout, connector)
-                                    .await;
+                            let _ = handle_client(stream, pool, stats, connect_timeout, connector)
+                                .await;
                         });
                     }
                     Err(_) => {
@@ -1514,11 +1514,7 @@ mod tests {
         smelly_connect::session::EasyConnectSession::new(
             "10.0.0.8".parse().unwrap(),
             smelly_connect::resource::ResourceSet::default(),
-            smelly_connect::resolver::SessionResolver::new(
-                HashMap::new(),
-                None,
-                system_dns,
-            ),
+            smelly_connect::resolver::SessionResolver::new(HashMap::new(), None, system_dns),
             smelly_connect::session::EasyConnectSession::failing_transport(
                 "direct route should bypass vpn transport",
             ),

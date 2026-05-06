@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 use std::time::Duration;
 
 #[tokio::test]

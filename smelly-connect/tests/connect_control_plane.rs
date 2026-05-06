@@ -1,3 +1,4 @@
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn connect_runs_real_control_plane_flow_against_fake_server() {
     let harness = smelly_connect::test_support::auth::control_plane_harness().await;

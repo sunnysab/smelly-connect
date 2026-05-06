@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 #[tokio::test]
 async fn inspect_route_reports_library_allow_decision() {
     let output =

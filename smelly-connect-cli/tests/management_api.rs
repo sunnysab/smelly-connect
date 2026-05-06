@@ -1,4 +1,4 @@
-#![cfg(feature = "management-api")]
+#![cfg(all(feature = "management-api", feature = "test-utils"))]
 
 use std::collections::BTreeMap;
 
