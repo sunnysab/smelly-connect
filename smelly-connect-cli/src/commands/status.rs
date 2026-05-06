@@ -222,7 +222,22 @@ fn format_protocol(name: &str, stats: &ProtocolStats) -> String {
         "{name} current={} total={} c2u={} u2c={}",
         stats.current_connections,
         stats.total_connections,
-        stats.client_to_upstream_bytes,
-        stats.upstream_to_client_bytes
+        format_bytes(stats.client_to_upstream_bytes),
+        format_bytes(stats.upstream_to_client_bytes)
     )
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+
+    let mut value = bytes as f64;
+    let mut unit_index = 0;
+    while value >= 1000.0 && unit_index < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit_index += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit_index])
 }

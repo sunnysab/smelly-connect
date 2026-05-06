@@ -55,9 +55,9 @@ async fn status_command_reports_health_and_runtime_stats() {
     assert!(output.contains("management=127.0.0.1:19090"));
     assert!(output.contains("status=healthy"));
     assert!(output.contains("pool total=2 selectable=2 ready=2"));
-    assert!(output.contains("total current=3 total=9 c2u=120 u2c=240"));
-    assert!(output.contains("http current=1 total=4 c2u=40 u2c=90"));
-    assert!(output.contains("socks5 current=2 total=5 c2u=80 u2c=150"));
+    assert!(output.contains("total current=3 total=9 c2u=120 B u2c=240 B"));
+    assert!(output.contains("http current=1 total=4 c2u=40 B u2c=90 B"));
+    assert!(output.contains("socks5 current=2 total=5 c2u=80 B u2c=150 B"));
 }
 
 #[tokio::test]
@@ -177,6 +177,53 @@ async fn http_connect_failure_marks_runtime_status_recovering() {
         snapshot.status,
         smelly_connect_cli::pool::PoolHealthStatus::Recovering
     );
+}
+
+#[tokio::test]
+async fn status_command_formats_large_byte_counters_with_human_units() {
+    let output = smelly_connect_cli::commands::status::run_status_for_test(
+        "127.0.0.1:19090",
+        r#"{
+            "status":"healthy",
+            "pool":{
+                "status":"healthy",
+                "total_nodes":1,
+                "selectable_nodes":1,
+                "ready_nodes":1,
+                "suspect_nodes":0,
+                "open_nodes":0,
+                "half_open_nodes":0,
+                "connecting_nodes":0,
+                "configured_nodes":1
+            }
+        }"#,
+        r#"{
+            "total":{
+                "current_connections":1,
+                "total_connections":2,
+                "client_to_upstream_bytes":1536,
+                "upstream_to_client_bytes":2500000
+            },
+            "http":{
+                "current_connections":1,
+                "total_connections":2,
+                "client_to_upstream_bytes":1000,
+                "upstream_to_client_bytes":1000000
+            },
+            "socks5":{
+                "current_connections":0,
+                "total_connections":0,
+                "client_to_upstream_bytes":0,
+                "upstream_to_client_bytes":999
+            }
+        }"#,
+    )
+    .await
+    .unwrap();
+
+    assert!(output.contains("total current=1 total=2 c2u=1.5 kB u2c=2.5 MB"));
+    assert!(output.contains("http current=1 total=2 c2u=1.0 kB u2c=1.0 MB"));
+    assert!(output.contains("socks5 current=0 total=0 c2u=0 B u2c=999 B"));
 }
 
 #[test]
