@@ -52,21 +52,43 @@ pub async fn run_status() -> Result<(), String> {
 }
 
 pub async fn run_status_with_config(config_path: impl AsRef<Path>) -> Result<String, String> {
-    run_status_with_config_typed(config_path)
+    run_status_with_config_and_management_api(config_path, None).await
+}
+
+pub async fn run_status_with_config_and_management_api(
+    config_path: impl AsRef<Path>,
+    management_api: Option<String>,
+) -> Result<String, String> {
+    run_status_with_config_and_management_api_typed(config_path, management_api)
         .await
         .map_err(|err| err.to_string())
+}
+
+pub async fn run_status_with_config_and_management_api_typed(
+    config_path: impl AsRef<Path>,
+    management_api: Option<String>,
+) -> Result<String, CliError> {
+    let config = crate::config::load_typed(config_path)?;
+    let listen = management_api.unwrap_or(config.management.listen);
+    run_status_from_configured_target(config.management.enabled, &listen).await
+}
+
+async fn run_status_from_configured_target(
+    management_enabled: bool,
+    listen: &str,
+) -> Result<String, CliError> {
+    if !management_enabled {
+        return Err(CliError::Command(
+            "management API is disabled in config".to_string(),
+        ));
+    }
+    run_status_from_listen_typed(listen).await
 }
 
 pub async fn run_status_with_config_typed(
     config_path: impl AsRef<Path>,
 ) -> Result<String, CliError> {
-    let config = crate::config::load_typed(config_path)?;
-    if !config.management.enabled {
-        return Err(CliError::Command(
-            "management API is disabled in config".to_string(),
-        ));
-    }
-    run_status_from_listen_typed(&config.management.listen).await
+    run_status_with_config_and_management_api_typed(config_path, None).await
 }
 
 #[cfg(any(test, debug_assertions))]

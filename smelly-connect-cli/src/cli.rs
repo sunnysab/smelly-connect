@@ -16,7 +16,7 @@ pub struct Cli {
 pub enum Command {
     Proxy(ProxyCommand),
     Routes,
-    Status,
+    Status(StatusCommand),
     #[command(subcommand)]
     Inspect(InspectCommand),
     #[command(subcommand)]
@@ -35,6 +35,12 @@ pub struct ProxyCommand {
     pub keepalive_host: Option<String>,
     #[arg(long)]
     pub allow_all: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct StatusCommand {
+    #[arg(long)]
+    pub management_api: Option<String>,
 }
 
 #[derive(Debug, Clone, Subcommand)]

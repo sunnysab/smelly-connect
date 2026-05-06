@@ -61,6 +61,113 @@ async fn status_command_reports_health_and_runtime_stats() {
 }
 
 #[tokio::test]
+async fn status_command_prefers_management_api_override_over_config() {
+    let path = std::env::temp_dir().join("smelly-connect-cli-status-management-override.toml");
+    std::fs::write(
+        &path,
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+
+        [pool]
+        prewarm = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+
+        [management]
+        enabled = true
+        listen = "127.0.0.1:1"
+        "#,
+    )
+    .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let health_body = r#"{
+        "status":"healthy",
+        "pool":{
+            "total_nodes":1,
+            "selectable_nodes":1,
+            "ready_nodes":1,
+            "suspect_nodes":0,
+            "open_nodes":0,
+            "half_open_nodes":0,
+            "connecting_nodes":0,
+            "configured_nodes":1
+        }
+    }"#
+    .to_string();
+    let stats_body = r#"{
+        "total":{
+            "current_connections":1,
+            "total_connections":2,
+            "client_to_upstream_bytes":3,
+            "upstream_to_client_bytes":4
+        },
+        "http":{
+            "current_connections":0,
+            "total_connections":1,
+            "client_to_upstream_bytes":1,
+            "upstream_to_client_bytes":2
+        },
+        "socks5":{
+            "current_connections":1,
+            "total_connections":1,
+            "client_to_upstream_bytes":2,
+            "upstream_to_client_bytes":2
+        }
+    }"#
+    .to_string();
+    tokio::spawn(async move {
+        for _ in 0..2 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = vec![0_u8; 1024];
+            let Ok(n) = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await else {
+                return;
+            };
+            let request = String::from_utf8_lossy(&request[..n]);
+            let body = if request.starts_with("GET /healthz ") {
+                &health_body
+            } else {
+                &stats_body
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
+        }
+    });
+
+    let output = smelly_connect_cli::commands::status::run_status_with_config_and_management_api(
+        &path,
+        Some(addr.to_string()),
+    )
+    .await
+    .unwrap();
+
+    assert!(output.contains(&format!("management={addr}")));
+    assert!(output.contains("status=healthy"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
 async fn http_connect_failure_marks_runtime_status_recovering() {
     let snapshot =
         smelly_connect_cli::proxy::http::proxy_http_connect_failure_runtime_status_for_test()

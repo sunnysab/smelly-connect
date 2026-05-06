@@ -49,8 +49,11 @@ fn main() {
                         println!("{output}");
                         Ok(())
                     }
-                    smelly_connect_cli::cli::Command::Status => {
-                        let output = smelly_connect_cli::commands::status::run_status_with_config(&config_path).await?;
+                    smelly_connect_cli::cli::Command::Status(command) => {
+                        let output = smelly_connect_cli::commands::status::run_status_with_config_and_management_api(
+                            &config_path,
+                            command.management_api.clone(),
+                        ).await?;
                         println!("{output}");
                         Ok(())
                     }

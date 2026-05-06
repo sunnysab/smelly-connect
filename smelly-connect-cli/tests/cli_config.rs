@@ -249,7 +249,23 @@ fn status_is_available_as_a_top_level_command() {
     let cli = smelly_connect_cli::cli::Cli::parse_from(["smelly-connect-cli", "status"]);
     assert!(matches!(
         cli.command,
-        smelly_connect_cli::cli::Command::Status
+        smelly_connect_cli::cli::Command::Status(_)
+    ));
+}
+
+#[test]
+fn status_accepts_management_api_override() {
+    let cli = smelly_connect_cli::cli::Cli::parse_from([
+        "smelly-connect-cli",
+        "status",
+        "--management-api",
+        "127.0.0.1:19090",
+    ]);
+    assert!(matches!(
+        cli.command,
+        smelly_connect_cli::cli::Command::Status(smelly_connect_cli::cli::StatusCommand {
+            management_api: Some(ref management_api),
+        }) if management_api == "127.0.0.1:19090"
     ));
 }
 
