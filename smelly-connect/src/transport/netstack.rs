@@ -112,8 +112,12 @@ pub fn build_transport_from_packet_device(
     let udp_stack = stack.clone();
     let ping_stack = stack.clone();
 
+    // Move the device into the connect closure so it stays alive as long as
+    // the TransportStack exists. Without this, the device's inbound_tx sender
+    // would be dropped, causing the driver loop to exit immediately.
     Ok(TransportStack::new(move |target: TargetAddr| {
         let stack = connect_stack.clone();
+        let _device = &device; // keep device alive
         async move {
             let addr = socket_addr_from_target(target)?;
             stack.connect(addr).await
@@ -145,7 +149,9 @@ impl SmolStack {
                 .push(IpCidr::Ipv4(Ipv4Cidr::new(local_ip, 32)))
                 .unwrap();
         });
-        iface.routes_mut().add_default_ipv4_route(local_ip).unwrap();
+        // Use 0.0.0.0 as gateway to indicate directly reachable destination
+        // (point-to-point tunnel, no next-hop needed)
+        iface.routes_mut().add_default_ipv4_route(Ipv4Addr::UNSPECIFIED).unwrap();
 
         let inner = Arc::new(SmolStackInner {
             state: Mutex::new(NetstackState {
@@ -184,8 +190,12 @@ impl SmolStack {
                 IpAddr::V4(ip) => ip,
                 IpAddr::V6(_) => return Err(io::Error::other("ipv6 unsupported")),
             };
-            let NetstackState { iface, sockets, .. } = &mut *state;
-            let cx = iface.context();
+            // SAFETY: iface and sockets are distinct fields of NetstackState.
+            // We split the borrow to satisfy smoltcp's API which requires
+            // &mut Interface (via context()) and &mut SocketSet simultaneously.
+            let iface_ptr = &mut state.iface as *mut Interface;
+            let sockets = &mut state.sockets;
+            let cx = unsafe { &mut *iface_ptr }.context();
             sockets
                 .get_mut::<tcp::Socket<'static>>(handle)
                 .connect(cx, (remote_ip, addr.port()), local_port)
@@ -362,8 +372,7 @@ impl SmolStackInner {
             if let Some(packet) = inbound {
                 state.device.push_inbound(packet);
             }
-            // 批量 poll：多次 poll 直到没有新包产生
-            // 这样可以一次处理多个连接的包，减少轮次
+            // Batch poll: multiple rounds until no new packets are generated.
             for _ in 0..16 {
                 state.poll();
                 if state.device.outbound.is_empty() {

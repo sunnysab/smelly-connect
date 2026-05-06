@@ -125,18 +125,12 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
         Error::ControlPlane(ControlPlaneError::ResourceParseFailed(err.to_string()))
     })?;
 
-    // Decode sslctx if present
+    // Decode sslctx if present (used for RC4 key in data tunnels)
     let sslctx_key = resources
         .sslctx
         .as_deref()
         .and_then(|hex_str| decode_sslctx_hex(hex_str).ok())
         .map(|decoded| decoded.key());
-
-    if sslctx_key.is_some() {
-        tracing::info!("sslctx extracted from rclist.csp, will use command tunnel protocol");
-    } else {
-        tracing::info!("no sslctx in rclist.csp, will use legacy TLS protocol");
-    }
 
     Ok(ControlPlaneState {
         authorized_twfid,

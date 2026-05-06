@@ -109,49 +109,29 @@ impl EasyConnectConfig {
     ) -> Result<EasyConnectSession, Error> {
         let server_addr = crate::auth::control::resolve_server_addr_async(&self.server).await?;
 
-        // Extract sslctx key from resources, or fall back to legacy TLS token
-        let (client_ip, device) = if let Some(rc4_key) = &state.sslctx_key {
-            // New protocol: command tunnel (JJYY/AABB) + data tunnels (IPCP + RC4)
-            tracing::info!("using new command tunnel protocol (sslctx available)");
-            let (send_ip, _cmd_stream) =
-                crate::auth::control::connect_command_tunnel_async(server_addr).await?;
-            tracing::info!(tun_ip = %send_ip.tun_ip, enc_type = send_ip.enc_type, zip_flag = send_ip.zip_flag, "command tunnel SEND_IP received");
-            let tun_ip = send_ip.tun_ip;
-            let peer_sockaddr = crate::kernel::tunnel::derive_peer_sockaddr(
-                &server_addr.ip().to_string(),
-                server_addr.port(),
-            );
-            let device = crate::auth::control::connect_data_tunnels(
-                server_addr,
-                &peer_sockaddr,
-                tun_ip,
-                rc4_key,
-            )?;
-            (tun_ip, device)
-        } else {
-            // Legacy protocol: TLS-based token + handshake
-            tracing::info!("using legacy TLS protocol (no sslctx)");
-            let token = crate::auth::control::request_token_async(
-                &self.server,
-                &state.authorized_twfid,
-            )
-            .await?;
-            let (client_ip, _request_ip_tunnel) =
-                crate::auth::control::request_ip_via_tunnel_with_conn(
-                    server_addr,
-                    &token,
-                    state.legacy_cipher_hint.as_deref(),
-                )
+        // TLS-based protocol: token derivation → IP request → data tunnels
+        let token =
+            crate::auth::control::request_token_async(&self.server, &state.authorized_twfid)
                 .await?;
-            let device = crate::auth::control::spawn_legacy_packet_device(
+        let (client_ip, request_ip_tunnel) =
+            crate::auth::control::request_ip_via_tunnel_with_conn(
                 server_addr,
                 &token,
-                client_ip,
                 state.legacy_cipher_hint.as_deref(),
             )
             .await?;
-            (client_ip, device)
-        };
+        tracing::info!(%client_ip, "IP assigned via legacy TLS tunnel");
+        // IMPORTANT: request_ip_tunnel MUST stay alive — the server requires
+        // this connection to remain open for the data tunnels to work.
+        // (zju-connect: "Request IP conn CAN NOT be closed, otherwise tx/rx
+        // handshake will fail")
+        let device = crate::auth::control::spawn_legacy_packet_device(
+            server_addr,
+            &token,
+            client_ip,
+            state.legacy_cipher_hint.as_deref(),
+        )
+        .await?;
 
         let mut system_dns = std::collections::HashMap::new();
         for (host, resolved) in &state.resources.static_dns {
@@ -170,6 +150,6 @@ impl EasyConnectConfig {
         let keepalive = self.icmp_keepalive.as_ref().map(|keepalive| {
             session.start_icmp_keepalive(keepalive.target.clone(), keepalive.interval)
         });
-        Ok(session.with_runtime_resources(None, keepalive))
+        Ok(session.with_runtime_resources(Some(request_ip_tunnel), keepalive))
     }
 }

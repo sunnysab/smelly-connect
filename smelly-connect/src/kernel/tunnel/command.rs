@@ -144,8 +144,8 @@ impl SendIpInfo {
 /// Format: [family=2(LE), port(BE), ipv4(BE), padding(8 zeros)]
 pub fn derive_peer_sockaddr(host: &str, port: u16) -> [u8; 16] {
     let mut out = [0u8; 16];
-    out[0] = 2; // AF_INET
-    out[1] = 0;
+    // AF_INET = 2, stored as little-endian u16
+    out[0..2].copy_from_slice(&2u16.to_le_bytes());
     out[2..4].copy_from_slice(&port.to_be_bytes());
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
         out[4..8].copy_from_slice(&ip.octets());
