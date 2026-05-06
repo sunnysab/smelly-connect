@@ -188,9 +188,13 @@ while true; do
 done
 
 log "Duration reached, waiting for in-flight requests..."
-wait 2>/dev/null || true
+# Kill keepalive first so it doesn't block wait
 kill "$KEEPALIVE_PID" 2>/dev/null || true
 wait "$KEEPALIVE_PID" 2>/dev/null || true
+# Wait for remaining curl workers with timeout
+if (( in_flight > 0 )); then
+  timeout 15 bash -c 'while wait -n 2>/dev/null; do :; done' 2>/dev/null || true
+fi
 
 # ── summary ──
 log ""
@@ -224,7 +228,7 @@ log "=== Results ==="
       p90=${vals[$(( n * 90 / 100 ))]}
       p95=${vals[$(( n * 95 / 100 ))]}
       p99=${vals[$(( n * 99 / 100 ))]}
-      printf "  p50=%.3fs  p90=%.3fs  p95=%.3fs  p99=%.3fs  (n=%d)\n" "$p50" "$p90" "$p95" "$p99" "$n"
+      printf "  p50=%.2fs  p90=%.2fs  p95=%.2fs  p99=%.2fs  (n=%d)\n" "$p50" "$p90" "$p95" "$p99" "$n"
     else
       echo "  no data"
     fi
