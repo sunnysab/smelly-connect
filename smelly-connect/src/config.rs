@@ -112,8 +112,10 @@ impl EasyConnectConfig {
         // Extract sslctx key from resources, or fall back to legacy TLS token
         let (client_ip, device) = if let Some(rc4_key) = &state.sslctx_key {
             // New protocol: command tunnel (JJYY/AABB) + data tunnels (IPCP + RC4)
+            tracing::info!("using new command tunnel protocol (sslctx available)");
             let (send_ip, _cmd_stream) =
                 crate::auth::control::connect_command_tunnel_async(server_addr).await?;
+            tracing::info!(tun_ip = %send_ip.tun_ip, enc_type = send_ip.enc_type, zip_flag = send_ip.zip_flag, "command tunnel SEND_IP received");
             let tun_ip = send_ip.tun_ip;
             let peer_sockaddr = crate::kernel::tunnel::derive_peer_sockaddr(
                 &server_addr.ip().to_string(),
@@ -128,6 +130,7 @@ impl EasyConnectConfig {
             (tun_ip, device)
         } else {
             // Legacy protocol: TLS-based token + handshake
+            tracing::info!("using legacy TLS protocol (no sslctx)");
             let token = crate::auth::control::request_token_async(
                 &self.server,
                 &state.authorized_twfid,

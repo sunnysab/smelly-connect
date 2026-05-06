@@ -132,6 +132,12 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
         .and_then(|hex_str| decode_sslctx_hex(hex_str).ok())
         .map(|decoded| decoded.key());
 
+    if sslctx_key.is_some() {
+        tracing::info!("sslctx extracted from rclist.csp, will use command tunnel protocol");
+    } else {
+        tracing::info!("no sslctx in rclist.csp, will use legacy TLS protocol");
+    }
+
     Ok(ControlPlaneState {
         authorized_twfid,
         legacy_cipher_hint: parsed.legacy_cipher_hint,
