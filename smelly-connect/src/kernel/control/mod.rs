@@ -1,4 +1,3 @@
-mod encoder;
 mod messages;
 mod parser;
 

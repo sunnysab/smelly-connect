@@ -1556,8 +1556,8 @@ async fn relay_udp_associate(
     }
 }
 
-fn map_socks5_reply_error(_err: &UpstreamConnectError) -> ReplyError {
-    match _err {
+fn map_socks5_reply_error(err: &UpstreamConnectError) -> ReplyError {
+    match err {
         UpstreamConnectError::TimedOut => ReplyError::ConnectionTimeout,
         UpstreamConnectError::RouteRejected => ReplyError::ConnectionNotAllowed,
         UpstreamConnectError::Failed => ReplyError::NetworkUnreachable,

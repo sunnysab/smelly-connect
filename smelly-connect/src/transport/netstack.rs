@@ -47,8 +47,8 @@ struct SmolStackInner {
     local_ip: Ipv4Addr,
 }
 
-/// 获取锁，如果锁中毒则恢复并返回锁
-/// 这样单个 task panic 不会导致整个进程崩溃
+/// Acquire the netstack mutex lock. If the lock is poisoned, recover it
+/// so a single task panic does not crash the whole process.
 fn acquire_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
