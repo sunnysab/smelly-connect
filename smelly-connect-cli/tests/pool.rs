@@ -262,6 +262,27 @@ async fn open_node_reenters_via_timer_into_half_open_after_backoff_expiry() {
     assert!(pool.state_summary_for_test().await.contains("HalfOpen"));
 }
 
+#[test]
+fn auth_failure_message_is_treated_as_permanent_disable() {
+    assert!(smelly_connect_cli::pool::is_permanent_auth_failure_for_test(
+        "ControlPlane(AuthFlowFailed(\"MissingSuccessMarker\"))"
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn auth_failure_does_not_reenter_half_open_after_backoff_expiry() {
+    let pool = smelly_connect_cli::pool::SessionPool::from_test_accounts(1, 0).await;
+    pool.report_auth_failure_for_test(
+        "acct-01",
+        "ControlPlane(AuthFlowFailed(\"MissingSuccessMarker\"))",
+    )
+    .await;
+    tokio::time::advance(std::time::Duration::from_secs(601)).await;
+    assert!(pool.state_summary_for_test().await.contains("Open"));
+    assert!(!pool.state_summary_for_test().await.contains("HalfOpen"));
+    assert!(!pool.has_selectable_nodes_for_test().await);
+}
+
 #[tokio::test(start_paused = true)]
 async fn request_triggered_probe_recovers_one_node_when_pool_is_exhausted() {
     let pool = smelly_connect_cli::pool::SessionPool::from_exhausted_pool_for_test().await;

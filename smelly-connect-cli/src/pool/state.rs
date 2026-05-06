@@ -86,3 +86,10 @@ pub(super) fn open_node(node: &mut AccountNode, message: String) {
     node.live_probe_in_flight = false;
     node.state = AccountState::Open(AccountFailure { message });
 }
+
+pub(super) fn disable_node(node: &mut AccountNode, message: String) {
+    node.live_probe_in_flight = false;
+    node.open_until = None;
+    node.reconnect_session = None;
+    node.state = AccountState::Open(AccountFailure { message });
+}

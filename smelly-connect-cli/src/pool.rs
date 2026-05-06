@@ -19,7 +19,7 @@ mod state;
 
 use selection::next_selectable_index;
 #[cfg(any(test, debug_assertions))]
-use state::next_backoff;
+use state::{disable_node, next_backoff};
 use state::{build_pool_summary, open_node, state_label};
 
 #[derive(Clone)]
@@ -1258,6 +1258,18 @@ impl SessionPool {
     }
 
     #[cfg(any(test, debug_assertions))]
+    pub async fn report_auth_failure_for_test(&self, account_name: &str, error: &str) {
+        let mut state = self.inner.lock().await;
+        if let Some(node) = state
+            .nodes
+            .iter_mut()
+            .find(|node| node.account.name == account_name)
+        {
+            disable_node(node, error.to_string());
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
     pub async fn try_request_triggered_probe_for_test(&self) -> Result<PooledSession, PoolError> {
         let Some((name, account, _reconnect_session)) =
             self.claim_request_triggered_probe().await?
@@ -1617,7 +1629,11 @@ impl SessionPool {
                     .iter_mut()
                     .find(|node| node.account.name == name)
                 {
-                    open_node(node, err.to_string());
+                    if is_permanent_auth_failure(&err.to_string()) {
+                        disable_node(node, err.to_string());
+                    } else {
+                        open_node(node, err.to_string());
+                    }
                 }
                 tracing::warn!(account = %account.name, error = %err, "account prewarm failed");
                 Err(err)
@@ -1726,7 +1742,11 @@ impl SessionPool {
             .iter_mut()
             .find(|node| node.account.name == name)
             .ok_or_else(|| PoolError::new(format!("probe target disappeared: {name}")))?;
-        open_node(node, error.clone());
+        if is_permanent_auth_failure(&error) {
+            disable_node(node, error.clone());
+        } else {
+            open_node(node, error.clone());
+        }
         tracing::warn!(account = %name, error = %error, "request-triggered recovery probe failed");
         Ok(())
     }
@@ -1743,6 +1763,15 @@ impl SessionPool {
             }
         }
     }
+}
+
+fn is_permanent_auth_failure(message: &str) -> bool {
+    message.contains("ControlPlane(AuthFlowFailed(\"MissingSuccessMarker\"))")
+}
+
+#[cfg(any(test, debug_assertions))]
+pub fn is_permanent_auth_failure_for_test(message: &str) -> bool {
+    is_permanent_auth_failure(message)
 }
 
 impl SessionPool {
