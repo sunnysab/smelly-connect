@@ -78,6 +78,7 @@ class RunResult:
     ok_requests: int
     fail_requests: int
     timeout_requests: int
+    network_error_requests: int
 
 
 class Stats:
@@ -86,6 +87,7 @@ class Stats:
         self.ok_requests = 0
         self.fail_requests = 0
         self.timeout_requests = 0
+        self.network_error_requests = 0
         self.http_codes: Counter[int] = Counter()
         self.exit_codes: Counter[int] = Counter()
         self.errors: Counter[str] = Counter()
@@ -106,8 +108,11 @@ class Stats:
             self.ok_requests += 1
         else:
             self.fail_requests += 1
-        if result.exit_code != 0:
+        error_lower = result.error.lower()
+        if result.exit_code != 0 and error_lower.startswith("timed out:"):
             self.timeout_requests += 1
+        if result.exit_code != 0 and error_lower.startswith("network error:"):
+            self.network_error_requests += 1
 
     def add_health(self, result: HealthResult) -> None:
         self.keepalive_total += 1
@@ -145,12 +150,12 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--insecure", action="store_true")
     p.add_argument("--no-insecure", action="store_true")
     p.add_argument("--head-request", action="store_true")
+    p.add_argument("--fresh-tcp-per-request", action="store_true")
     p.add_argument("--keepalive-url")
     p.add_argument("--keepalive-int", type=float)
     p.add_argument("--report-interval", type=float)
     return p
 
-    p.add_argument("--fresh-tcp-per-request", action="store_true")
 
 def load_settings(
     argv: list[str] | tuple[str, ...],
@@ -196,15 +201,15 @@ def load_settings(
             "1" if args.head_request else values.get("HEAD_REQUEST"),
             default=False,
         ),
+        fresh_tcp_per_request=env_bool(
+            "1" if args.fresh_tcp_per_request else values.get("FRESH_TCP_PER_REQUEST"),
+            default=False,
+        ),
         keepalive_url=args.keepalive_url or values.get("KEEPALIVE_URL", DEFAULT_KEEPALIVE_URL),
         keepalive_interval=float(
             args.keepalive_int if args.keepalive_int is not None else values.get("KEEPALIVE_INT", 30)
         ),
         report_interval=float(
-        fresh_tcp_per_request=env_bool(
-            "1" if args.fresh_tcp_per_request else values.get("FRESH_TCP_PER_REQUEST"),
-            default=False,
-        ),
             args.report_interval
             if args.report_interval is not None
             else values.get("REPORT_INTERVAL", DEFAULT_REPORT_INTERVAL)
@@ -278,11 +283,6 @@ async def execute_request(
     )
 
 
-async def keepalive_loop(
-    client: httpx.AsyncClient,
-    settings: Settings,
-    stop_event: asyncio.Event,
-    health_path: Path,
 async def execute_request_with_fresh_client(
     settings: Settings,
     request_id: int,
@@ -302,6 +302,11 @@ async def execute_request_with_fresh_client(
         return await execute_request(client, settings, request_id, url)
 
 
+async def keepalive_loop(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    stop_event: asyncio.Event,
+    health_path: Path,
     stats: Stats,
 ) -> None:
     while not stop_event.is_set():
@@ -333,6 +338,8 @@ def write_summary(settings: Settings, stats: Stats, summary_path: Path) -> None:
         f"max_time={settings.max_time:.1f}s",
         f"targets={' '.join(settings.urls)}",
         f"total_requests={stats.total_requests}",
+        f"timeout_requests={stats.timeout_requests}",
+        f"network_error_requests={stats.network_error_requests}",
         "",
         "[http_code_distribution]",
     ]
@@ -428,6 +435,10 @@ async def run_load_test(settings: Settings) -> RunResult:
         f"{settings.proxy_url or '-'}  duration={settings.duration}s  "
         f"concurrency={settings.concurrency}  ramp_up={settings.ramp_up}s"
     )
+    log(
+        "request_mode="
+        + ("fresh_tcp_per_request" if settings.fresh_tcp_per_request else "shared_client")
+    )
     log(f"targets: {' '.join(settings.urls)}")
     log(f"results={results_path}")
     log("")
@@ -435,10 +446,6 @@ async def run_load_test(settings: Settings) -> RunResult:
     pending: set[asyncio.Task[RequestResult]] = set()
     started = time.perf_counter()
     last_report = started
-    log(
-        "request_mode="
-        + ("fresh_tcp_per_request" if settings.fresh_tcp_per_request else "shared_client")
-    )
     next_request_id = 0
 
     results_file = results_path.open("a", encoding="utf-8", buffering=1)
@@ -452,7 +459,8 @@ async def run_load_test(settings: Settings) -> RunResult:
                 log(
                     f"  [{elapsed:.0f}s/{settings.duration:.0f}s] "
                     f"reqs={next_request_id} ok={stats.ok_requests} fail={stats.fail_requests} "
-                    f"timeout={stats.timeout_requests} in_flight={len(pending)}"
+                    f"timeout={stats.timeout_requests} network={stats.network_error_requests} "
+                    f"in_flight={len(pending)}"
                 )
                 last_report = time.perf_counter()
 
@@ -518,6 +526,7 @@ async def run_load_test(settings: Settings) -> RunResult:
         ok_requests=stats.ok_requests,
         fail_requests=stats.fail_requests,
         timeout_requests=stats.timeout_requests,
+        network_error_requests=stats.network_error_requests,
     )
 
 

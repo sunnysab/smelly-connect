@@ -147,6 +147,31 @@ def test_run_load_test_supports_fresh_tcp_per_request_mode(tmp_path):
     assert result.fail_requests == 0
 
 
+def test_run_load_test_counts_network_errors_separately_from_timeouts(tmp_path):
+    module = load_module()
+
+    with LocalHttpServer(status_code=200) as server:
+        settings = module.load_settings(
+            [server.url],
+            {
+                "PROXY_URL": "http://127.0.0.1:1",
+                "KEEPALIVE_INT": "0",
+                "DURATION": "0.05",
+                "CONCURRENCY": "1",
+                "RAMP_UP": "0",
+                "OUT_DIR": str(tmp_path / "network"),
+            },
+            now=1_700_000_000.0,
+        )
+
+        result = asyncio.run(module.run_load_test(settings))
+
+    assert result.fail_requests > 0
+    assert result.network_error_requests == result.fail_requests
+    assert result.timeout_requests == 0
+    assert "network_error_requests=" in result.summary_path.read_text()
+
+
 def test_run_load_test_records_timeout_failures(tmp_path):
     module = load_module()
 
@@ -170,4 +195,5 @@ def test_run_load_test_records_timeout_failures(tmp_path):
 
     assert result.fail_requests > 0
     assert result.timeout_requests == result.fail_requests
+    assert result.network_error_requests == 0
     assert "timed out" in result.results_path.read_text().lower()
