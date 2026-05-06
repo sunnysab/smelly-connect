@@ -14,9 +14,9 @@ from typing import Mapping
 
 import httpx
 
-DEFAULT_URLS = ("https://jwxt.sit.edu.cn/",)
+DEFAULT_URLS = ("https://xg.sit.edu.cn/",)
 DEFAULT_PROXY_URL = "http://127.0.0.1:8080"
-DEFAULT_KEEPALIVE_URL = "http://www.baidu.com"
+DEFAULT_KEEPALIVE_URL = "https://jwxt.sit.edu.cn/"
 DEFAULT_OUT_ROOT = Path("./tmp/vpn-stability")
 DEFAULT_REPORT_INTERVAL = 30.0
 

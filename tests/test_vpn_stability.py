@@ -71,6 +71,8 @@ def test_settings_default_timeout_is_30_seconds():
     first = module.load_settings([], {}, now=1_700_000_000.0)
     second = module.load_settings([], {}, now=1_700_000_001.0)
 
+    assert first.urls == ("https://xg.sit.edu.cn/",)
+    assert first.keepalive_url == "https://jwxt.sit.edu.cn/"
     assert first.connect_timeout == 30.0
     assert first.max_time == 30.0
     assert first.out_dir != second.out_dir
