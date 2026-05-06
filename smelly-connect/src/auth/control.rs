@@ -7,6 +7,11 @@ use tracing::info;
 
 use crate::config::EasyConnectConfig;
 use crate::error::{Error, TunnelBootstrapError};
+use crate::kernel::tunnel::command::{
+    FIXED_SSL_ACK, FIXED_SSL_SYN, SERVER_MSG_LEN, SERVER_SSL_ACK_LEN, SendIpInfo, ServerMsg,
+    build_new_connect_msg, derive_peer_sockaddr,
+};
+use crate::kernel::tunnel::dataplane::DataTunnel;
 use crate::transport::device::PacketDevice;
 
 pub type ControlPlaneState = crate::runtime::control_plane::ControlPlaneState;
@@ -18,6 +23,8 @@ pub(crate) async fn run_control_plane(
     crate::runtime::control_plane::run_control_plane(config).await
 }
 
+/// Legacy: Derive token from TLS ServerHello SessionID.
+/// Used when sslctx is not available (old protocol path).
 pub fn request_token(server: &str, twfid: &str) -> Result<crate::protocol::DerivedToken, Error> {
     let mut builder = SslConnector::builder(SslMethod::tls_client()).map_err(|err| {
         Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
@@ -120,6 +127,7 @@ pub async fn request_ip_for_server(
     request_ip_via_tunnel(addr, token, legacy_cipher_hint).await
 }
 
+/// Legacy: Open a recv data tunnel (TLS handshake + 0x06 message).
 pub async fn open_recv_tunnel(
     addr: SocketAddr,
     token: &crate::protocol::DerivedToken,
@@ -250,6 +258,11 @@ pub(crate) async fn resolve_server_addr_async(server: &str) -> Result<SocketAddr
         })?
 }
 
+// ============================================================
+// Legacy TLS protocol (pre-sslctx, kept for backward compat)
+// ============================================================
+
+/// Legacy: Open a TLS tunnel with a handshake message and validate reply type.
 async fn open_stream_tunnel(
     addr: SocketAddr,
     handshake: Vec<u8>,
@@ -300,4 +313,173 @@ async fn connect_legacy_tunnel(
             last_err.unwrap_or_else(|| "legacy tunnel failed".to_string()),
         ),
     ))
+}
+
+// ============================================================
+// Command tunnel protocol (JJYY/AABB) — new protocol
+// ============================================================
+
+/// Perform the fixed TLS-looking handshake on a TCP connection.
+/// Sends FixedSSLSyn, reads 0x7A bytes, sends FixedSSLAck.
+fn perform_fixed_tls_handshake(stream: &mut std::net::TcpStream) -> Result<(), Error> {
+    stream.write_all(FIXED_SSL_SYN).map_err(|err| {
+        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
+    })?;
+    let mut server_ack = [0u8; SERVER_SSL_ACK_LEN];
+    stream.read_exact(&mut server_ack).map_err(|err| {
+        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
+    })?;
+    stream.write_all(FIXED_SSL_ACK).map_err(|err| {
+        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
+    })?;
+    Ok(())
+}
+
+/// Connect to the command tunnel, send NEWCONNECT, and parse the SEND_IP response.
+/// Returns (SendIpInfo, command_tunnel_stream).
+/// The command tunnel stream MUST be kept alive for heartbeats.
+pub fn connect_command_tunnel(
+    addr: SocketAddr,
+) -> Result<(SendIpInfo, std::net::TcpStream), Error> {
+    let mut stream = std::net::TcpStream::connect(addr).map_err(|err| {
+        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
+    })?;
+
+    perform_fixed_tls_handshake(&mut stream)?;
+
+    let peer = derive_peer_sockaddr(&addr.ip().to_string(), addr.port());
+    let msg = build_new_connect_msg(&peer);
+    stream.write_all(&msg).map_err(|err| {
+        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
+    })?;
+
+    let mut reply = [0u8; SERVER_MSG_LEN];
+    stream.read_exact(&mut reply).map_err(|err| {
+        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
+    })?;
+
+    let server_msg = ServerMsg::parse(&reply).map_err(|err| {
+        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!("{err}")))
+    })?;
+
+    let send_ip = SendIpInfo::from_server_msg(&server_msg).map_err(|err| {
+        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!("{err}")))
+    })?;
+
+    Ok((send_ip, stream))
+}
+
+/// Async wrapper for `connect_command_tunnel`.
+pub async fn connect_command_tunnel_async(
+    addr: SocketAddr,
+) -> Result<(SendIpInfo, std::net::TcpStream), Error> {
+    tokio::task::spawn_blocking(move || connect_command_tunnel(addr))
+        .await
+        .map_err(|err| {
+            Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!(
+                "command tunnel task join failed: {err}"
+            )))
+        })?
+}
+
+/// Connect send and recv data tunnels using the command tunnel protocol.
+/// Returns a PacketDevice that bridges VPN tunnels with the smoltcp stack.
+pub fn connect_data_tunnels(
+    addr: SocketAddr,
+    peer_sockaddr: &[u8; 16],
+    tun_ip: Ipv4Addr,
+    rc4_key: &[u8; 16],
+) -> Result<PacketDevice, Error> {
+    let recv = crate::kernel::tunnel::connect_recv_tunnel(addr, peer_sockaddr, tun_ip, rc4_key)
+        .map_err(|err| {
+            Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!(
+                "recv tunnel: {err}"
+            )))
+        })?;
+    let send = crate::kernel::tunnel::connect_send_tunnel(addr, peer_sockaddr, tun_ip, rc4_key)
+        .map_err(|err| {
+            Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!(
+                "send tunnel: {err}"
+            )))
+        })?;
+
+    packet_device_from_data_tunnels(recv, send)
+}
+
+/// Create a PacketDevice from two DataTunnels (recv + send).
+/// Spawns tasks for VPN↔stack packet bridging with IPCP framing.
+pub fn packet_device_from_data_tunnels(
+    recv: DataTunnel,
+    send: DataTunnel,
+) -> Result<PacketDevice, Error> {
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(1024);
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1024);
+    let mut device = PacketDevice::new(inbound_tx.clone(), inbound_rx, outbound_tx, outbound_rx);
+    let mut outbound_rx = device.take_outbound_rx().ok_or_else(|| {
+        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(
+            "missing outbound rx".to_string(),
+        ))
+    })?;
+
+    let (recv_stream, recv_rc4) = recv.into_parts();
+    let (send_stream, send_rc4) = send.into_parts();
+
+    // Recv tunnel → IPCP decode → inbound_tx (VPN → stack)
+    tokio::spawn(async move {
+        loop {
+            let packet = tokio::task::spawn_blocking({
+                let mut stream = recv_stream.try_clone().expect("tcp stream clone failed");
+                let mut rc4 = recv_rc4.clone();
+                move || crate::kernel::tunnel::read_ipcp_frame(&mut stream, &mut rc4)
+            })
+            .await;
+
+            match packet {
+                Ok(Ok(packet)) => {
+                    log_packet("vpn->stack", &packet);
+                    if inbound_tx.send(packet).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(Err(err)) => {
+                    tracing::error!("recv tunnel IPCP decode error: {err}");
+                    break;
+                }
+                Err(err) => {
+                    tracing::error!("recv tunnel task error: {err}");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Stack → IPCP encode → send tunnel (stack → VPN)
+    tokio::spawn(async move {
+        while let Some(packet) = outbound_rx.recv().await {
+            log_packet("stack->vpn", &packet);
+            let result = tokio::task::spawn_blocking({
+                let mut stream = send_stream.try_clone().expect("tcp stream clone failed");
+                let mut rc4 = send_rc4.clone();
+                move || {
+                    let frame = crate::kernel::tunnel::encode_ipcp(&packet, 0, 0, &mut rc4);
+                    stream.write_all(&frame).map_err(std::io::Error::from)
+                }
+            })
+            .await;
+
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::error!("send tunnel IPCP encode error: {err}");
+                    break;
+                }
+                Err(err) => {
+                    tracing::error!("send tunnel task error: {err}");
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(device)
 }

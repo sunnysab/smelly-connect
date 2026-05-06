@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use roxmltree::Document;
 
-use super::messages::{LoginAuthChallenge, ResourceDocument};
+use super::messages::{ConfMetadata, LoginAuthChallenge, ResourceDocument};
 use crate::RouteProtocol;
 use crate::resource::{DomainRule, IpRule, ResourceSet};
 
@@ -89,6 +89,12 @@ pub fn parse_resource_document(body: &str) -> Result<ResourceDocument, roxmltree
         }
     }
 
+    if let Some(other) = doc.descendants().find(|n| n.has_tag_name("Other")) {
+        if let Some(sslctx) = other.attribute("sslctx") {
+            resources.sslctx = Some(sslctx.to_string());
+        }
+    }
+
     if let Some(dns) = doc.descendants().find(|n| n.has_tag_name("Dns")) {
         if let Some(remote) = dns.attribute("dnsserver") {
             resources.remote_dns_server = Some(remote.to_string());
@@ -107,6 +113,30 @@ pub fn parse_resource_document(body: &str) -> Result<ResourceDocument, roxmltree
     }
 
     Ok(resources)
+}
+
+/// Parse metadata from a `/por/conf.csp` response.
+pub fn parse_conf_metadata(body: &str) -> Result<ConfMetadata, roxmltree::Error> {
+    let doc = Document::parse(body)?;
+    let mut meta = ConfMetadata::default();
+
+    if let Some(other) = doc.descendants().find(|n| n.has_tag_name("Other")) {
+        meta.login_name = other.attribute("login_name").map(ToOwned::to_owned);
+        meta.is_relogin = other.attribute("isRelogin").map(ToOwned::to_owned);
+    }
+
+    if let Some(service) = doc.descendants().find(|n| n.has_tag_name("Service")) {
+        meta.svpn_id = service.attribute("SvpnID").map(ToOwned::to_owned);
+    }
+
+    if let Some(mline) = doc.descendants().find(|n| n.has_tag_name("Mline")) {
+        meta.mline_enable = mline.attribute("enable") == Some("1");
+        if let Some(list) = mline.attribute("list") {
+            meta.mline_list = list.split(';').map(ToOwned::to_owned).collect();
+        }
+    }
+
+    Ok(meta)
 }
 
 fn extract_tag<'a>(body: &'a str, tag: &str) -> Option<&'a str> {

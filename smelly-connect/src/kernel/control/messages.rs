@@ -11,3 +11,13 @@ pub struct LoginAuthChallenge {
 }
 
 pub type ResourceDocument = ResourceSet;
+
+/// Metadata parsed from `/por/conf.csp` response.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfMetadata {
+    pub login_name: Option<String>,
+    pub is_relogin: Option<String>,
+    pub svpn_id: Option<String>,
+    pub mline_enable: bool,
+    pub mline_list: Vec<String>,
+}

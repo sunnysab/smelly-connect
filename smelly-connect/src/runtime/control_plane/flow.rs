@@ -5,6 +5,8 @@ use reqwest::header::{CONTENT_TYPE, COOKIE, USER_AGENT};
 use crate::auth::{encrypt_password, parse_login_auth};
 use crate::config::EasyConnectConfig;
 use crate::error::{ControlPlaneError, Error};
+use crate::kernel::control::parse_conf_metadata;
+use crate::kernel::tunnel::decode_sslctx_hex;
 use crate::resource::parse_resources;
 
 use super::client::build_reqwest_client;
@@ -95,6 +97,20 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
             Error::ControlPlane(ControlPlaneError::AuthFlowFailed(format!("{err:?}")))
         })?;
 
+    // Fetch conf.csp for metadata
+    let conf_body = client
+        .get(format!("{base_url}/por/conf.csp"))
+        .header(COOKIE, format!("TWFID={authorized_twfid}"))
+        .send()
+        .await
+        .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?
+        .text()
+        .await
+        .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
+
+    let conf_metadata = parse_conf_metadata(&conf_body).ok();
+
+    // Fetch rclist.csp for resources and sslctx
     let resource_body = client
         .get(format!("{base_url}/por/rclist.csp"))
         .header(COOKIE, format!("TWFID={authorized_twfid}"))
@@ -109,10 +125,19 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
         Error::ControlPlane(ControlPlaneError::ResourceParseFailed(err.to_string()))
     })?;
 
+    // Decode sslctx if present
+    let sslctx_key = resources
+        .sslctx
+        .as_deref()
+        .and_then(|hex_str| decode_sslctx_hex(hex_str).ok())
+        .map(|decoded| decoded.key());
+
     Ok(ControlPlaneState {
         authorized_twfid,
         legacy_cipher_hint: parsed.legacy_cipher_hint,
         resources,
         token: None,
+        sslctx_key,
+        conf_metadata,
     })
 }

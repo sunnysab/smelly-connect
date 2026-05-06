@@ -15,6 +15,33 @@ fn parses_domain_and_ip_resources() {
 }
 
 #[test]
+fn parses_sslctx_from_other_element() {
+    let body = r#"
+<Resource>
+  <Other sslctx="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeffaabbccdd00112233aabbccdd0011223344556677889900aa44556677889900aa" defaultRcId="1" />
+  <Rcs>
+    <Rc type="1" proto="-1" host="10.0.0.1" port="443~443" />
+  </Rcs>
+  <Dns data="" dnsserver="10.10.0.21" />
+</Resource>
+"#;
+    let parsed = smelly_connect::resource::parse_resources(body).unwrap();
+    assert!(parsed.sslctx.is_some());
+    let hex_str = parsed.sslctx.unwrap();
+    assert_eq!(hex_str.len(), 128);
+    let decoded = smelly_connect::kernel::tunnel::decode_sslctx_hex(&hex_str).unwrap();
+    assert_eq!(decoded.key().len(), 16);
+    assert_eq!(decoded.randnum().len(), 16);
+}
+
+#[test]
+fn sslctx_absent_when_no_other_element() {
+    let body = include_str!("fixtures/resource_sample.xml");
+    let parsed = smelly_connect::resource::parse_resources(body).unwrap();
+    assert!(parsed.sslctx.is_none());
+}
+
+#[test]
 fn wildcard_domain_rules_match_subdomains() {
     let body = r#"
 <Resource>

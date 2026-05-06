@@ -107,29 +107,54 @@ impl EasyConnectConfig {
         self,
         state: ControlPlaneState,
     ) -> Result<EasyConnectSession, Error> {
-        let token =
-            crate::auth::control::request_token_async(&self.server, &state.authorized_twfid)
-                .await?;
         let server_addr = crate::auth::control::resolve_server_addr_async(&self.server).await?;
-        let (client_ip, request_ip_tunnel) = crate::auth::control::request_ip_via_tunnel_with_conn(
-            server_addr,
-            &token,
-            state.legacy_cipher_hint.as_deref(),
-        )
-        .await?;
+
+        // Extract sslctx key from resources, or fall back to legacy TLS token
+        let (client_ip, device) = if let Some(rc4_key) = &state.sslctx_key {
+            // New protocol: command tunnel (JJYY/AABB) + data tunnels (IPCP + RC4)
+            let (send_ip, _cmd_stream) =
+                crate::auth::control::connect_command_tunnel_async(server_addr).await?;
+            let tun_ip = send_ip.tun_ip;
+            let peer_sockaddr = crate::kernel::tunnel::derive_peer_sockaddr(
+                &server_addr.ip().to_string(),
+                server_addr.port(),
+            );
+            let device = crate::auth::control::connect_data_tunnels(
+                server_addr,
+                &peer_sockaddr,
+                tun_ip,
+                rc4_key,
+            )?;
+            (tun_ip, device)
+        } else {
+            // Legacy protocol: TLS-based token + handshake
+            let token = crate::auth::control::request_token_async(
+                &self.server,
+                &state.authorized_twfid,
+            )
+            .await?;
+            let (client_ip, _request_ip_tunnel) =
+                crate::auth::control::request_ip_via_tunnel_with_conn(
+                    server_addr,
+                    &token,
+                    state.legacy_cipher_hint.as_deref(),
+                )
+                .await?;
+            let device = crate::auth::control::spawn_legacy_packet_device(
+                server_addr,
+                &token,
+                client_ip,
+                state.legacy_cipher_hint.as_deref(),
+            )
+            .await?;
+            (client_ip, device)
+        };
 
         let mut system_dns = std::collections::HashMap::new();
         for (host, resolved) in &state.resources.static_dns {
             system_dns.insert(host.clone(), *resolved);
         }
 
-        let device = crate::auth::control::spawn_legacy_packet_device(
-            server_addr,
-            &token,
-            client_ip,
-            state.legacy_cipher_hint.as_deref(),
-        )
-        .await?;
         let transport =
             crate::transport::netstack::build_transport_from_packet_device(device, client_ip)
                 .map_err(|err| Error::Transport(crate::error::TransportError::from_io(err)))?;
@@ -138,11 +163,10 @@ impl EasyConnectConfig {
             state.resources,
             SessionResolver::new(std::collections::HashMap::new(), None, system_dns),
             transport,
-        )
-        .with_legacy_data_plane(server_addr, token, state.legacy_cipher_hint);
+        );
         let keepalive = self.icmp_keepalive.as_ref().map(|keepalive| {
             session.start_icmp_keepalive(keepalive.target.clone(), keepalive.interval)
         });
-        Ok(session.with_runtime_resources(Some(request_ip_tunnel), keepalive))
+        Ok(session.with_runtime_resources(None, keepalive))
     }
 }

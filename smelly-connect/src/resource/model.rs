@@ -26,6 +26,7 @@ pub struct ResourceSet {
     pub ip_rules: Vec<IpRule>,
     pub static_dns: HashMap<String, IpAddr>,
     pub remote_dns_server: Option<String>,
+    pub sslctx: Option<String>,
 }
 
 impl ResourceSet {
