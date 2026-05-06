@@ -3,9 +3,6 @@ use crate::pool::RoutesSnapshot;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use tokio::io::AsyncReadExt;
-#[cfg(any(test, debug_assertions))]
-use tokio::io::AsyncWriteExt;
-#[cfg(not(any(test, debug_assertions)))]
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -31,33 +28,6 @@ pub async fn run_routes_with_config_typed(
         ));
     }
     run_routes_from_listen_typed(&config.management.listen).await
-}
-
-#[cfg(any(test, debug_assertions))]
-pub async fn run_routes_for_test(listen: &str, routes_json: &str) -> Result<String, String> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|err| err.to_string())?;
-    let addr = listener.local_addr().map_err(|err| err.to_string())?;
-    let routes_body = routes_json.to_string();
-    tokio::spawn(async move {
-        let Ok((mut stream, _)) = listener.accept().await else {
-            return;
-        };
-        let mut request = vec![0_u8; 1024];
-        let Ok(_n) = stream.read(&mut request).await else {
-            return;
-        };
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
-            routes_body.len(),
-            routes_body
-        );
-        let _ = stream.write_all(response.as_bytes()).await;
-    });
-    run_routes_from_listen_with_label(&addr.to_string(), listen)
-        .await
-        .map_err(|err| err.to_string())
 }
 
 async fn run_routes_from_listen_typed(listen: &str) -> Result<String, CliError> {
@@ -165,3 +135,37 @@ fn format_routes(listen: &str, routes: RoutesSnapshot) -> String {
     }
     lines.join("\n")
 }
+
+#[cfg(any(test, debug_assertions))]
+mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    pub async fn run_routes_for_test(listen: &str, routes_json: &str) -> Result<String, String> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|err| err.to_string())?;
+        let addr = listener.local_addr().map_err(|err| err.to_string())?;
+        let routes_body = routes_json.to_string();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = vec![0_u8; 1024];
+            let Ok(_n) = stream.read(&mut request).await else {
+                return;
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                routes_body.len(),
+                routes_body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        super::run_routes_from_listen_with_label(&addr.to_string(), listen)
+            .await
+            .map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
+pub use tests::*;

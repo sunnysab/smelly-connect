@@ -2,9 +2,6 @@ use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use tokio::io::AsyncReadExt;
-#[cfg(any(test, debug_assertions))]
-use tokio::io::AsyncWriteExt;
-#[cfg(not(any(test, debug_assertions)))]
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -95,46 +92,6 @@ pub async fn run_status_with_config_typed(
     config_path: impl AsRef<Path>,
 ) -> Result<String, CliError> {
     run_status_with_config_and_management_api_typed(config_path, None).await
-}
-
-#[cfg(any(test, debug_assertions))]
-pub async fn run_status_for_test(
-    listen: &str,
-    health_json: &str,
-    stats_json: &str,
-) -> Result<String, String> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|err| err.to_string())?;
-    let addr = listener.local_addr().map_err(|err| err.to_string())?;
-    let health_body = health_json.to_string();
-    let stats_body = stats_json.to_string();
-    tokio::spawn(async move {
-        for _ in 0..2 {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                return;
-            };
-            let mut request = vec![0_u8; 1024];
-            let Ok(n) = stream.read(&mut request).await else {
-                return;
-            };
-            let request = String::from_utf8_lossy(&request[..n]);
-            let body = if request.starts_with("GET /healthz ") {
-                &health_body
-            } else {
-                &stats_body
-            };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
-        }
-    });
-    run_status_from_listen_with_label(&addr.to_string(), listen)
-        .await
-        .map_err(|err| err.to_string())
 }
 
 async fn run_status_from_listen_typed(listen: &str) -> Result<String, CliError> {
@@ -250,3 +207,50 @@ fn format_bytes(bytes: u64) -> String {
     }
     format!("{value:.1} {}", UNITS[unit_index])
 }
+
+#[cfg(any(test, debug_assertions))]
+mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    pub async fn run_status_for_test(
+        listen: &str,
+        health_json: &str,
+        stats_json: &str,
+    ) -> Result<String, String> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|err| err.to_string())?;
+        let addr = listener.local_addr().map_err(|err| err.to_string())?;
+        let health_body = health_json.to_string();
+        let stats_body = stats_json.to_string();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = vec![0_u8; 1024];
+                let Ok(n) = stream.read(&mut request).await else {
+                    return;
+                };
+                let request = String::from_utf8_lossy(&request[..n]);
+                let body = if request.starts_with("GET /healthz ") {
+                    &health_body
+                } else {
+                    &stats_body
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        super::run_status_from_listen_with_label(&addr.to_string(), listen)
+            .await
+            .map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
+pub use tests::*;
