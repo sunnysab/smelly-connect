@@ -251,10 +251,18 @@ pub async fn connect_tunnel(
         &server_flight.server_hello.random,
         72,
     );
-    let client_mac: [u8; 20] = key_block[0..20].try_into().expect("key_block too short for client_mac");
-    let server_mac: [u8; 20] = key_block[20..40].try_into().expect("key_block too short for server_mac");
-    let client_key: [u8; 16] = key_block[40..56].try_into().expect("key_block too short for client_key");
-    let server_key: [u8; 16] = key_block[56..72].try_into().expect("key_block too short for server_key");
+    let client_mac: [u8; 20] = key_block[0..20]
+        .try_into()
+        .expect("key_block too short for client_mac");
+    let server_mac: [u8; 20] = key_block[20..40]
+        .try_into()
+        .expect("key_block too short for server_mac");
+    let client_key: [u8; 16] = key_block[40..56]
+        .try_into()
+        .expect("key_block too short for client_key");
+    let server_key: [u8; 16] = key_block[56..72]
+        .try_into()
+        .expect("key_block too short for server_key");
 
     let mut transcript = Vec::new();
     transcript.extend_from_slice(&handshake_messages(&client_hello_record));
@@ -373,8 +381,12 @@ pub async fn probe_handshake_steps(addr: SocketAddr, config: &ClientHelloConfig)
         &server_flight.server_hello.random,
         72,
     );
-    let client_mac: [u8; 20] = key_block[0..20].try_into().expect("key_block too short for client_mac");
-    let client_key: [u8; 16] = key_block[40..56].try_into().expect("key_block too short for client_key");
+    let client_mac: [u8; 20] = key_block[0..20]
+        .try_into()
+        .expect("key_block too short for client_mac");
+    let client_key: [u8; 16] = key_block[40..56]
+        .try_into()
+        .expect("key_block too short for client_key");
     let mut transcript = Vec::new();
     transcript.extend_from_slice(handshake_payload(&client_hello_record));
     transcript.extend_from_slice(handshake_payload(&server_flight_record));
@@ -817,10 +829,18 @@ pub fn split_key_block_for_test(key_block: &[u8]) -> io::Result<Tls10KeyBlockPar
         ));
     }
 
-    let client_mac = key_block[0..20].try_into().expect("key_block too short for client_mac");
-    let server_mac = key_block[20..40].try_into().expect("key_block too short for server_mac");
-    let client_key = key_block[40..56].try_into().expect("key_block too short for client_key");
-    let server_key = key_block[56..72].try_into().expect("key_block too short for server_key");
+    let client_mac = key_block[0..20]
+        .try_into()
+        .expect("key_block too short for client_mac");
+    let server_mac = key_block[20..40]
+        .try_into()
+        .expect("key_block too short for server_mac");
+    let client_key = key_block[40..56]
+        .try_into()
+        .expect("key_block too short for client_key");
+    let server_key = key_block[56..72]
+        .try_into()
+        .expect("key_block too short for server_key");
     Ok((client_mac, server_mac, client_key, server_key))
 }
 
@@ -873,7 +893,8 @@ pub struct Rc4Sha1Encryptor {
 
 impl Rc4Sha1Encryptor {
     pub fn new(mac_key: [u8; 20], enc_key: [u8; 16]) -> Self {
-        let cipher = Rc4::<rc4::consts::U16>::new_from_slice(&enc_key).expect("RC4 cipher init failed");
+        let cipher =
+            Rc4::<rc4::consts::U16>::new_from_slice(&enc_key).expect("RC4 cipher init failed");
         Self {
             sequence_number: 0,
             mac_key,
@@ -900,7 +921,8 @@ pub struct Rc4Sha1Decryptor {
 
 impl Rc4Sha1Decryptor {
     pub fn new(mac_key: [u8; 20], enc_key: [u8; 16]) -> Self {
-        let cipher = Rc4::<rc4::consts::U16>::new_from_slice(&enc_key).expect("RC4 cipher init failed");
+        let cipher =
+            Rc4::<rc4::consts::U16>::new_from_slice(&enc_key).expect("RC4 cipher init failed");
         Self {
             sequence_number: 0,
             mac_key,
@@ -1005,8 +1027,8 @@ fn hmac_once<M>(secret: &[u8], data: &[u8]) -> Vec<u8>
 where
     M: hmac::digest::KeyInit + hmac::Mac,
 {
-    let mut mac = <M as hmac::digest::KeyInit>::new_from_slice(secret)
-        .expect("HMAC key init failed");
+    let mut mac =
+        <M as hmac::digest::KeyInit>::new_from_slice(secret).expect("HMAC key init failed");
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
 }

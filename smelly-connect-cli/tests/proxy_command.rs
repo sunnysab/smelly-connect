@@ -292,7 +292,10 @@ async fn proxy_command_forces_shutdown_after_drain_timeout() {
         .expect("proxy command should force shutdown after timeout")
         .expect("proxy task should join");
 
-    assert!(result.is_ok(), "expected forced graceful shutdown, got {result:?}");
+    assert!(
+        result.is_ok(),
+        "expected forced graceful shutdown, got {result:?}"
+    );
     drop(client);
     let _ = fs::remove_file(path);
 }

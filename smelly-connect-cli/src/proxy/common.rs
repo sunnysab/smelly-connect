@@ -82,8 +82,8 @@ pub async fn connect_session_with_timeout<Fut>(
 ) -> Result<smelly_connect::transport::VpnStream, UpstreamConnectError>
 where
     Fut: std::future::Future<
-        Output = Result<smelly_connect::transport::VpnStream, smelly_connect::Error>,
-    >,
+            Output = Result<smelly_connect::transport::VpnStream, smelly_connect::Error>,
+        >,
 {
     match tokio::time::timeout(timeout, fut).await {
         Ok(Ok(value)) => Ok(value),

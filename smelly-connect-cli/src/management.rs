@@ -8,9 +8,9 @@ use serde::Serialize;
 #[cfg(any(test, debug_assertions))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::watch;
 #[cfg(any(test, debug_assertions))]
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 
 use crate::pool::{PoolHealthStatus, PoolSummary, SessionPool};
 use crate::runtime::RuntimeStats;
