@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
+use tokio::task::JoinSet;
 
 use crate::session::EasyConnectSession;
 
@@ -79,17 +80,32 @@ pub async fn start_http_proxy(
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
     let task = tokio::spawn(async move {
+        let mut client_tasks = JoinSet::new();
+        let mut abort_clients = false;
         loop {
             tokio::select! {
-                _ = &mut shutdown_rx => break,
+                _ = &mut shutdown_rx => {
+                    abort_clients = true;
+                    break;
+                }
                 accepted = listener.accept() => {
                     let Ok((stream, _)) = accepted else { break };
                     let session = session.clone();
-                    tokio::spawn(async move {
+                    client_tasks.spawn(async move {
                         let _ = handle_client(session, stream).await;
                     });
                 }
+                joined = client_tasks.join_next(), if !client_tasks.is_empty() => {
+                    let _ = joined;
+                }
             }
+        }
+
+        if abort_clients {
+            client_tasks.abort_all();
+        }
+        while let Some(joined) = client_tasks.join_next().await {
+            let _ = joined;
         }
     });
 

@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 #[tokio::test]
 async fn keepalive_handle_supports_explicit_shutdown() {
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -61,6 +63,53 @@ async fn proxy_handle_supports_explicit_shutdown() {
     assert!(
         result.is_err(),
         "proxy listener should be closed after shutdown"
+    );
+}
+
+#[tokio::test]
+async fn proxy_shutdown_closes_active_client_connections() {
+    let harness = smelly_connect::test_support::proxy::http_proxy_harness().await;
+    let mut tunnel = harness.open_tunnel("libdb.zju.edu.cn:443").await.unwrap();
+
+    tunnel.write_all(b"ping").await.unwrap();
+    let mut echoed = [0_u8; 4];
+    tunnel.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"ping");
+
+    tokio::time::timeout(Duration::from_secs(1), harness.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut tail = [0_u8; 1];
+    let result = tokio::time::timeout(Duration::from_secs(1), tunnel.read(&mut tail))
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, Ok(0)) || result.is_err(),
+        "active proxy clients should be closed when the proxy shuts down"
+    );
+}
+
+#[tokio::test]
+async fn dropping_proxy_handle_closes_active_client_connections() {
+    let harness = smelly_connect::test_support::proxy::http_proxy_harness().await;
+    let mut tunnel = harness.open_tunnel("libdb.zju.edu.cn:443").await.unwrap();
+
+    tunnel.write_all(b"ping").await.unwrap();
+    let mut echoed = [0_u8; 4];
+    tunnel.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"ping");
+
+    drop(harness);
+
+    let mut tail = [0_u8; 1];
+    let result = tokio::time::timeout(Duration::from_secs(1), tunnel.read(&mut tail))
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, Ok(0)) || result.is_err(),
+        "active proxy clients should be closed when the handle is dropped"
     );
 }
 

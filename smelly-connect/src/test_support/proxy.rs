@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -18,6 +19,10 @@ pub struct HttpProxyHarness {
 }
 
 impl HttpProxyHarness {
+    pub async fn shutdown(self) -> io::Result<()> {
+        self.handle.shutdown().await
+    }
+
     pub async fn get_via_proxy(&self, url: &str) -> String {
         self.get_via_proxy_with_connection(url, "close").await
     }
@@ -41,6 +46,15 @@ impl HttpProxyHarness {
     }
 
     pub async fn connect_tunnel(&self, target: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut client = self.open_tunnel(target).await?;
+        client.write_all(b"ping").await?;
+        let mut echoed = [0_u8; 4];
+        client.read_exact(&mut echoed).await?;
+        assert_eq!(&echoed, b"ping");
+        Ok(())
+    }
+
+    pub async fn open_tunnel(&self, target: &str) -> io::Result<TcpStream> {
         let mut client = TcpStream::connect(self.proxy_addr).await?;
         let request =
             format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n");
@@ -50,12 +64,7 @@ impl HttpProxyHarness {
         let n = client.read(&mut header).await?;
         let header = String::from_utf8_lossy(&header[..n]);
         assert!(header.starts_with("HTTP/1.1 200"));
-
-        client.write_all(b"ping").await?;
-        let mut echoed = [0_u8; 4];
-        client.read_exact(&mut echoed).await?;
-        assert_eq!(&echoed, b"ping");
-        Ok(())
+        Ok(client)
     }
 
     pub async fn post_split_body_via_proxy(&self, url: &str, first: &str, second: &str) -> String {
