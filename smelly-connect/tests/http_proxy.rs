@@ -73,6 +73,39 @@ async fn proxy_does_not_forward_proxy_authorization_header() {
 }
 
 #[tokio::test]
+async fn proxy_preserves_non_utf8_request_header_bytes() {
+    let harness =
+        smelly_connect::test_support::proxy::http_proxy_harness_with_non_utf8_request_header_capture()
+            .await;
+    let response = harness
+        .raw_http_exchange(
+            b"GET http://intranet.zju.edu.cn/health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nX-Test: \x80\xffbin\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+    let response = String::from_utf8(response).unwrap();
+    let body = response.split("\r\n\r\n").nth(1).unwrap().to_string();
+    assert_eq!(body, "preserved");
+}
+
+#[tokio::test]
+async fn proxy_preserves_non_utf8_response_header_bytes() {
+    let harness =
+        smelly_connect::test_support::proxy::http_proxy_harness_with_non_utf8_response_header()
+            .await;
+    let response = harness
+        .raw_http_exchange(
+            b"GET http://intranet.zju.edu.cn/health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+    let expected_header = b"X-Test: \x80\xffbin\r\n";
+    assert!(
+        response
+            .windows(expected_header.len())
+            .any(|window| window == expected_header)
+    );
+}
+
+#[tokio::test]
 async fn proxy_rejects_oversized_header_block() {
     let harness = smelly_connect::test_support::proxy::http_proxy_harness().await;
     let status = harness.oversized_header_status_via_proxy().await;

@@ -28,7 +28,7 @@ struct ForwardRequest<'a> {
     method: &'a str,
     target: &'a str,
     version: &'a str,
-    headers: Vec<&'a str>,
+    headers: Vec<&'a [u8]>,
     leftover: Vec<u8>,
     body_kind: RequestBodyKind,
     request_control: RequestControl,
@@ -132,16 +132,19 @@ async fn handle_client(session: EasyConnectSession, mut client: TcpStream) -> io
     };
     let header_bytes = &buffer[..header_end];
     let leftover = buffer[header_end..].to_vec();
-    let header_text = String::from_utf8_lossy(header_bytes);
-    let mut lines = header_text.split("\r\n").filter(|line| !line.is_empty());
+    let mut lines = header_lines(header_bytes);
     let request_line = lines
         .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing request line"))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing request line"))
+        .and_then(|line| {
+            std::str::from_utf8(line)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid request line"))
+        })?;
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let target = parts.next().unwrap_or_default();
     let version = parts.next().unwrap_or("HTTP/1.1");
-    let headers: Vec<&str> = lines.collect();
+    let headers: Vec<&[u8]> = lines.collect();
     let body_kind = parse_request_body_kind(&headers);
     let request_control = parse_request_control(&headers);
 
@@ -203,24 +206,17 @@ async fn handle_forward(
         .await
         .map_err(other_io)?;
 
-    let mut request = format!("{method} {path} {version}\r\n");
+    let mut request = format!("{method} {path} {version}\r\n").into_bytes();
     for header in headers {
-        let lower = header.to_ascii_lowercase();
-        if lower.starts_with("proxy-connection:")
-            || lower.starts_with("proxy-authorization:")
-            || lower.starts_with("connection:")
-            || lower.starts_with("keep-alive:")
-            || lower.starts_with("expect:")
-        {
+        if should_strip_request_header(header) {
             continue;
         }
-        request.push_str(header);
-        request.push_str("\r\n");
+        request.extend_from_slice(header);
+        request.extend_from_slice(b"\r\n");
     }
-    request.push_str("Connection: close\r\n");
-    request.push_str("\r\n");
+    request.extend_from_slice(b"Connection: close\r\n\r\n");
 
-    upstream.write_all(request.as_bytes()).await?;
+    upstream.write_all(&request).await?;
     if !leftover.is_empty() {
         upstream.write_all(&leftover).await?;
     }
@@ -319,44 +315,100 @@ pub fn find_header_end(buffer: &[u8]) -> Option<usize> {
         .map(|idx| idx + 4)
 }
 
-pub fn parse_content_length(headers: &[&str]) -> Option<usize> {
+fn header_lines(buffer: &[u8]) -> impl Iterator<Item = &[u8]> {
+    buffer
+        .split(|byte| *byte == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .filter(|line| !line.is_empty())
+}
+
+fn split_header_bytes(header: &[u8]) -> Option<(&[u8], &[u8])> {
+    let separator = header.iter().position(|byte| *byte == b':')?;
+    Some((
+        trim_ascii_http_whitespace(&header[..separator]),
+        trim_ascii_http_whitespace(&header[separator + 1..]),
+    ))
+}
+
+fn trim_ascii_http_whitespace(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|idx| idx + 1)
+        .unwrap_or(start);
+    &bytes[start..end]
+}
+
+fn should_strip_request_header(header: &[u8]) -> bool {
+    split_header_bytes(header).is_some_and(|(name, _)| {
+        name.eq_ignore_ascii_case(b"proxy-connection")
+            || name.eq_ignore_ascii_case(b"proxy-authorization")
+            || name.eq_ignore_ascii_case(b"connection")
+            || name.eq_ignore_ascii_case(b"keep-alive")
+            || name.eq_ignore_ascii_case(b"expect")
+    })
+}
+
+fn parse_content_length_bytes(headers: &[&[u8]]) -> Option<usize> {
     headers.iter().find_map(|header| {
-        header.split_once(':').and_then(|(name, value)| {
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())
+        split_header_bytes(header).and_then(|(name, value)| {
+            name.eq_ignore_ascii_case(b"content-length")
+                .then(|| {
+                    std::str::from_utf8(value)
+                        .ok()
+                        .and_then(|value| value.parse::<usize>().ok())
+                })
                 .flatten()
         })
     })
 }
 
-pub fn has_chunked_transfer_encoding(headers: &[&str]) -> bool {
+pub fn parse_content_length(headers: &[&str]) -> Option<usize> {
+    let headers: Vec<&[u8]> = headers.iter().map(|header| header.as_bytes()).collect();
+    parse_content_length_bytes(&headers)
+}
+
+fn has_chunked_transfer_encoding_bytes(headers: &[&[u8]]) -> bool {
     headers.iter().any(|header| {
-        header.split_once(':').is_some_and(|(name, value)| {
-            name.eq_ignore_ascii_case("transfer-encoding")
-                && value
-                    .split(',')
-                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        split_header_bytes(header).is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case(b"transfer-encoding")
+                && std::str::from_utf8(value).is_ok_and(|value| {
+                    value
+                        .split(',')
+                        .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+                })
         })
     })
 }
 
-fn parse_request_body_kind(headers: &[&str]) -> RequestBodyKind {
-    if has_chunked_transfer_encoding(headers) {
+pub fn has_chunked_transfer_encoding(headers: &[&str]) -> bool {
+    let headers: Vec<&[u8]> = headers.iter().map(|header| header.as_bytes()).collect();
+    has_chunked_transfer_encoding_bytes(&headers)
+}
+
+fn parse_request_body_kind(headers: &[&[u8]]) -> RequestBodyKind {
+    if has_chunked_transfer_encoding_bytes(headers) {
         RequestBodyKind::Chunked
-    } else if let Some(content_length) = parse_content_length(headers) {
+    } else if let Some(content_length) = parse_content_length_bytes(headers) {
         RequestBodyKind::ContentLength(content_length)
     } else {
         RequestBodyKind::None
     }
 }
 
-fn parse_request_control(headers: &[&str]) -> RequestControl {
+fn parse_request_control(headers: &[&[u8]]) -> RequestControl {
     if headers.iter().any(|header| {
-        header.split_once(':').is_some_and(|(name, value)| {
-            name.eq_ignore_ascii_case("expect")
-                && value
-                    .split(',')
-                    .any(|token| token.trim().eq_ignore_ascii_case("100-continue"))
+        split_header_bytes(header).is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case(b"expect")
+                && std::str::from_utf8(value).is_ok_and(|value| {
+                    value
+                        .split(',')
+                        .any(|token| token.trim().eq_ignore_ascii_case("100-continue"))
+                })
         })
     }) {
         RequestControl::ExpectContinue

@@ -23,6 +23,15 @@ impl HttpProxyHarness {
         self.handle.shutdown().await
     }
 
+    pub async fn raw_http_exchange(&self, request: &[u8]) -> Vec<u8> {
+        let mut client = TcpStream::connect(self.proxy_addr).await.unwrap();
+        client.write_all(request).await.unwrap();
+
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        response
+    }
+
     pub async fn get_via_proxy(&self, url: &str) -> String {
         self.get_via_proxy_with_connection(url, "close").await
     }
@@ -237,6 +246,34 @@ pub async fn http_proxy_harness_with_proxy_auth_capture() -> HttpProxyHarness {
     }
 }
 
+pub async fn http_proxy_harness_with_non_utf8_request_header_capture() -> HttpProxyHarness {
+    let http_upstream = spawn_non_utf8_request_header_capture_http_upstream().await;
+    let tunnel_upstream = spawn_echo_upstream().await;
+    let session = proxy_ready_session(http_upstream, tunnel_upstream);
+    let handle = session
+        .start_http_proxy("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    HttpProxyHarness {
+        proxy_addr: handle.local_addr(),
+        handle,
+    }
+}
+
+pub async fn http_proxy_harness_with_non_utf8_response_header() -> HttpProxyHarness {
+    let http_upstream = spawn_non_utf8_response_header_http_upstream().await;
+    let tunnel_upstream = spawn_echo_upstream().await;
+    let session = proxy_ready_session(http_upstream, tunnel_upstream);
+    let handle = session
+        .start_http_proxy("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    HttpProxyHarness {
+        proxy_addr: handle.local_addr(),
+        handle,
+    }
+}
+
 async fn spawn_http_upstream() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -420,6 +457,68 @@ async fn spawn_proxy_auth_capture_http_upstream() -> SocketAddr {
             body.len()
         );
         socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    addr
+}
+
+async fn spawn_non_utf8_request_header_capture_http_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let n = socket.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..n]);
+            if crate::proxy::http::find_header_end(&request).is_some() {
+                break;
+            }
+        }
+        let expected_header = b"X-Test: \x80\xffbin\r\n";
+        let body = if request
+            .windows(expected_header.len())
+            .any(|window| window == expected_header)
+        {
+            "preserved"
+        } else {
+            "rewritten"
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    addr
+}
+
+async fn spawn_non_utf8_response_header_http_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let n = socket.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                return;
+            }
+            request.extend_from_slice(&chunk[..n]);
+            if crate::proxy::http::find_header_end(&request).is_some() {
+                break;
+            }
+        }
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nX-Test: \x80\xffbin\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            )
+            .await
+            .unwrap();
     });
     addr
 }
