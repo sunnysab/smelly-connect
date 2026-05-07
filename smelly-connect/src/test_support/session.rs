@@ -91,6 +91,21 @@ pub fn session_with_slow_domain_match(host: &str, ip: Ipv4Addr) -> EasyConnectSe
     )
 }
 
+pub fn session_with_runtime_resources_and_transport(
+    host: &str,
+    ip: Ipv4Addr,
+    transport: TransportStack,
+) -> EasyConnectSession {
+    let (resources, system) = matched_resources(host, ip);
+    EasyConnectSession::new(
+        ip,
+        resources,
+        SessionResolver::new(HashMap::new(), None, system),
+        transport,
+    )
+    .with_runtime_resources(None, None)
+}
+
 pub fn session_with_immediate_timeout_domain_match(host: &str, ip: Ipv4Addr) -> EasyConnectSession {
     let (resources, system) = matched_resources(host, ip);
     let transport = TransportStack::new(|_| async {

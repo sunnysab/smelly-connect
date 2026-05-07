@@ -7,6 +7,8 @@ use crate::proxy::http::ProxyHandle;
 use crate::runtime::tasks::keepalive::KeepaliveHandle;
 use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 
+const DEFAULT_CONNECT_GATE_PERMITS: usize = 16;
+
 pub(crate) struct SessionRuntime {
     legacy_tunnel: Mutex<Option<smelly_tls::TunnelConnection>>,
     keepalive: Mutex<Option<KeepaliveHandle>>,
@@ -19,7 +21,7 @@ impl Default for SessionRuntime {
         Self {
             legacy_tunnel: Mutex::new(None),
             keepalive: Mutex::new(None),
-            connect_gate: std::sync::Arc::new(Semaphore::new(16)),
+            connect_gate: std::sync::Arc::new(Semaphore::new(DEFAULT_CONNECT_GATE_PERMITS)),
             reqwest_proxy: AsyncMutex::new(Weak::new()),
         }
     }
@@ -33,7 +35,7 @@ impl SessionRuntime {
         Self {
             legacy_tunnel: Mutex::new(legacy_tunnel),
             keepalive: Mutex::new(keepalive),
-            connect_gate: std::sync::Arc::new(Semaphore::new(1)),
+            connect_gate: std::sync::Arc::new(Semaphore::new(DEFAULT_CONNECT_GATE_PERMITS)),
             reqwest_proxy: AsyncMutex::new(Weak::new()),
         }
     }

@@ -86,53 +86,26 @@ async fn session_keepalive_task_invokes_transport_icmp_ping() {
 }
 
 #[tokio::test]
-async fn session_serializes_concurrent_connect_establishment() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let active = Arc::new(AtomicUsize::new(0));
-    let max_active = Arc::new(AtomicUsize::new(0));
+async fn session_runtime_resources_do_not_serialize_concurrent_connect_establishment() {
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let transport = smelly_connect::transport::TransportStack::new({
-        let active = active.clone();
-        let max_active = max_active.clone();
+        let barrier = barrier.clone();
         move |_| {
-            let active = active.clone();
-            let max_active = max_active.clone();
+            let barrier = barrier.clone();
             async move {
-                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                max_active.fetch_max(now, Ordering::SeqCst);
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                active.fetch_sub(1, Ordering::SeqCst);
+                barrier.wait().await;
                 let (client, _server) = tokio::io::duplex(1024);
                 Ok(smelly_connect::transport::VpnStream::new(client))
             }
         }
     });
 
-    let mut resources = smelly_connect::resource::ResourceSet::default();
-    resources.domain_rules.insert(
-        "jwxt.sit.edu.cn".to_string(),
-        smelly_connect::resource::DomainRule {
-            port_min: 443,
-            port_max: 443,
-            protocol: smelly_connect::RouteProtocol::Tcp,
-        },
-    );
-    let mut system_dns = std::collections::HashMap::new();
-    system_dns.insert(
-        "jwxt.sit.edu.cn".to_string(),
-        std::net::IpAddr::V4(std::net::Ipv4Addr::new(210, 35, 66, 210)),
-    );
-    let session = smelly_connect::session::EasyConnectSession::new(
-        "10.0.0.8".parse().unwrap(),
-        resources,
-        smelly_connect::resolver::SessionResolver::new(
-            std::collections::HashMap::new(),
-            None,
-            system_dns,
-        ),
-        transport,
-    );
+    let session =
+        smelly_connect::test_support::session::session_with_runtime_resources_and_transport(
+            "jwxt.sit.edu.cn",
+            "10.0.0.8".parse().unwrap(),
+            transport,
+        );
 
     let first = {
         let session = session.clone();
@@ -143,9 +116,12 @@ async fn session_serializes_concurrent_connect_establishment() {
         tokio::spawn(async move { session.connect_tcp(("jwxt.sit.edu.cn", 443)).await })
     };
 
-    let _ = first.await.unwrap().unwrap();
-    let _ = second.await.unwrap().unwrap();
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_millis(200), async move {
+        tokio::join!(first, second)
+    })
+    .await
+    .expect("session runtime resources should allow concurrent vpn connects");
 
-    // With semaphore=16, concurrent connects are allowed.
-    assert!(max_active.load(Ordering::SeqCst) <= 2);
+    let _ = first.unwrap().unwrap();
+    let _ = second.unwrap().unwrap();
 }
