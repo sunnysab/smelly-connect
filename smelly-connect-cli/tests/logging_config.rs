@@ -5,7 +5,7 @@ fn logging_defaults_to_stdout_info_and_default_file() {
         [vpn]
         server = "vpn1.sit.edu.cn"
         [pool]
-        prewarm = 1
+        min_pool_size = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
         [[accounts]]
@@ -46,7 +46,7 @@ fn invalid_logging_mode_is_rejected() {
         [vpn]
         server = "vpn1.sit.edu.cn"
         [pool]
-        prewarm = 1
+        min_pool_size = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
         [[accounts]]
@@ -71,7 +71,7 @@ fn invalid_logging_level_is_rejected() {
         [vpn]
         server = "vpn1.sit.edu.cn"
         [pool]
-        prewarm = 1
+        min_pool_size = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
         [[accounts]]

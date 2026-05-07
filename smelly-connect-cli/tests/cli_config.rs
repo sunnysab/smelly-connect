@@ -9,7 +9,7 @@ fn parses_sample_config() {
     let cfg: smelly_connect_cli::config::AppConfig =
         toml::from_str(include_str!("fixtures/config.sample.toml")).unwrap();
     assert_eq!(cfg.accounts.len(), 2);
-    assert_eq!(cfg.pool.prewarm, 2);
+    assert_eq!(cfg.pool.min_pool_size, 2);
     assert!(cfg.vpn.enable_icmp_keepalive);
     assert_eq!(
         cfg.session_connect_timeout(),
@@ -43,7 +43,7 @@ fn routing_default_action_defaults_to_direct() {
         server = "vpn1.sit.edu.cn"
 
         [pool]
-        prewarm = 1
+        min_pool_size = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 
@@ -77,7 +77,7 @@ fn parses_block_default_action_from_config() {
         server = "vpn1.sit.edu.cn"
 
         [pool]
-        prewarm = 1
+        min_pool_size = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 
@@ -114,7 +114,7 @@ fn legacy_connect_timeout_still_applies_when_split_fields_are_absent() {
         server = "vpn1.sit.edu.cn"
 
         [pool]
-        prewarm = 1
+        min_pool_size = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 
@@ -157,7 +157,7 @@ fn parses_local_routing_overrides_from_config() {
         server = "vpn1.sit.edu.cn"
 
         [pool]
-        prewarm = 1
+        min_pool_size = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 
@@ -208,7 +208,7 @@ fn parses_allow_all_routing_flag_from_config() {
         server = "vpn1.sit.edu.cn"
 
         [pool]
-        prewarm = 1
+        min_pool_size = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 
@@ -290,10 +290,10 @@ fn routes_is_available_as_a_top_level_command() {
 fn cli_flags_override_config_values() {
     let merged = smelly_connect_cli::config::merge_for_test(
         "tests/fixtures/config.sample.toml",
-        ["--prewarm", "5", "--listen-http", "127.0.0.1:18080"],
+        ["--min-pool-size", "5", "--listen-http", "127.0.0.1:18080"],
     )
     .unwrap();
-    assert_eq!(merged.pool.prewarm, 5);
+    assert_eq!(merged.pool.min_pool_size, 5);
     assert_eq!(merged.proxy.http.listen, "127.0.0.1:18080");
 }
 
@@ -322,7 +322,7 @@ fn invalid_route_protocol_is_rejected() {
         server = "vpn1.sit.edu.cn"
 
         [pool]
-        prewarm = 1
+        min_pool_size = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 
@@ -358,7 +358,7 @@ fn invalid_routing_default_action_is_rejected() {
         server = "vpn1.sit.edu.cn"
 
         [pool]
-        prewarm = 1
+        min_pool_size = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 
@@ -403,7 +403,7 @@ fn parses_explicit_icmp_disable_flag_from_config() {
         enable_icmp_keepalive = false
 
         [pool]
-        prewarm = 1
+        min_pool_size = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 

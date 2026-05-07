@@ -7,13 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
 
-fn startup_pool_config(prewarm: usize) -> smelly_connect_cli::config::AppConfig {
+fn startup_pool_config(min_pool_size: usize) -> smelly_connect_cli::config::AppConfig {
     toml::from_str(&format!(
         r#"
         [vpn]
         server = "vpn1.sit.edu.cn"
         [pool]
-        prewarm = {prewarm}
+        min_pool_size = {min_pool_size}
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
         failure_threshold = 3
@@ -215,7 +215,7 @@ async fn pool_prewarm_refills_parallel_slot_after_failure() {
         ),
     )
     .await
-    .expect("prewarm should not stall")
+    .expect("startup should not stall")
     .unwrap();
 
     assert_eq!(pool.ready_count().await, 2);
@@ -264,7 +264,7 @@ async fn pool_prewarm_retries_other_accounts_after_permanent_auth_failure() {
                     .lock()
                     .unwrap()
                     .pop_front()
-                    .expect("prewarm attempt outcome should exist")
+                    .expect("connect attempt outcome should exist")
             }
         },
     )
@@ -319,7 +319,7 @@ fn resilience_defaults_are_present() {
         [vpn]
         server = "vpn1.sit.edu.cn"
         [pool]
-        prewarm = 1
+        min_pool_size =1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
         [[accounts]]
@@ -348,7 +348,7 @@ async fn pool_uses_connect_timeout_secs_for_recovery_login_timeout() {
         [vpn]
         server = "vpn1.sit.edu.cn"
         [pool]
-        prewarm = 0
+        min_pool_size =0
         connect_timeout_secs = 7
         healthcheck_interval_secs = 60
         failure_threshold = 3
@@ -385,7 +385,7 @@ async fn pool_prefers_session_connect_timeout_secs_over_legacy_timeout() {
         [vpn]
         server = "vpn1.sit.edu.cn"
         [pool]
-        prewarm = 0
+        min_pool_size =0
         connect_timeout_secs = 20
         session_connect_timeout_secs = 9
         healthcheck_interval_secs = 60
@@ -769,7 +769,7 @@ async fn pool_prefers_default_keepalive_host_over_vpn_server() {
         server = "vpn1.sit.edu.cn"
         default_keepalive_host = "jwxt.sit.edu.cn"
         [pool]
-        prewarm = 0
+        min_pool_size =0
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
         failure_threshold = 3
@@ -809,7 +809,7 @@ async fn pool_disables_icmp_keepalive_when_explicitly_disabled() {
         default_keepalive_host = "jwxt.sit.edu.cn"
         enable_icmp_keepalive = false
         [pool]
-        prewarm = 0
+        min_pool_size =0
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
         failure_threshold = 3
@@ -844,7 +844,7 @@ async fn pool_does_not_fallback_keepalive_target_to_vpn_server() {
         [vpn]
         server = "vpn1.sit.edu.cn"
         [pool]
-        prewarm = 0
+        min_pool_size =0
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
         failure_threshold = 3

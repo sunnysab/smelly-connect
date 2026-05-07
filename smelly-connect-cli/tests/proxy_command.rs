@@ -12,7 +12,7 @@ async fn proxy_command_rejects_management_config_when_feature_is_disabled() {
         server = "vpn1.sit.edu.cn"
 
         [pool]
-        prewarm = 0
+        min_pool_size = 0
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 
@@ -37,7 +37,7 @@ async fn proxy_command_rejects_management_config_when_feature_is_disabled() {
     let command = smelly_connect_cli::cli::ProxyCommand {
         listen_http: None,
         listen_socks5: None,
-        prewarm: None,
+        min_pool_size: None,
         keepalive_host: None,
         allow_all: false,
     };
@@ -58,7 +58,7 @@ async fn proxy_command_returns_typed_error_when_management_feature_is_missing() 
         server = "vpn1.sit.edu.cn"
 
         [pool]
-        prewarm = 0
+        min_pool_size = 0
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 
@@ -83,7 +83,7 @@ async fn proxy_command_returns_typed_error_when_management_feature_is_missing() 
     let command = smelly_connect_cli::cli::ProxyCommand {
         listen_http: None,
         listen_socks5: None,
-        prewarm: None,
+        min_pool_size: None,
         keepalive_host: None,
         allow_all: false,
     };
@@ -112,7 +112,7 @@ async fn proxy_command_surfaces_listener_failure_instead_of_hanging() {
         server = "vpn1.sit.edu.cn"
 
         [pool]
-        prewarm = 0
+        min_pool_size = 0
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 
@@ -137,7 +137,7 @@ async fn proxy_command_surfaces_listener_failure_instead_of_hanging() {
     let command = smelly_connect_cli::cli::ProxyCommand {
         listen_http: None,
         listen_socks5: None,
-        prewarm: None,
+        min_pool_size: None,
         keepalive_host: None,
         allow_all: false,
     };
@@ -162,7 +162,7 @@ async fn proxy_command_returns_after_shutdown_signal() {
         server = "vpn1.sit.edu.cn"
 
         [pool]
-        prewarm = 0
+        min_pool_size = 0
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 
@@ -187,7 +187,7 @@ async fn proxy_command_returns_after_shutdown_signal() {
     let command = smelly_connect_cli::cli::ProxyCommand {
         listen_http: None,
         listen_socks5: None,
-        prewarm: None,
+        min_pool_size: None,
         keepalive_host: None,
         allow_all: false,
     };
@@ -234,7 +234,7 @@ async fn proxy_command_forces_shutdown_after_drain_timeout() {
         server = "vpn1.sit.edu.cn"
 
         [pool]
-        prewarm = 0
+        min_pool_size = 0
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 
@@ -262,7 +262,7 @@ async fn proxy_command_forces_shutdown_after_drain_timeout() {
     let command = smelly_connect_cli::cli::ProxyCommand {
         listen_http: None,
         listen_socks5: None,
-        prewarm: None,
+        min_pool_size: None,
         keepalive_host: None,
         allow_all: false,
     };

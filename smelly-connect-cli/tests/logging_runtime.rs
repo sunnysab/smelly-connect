@@ -33,7 +33,7 @@ fn pool_logs_prewarm_summary_and_ready_events() {
     assert!(
         events
             .iter()
-            .any(|line| line.contains("pool prewarm start"))
+            .any(|line| line.contains("pool startup"))
     );
     assert!(
         events

@@ -117,6 +117,7 @@ pub struct SessionPool {
     keepalive_target: Option<String>,
     server: Option<String>,
     allow_request_triggered_probe: bool,
+    min_pool_size: usize,
 }
 
 const DEFAULT_SESSION_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
@@ -318,11 +319,11 @@ impl SessionPool {
     }
 
     #[cfg(any(test, debug_assertions))]
-    pub async fn from_test_accounts(total: usize, prewarm: usize) -> Self {
+    pub async fn from_test_accounts(total: usize, ready_count: usize) -> Self {
         let mut nodes = Vec::new();
         for idx in 0..total {
             let name = format!("acct-{:02}", idx + 1);
-            let state = if idx < prewarm {
+            let state = if idx < ready_count {
                 AccountState::Ready(PooledSession::new(name.clone(), None).into())
             } else {
                 AccountState::Configured(AccountConfig {
@@ -366,6 +367,7 @@ impl SessionPool {
             keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
+            min_pool_size: 0,
         }
     }
 
@@ -408,6 +410,7 @@ impl SessionPool {
             keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
+            min_pool_size: 0,
         }
     }
 
@@ -462,6 +465,7 @@ impl SessionPool {
             keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
+            min_pool_size: 0,
         }
     }
 
@@ -519,6 +523,7 @@ impl SessionPool {
             keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
+            min_pool_size: 0,
         }
     }
 
@@ -584,6 +589,7 @@ impl SessionPool {
             keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
+            min_pool_size: 0,
         };
         let inner = Arc::clone(&pool.inner);
         let account_name = account_name.to_string();
@@ -607,12 +613,12 @@ impl SessionPool {
     #[cfg(any(test, debug_assertions))]
     pub async fn from_test_outcomes<const N: usize>(
         outcomes: [Result<&str, &str>; N],
-        prewarm: usize,
+        min_ready: usize,
     ) -> Self {
         let mut nodes = Vec::new();
         for (idx, outcome) in outcomes.into_iter().enumerate() {
             let (name, state) = match outcome {
-                Ok(name) if idx < prewarm => (
+                Ok(name) if idx < min_ready => (
                     name.to_string(),
                     AccountState::Ready(PooledSession::new(name.to_string(), None).into()),
                 ),
@@ -666,6 +672,7 @@ impl SessionPool {
             keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
+            min_pool_size: 0,
         }
     }
 
@@ -711,6 +718,7 @@ impl SessionPool {
             keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
+            min_pool_size: 0,
         }
     }
 
@@ -751,6 +759,7 @@ impl SessionPool {
             keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
+            min_pool_size: 0,
         }
     }
 
@@ -764,8 +773,8 @@ impl SessionPool {
     ) -> Result<Self, PoolError> {
         tracing::info!(
             accounts = cfg.accounts.len(),
-            prewarm = cfg.pool.prewarm,
-            "pool prewarm start"
+            min_pool_size = cfg.pool.min_pool_size,
+            "pool startup"
         );
         let mut nodes = Vec::new();
         for account in &cfg.accounts {
@@ -802,27 +811,29 @@ impl SessionPool {
             keepalive_target,
             server: Some(cfg.vpn.server.clone()),
             allow_request_triggered_probe: cfg.pool.allow_request_triggered_probe,
+            min_pool_size: cfg.pool.min_pool_size,
         };
 
-        pool.prewarm(cfg.pool.prewarm).await;
+        pool.ensure_min_pool_size().await;
         let ready = pool.ready_count().await;
         tracing::info!(
             configured = cfg.accounts.len(),
+            min_pool_size = cfg.pool.min_pool_size,
             ready,
             "pool startup summary"
         );
         if ready == 0 {
             match startup_mode {
                 PoolStartupMode::RequireReady => {
-                    tracing::error!("no ready session after prewarm");
-                    return Err(PoolError::new("no ready session after prewarm"));
+                    tracing::error!("no ready session after startup");
+                    return Err(PoolError::new("no ready session after startup"));
                 }
                 PoolStartupMode::AllowEmpty => {
-                    tracing::warn!("starting with no ready session after prewarm");
+                    tracing::warn!("starting with no ready session after startup");
                 }
             }
         }
-        pool.spawn_background_healthcheck_task();
+        pool.spawn_background_maintenance_task();
         Ok(pool)
     }
 
@@ -1034,15 +1045,22 @@ impl SessionPool {
         });
     }
 
-    fn spawn_background_healthcheck_task(&self) {
+    fn spawn_background_maintenance_task(&self) {
         let interval = self.healthcheck_interval;
         let pool = self.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
-                pool.run_periodic_healthcheck_once().await;
+                pool.run_periodic_maintenance_once().await;
             }
         });
+    }
+
+    async fn run_periodic_maintenance_once(&self) {
+        self.ensure_min_pool_size().await;
+        if self.keepalive_target.is_some() {
+            self.run_periodic_healthcheck_once().await;
+        }
     }
 
     async fn collect_periodic_probe_targets(&self) -> Vec<(String, Session)> {
@@ -1269,6 +1287,7 @@ impl SessionPool {
             keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
+            min_pool_size: 0,
         }
     }
 
@@ -1309,6 +1328,7 @@ impl SessionPool {
             keepalive_target: None,
             server: None,
             allow_request_triggered_probe: true,
+            min_pool_size: 0,
         }
     }
 
@@ -1602,8 +1622,9 @@ impl SessionPool {
         Err(PoolError::new("no ready session"))
     }
 
-    async fn prewarm(&self, count: usize) {
-        if count == 0 {
+    async fn ensure_min_pool_size(&self) {
+        let target = self.min_pool_size;
+        if target == 0 {
             return;
         }
 
@@ -1612,32 +1633,43 @@ impl SessionPool {
         let mut pending = JoinSet::new();
 
         loop {
+            self.refresh_time_based_states().await;
             let ready = self.ready_count().await;
-            if ready >= count {
+            if ready >= target {
                 break;
             }
 
-            while ready + pending.len() < count {
-                if !self.has_configured_accounts().await {
+            while ready + pending.len() < target {
+                // Prefer connecting fresh Configured accounts, fall back to HalfOpen.
+                if self.has_configured_accounts().await {
+                    let pool = self.clone();
+                    #[cfg(any(test, debug_assertions))]
+                    let test_connect_hook = test_connect_hook.clone();
+                    pending.spawn(async move {
+                        pool.connect_one_configured_with_test_hook(
+                            #[cfg(any(test, debug_assertions))]
+                            test_connect_hook,
+                        )
+                        .await
+                    });
+                } else if let Some((name, account, reconnect_session)) =
+                    self.claim_maintenance_probe().await
+                {
+                    let pool = self.clone();
+                    pending.spawn(async move {
+                        pool.recover_and_complete_probe(&name, &account, reconnect_session)
+                            .await
+                    });
+                } else {
                     break;
                 }
-                let pool = self.clone();
-                #[cfg(any(test, debug_assertions))]
-                let test_connect_hook = test_connect_hook.clone();
-                pending.spawn(async move {
-                    pool.connect_one_configured_with_test_hook(
-                        #[cfg(any(test, debug_assertions))]
-                        test_connect_hook,
-                    )
-                    .await
-                });
             }
 
             match pending.join_next().await {
                 Some(Ok(Ok(()))) | Some(Ok(Err(_))) => {}
                 Some(Err(err)) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
                 Some(Err(err)) => {
-                    tracing::warn!(error = %err, "pool prewarm task did not complete cleanly");
+                    tracing::warn!(error = %err, "pool maintenance task did not complete cleanly");
                 }
                 None => break,
             }
@@ -1776,7 +1808,7 @@ impl SessionPool {
                         open_node(node, err.to_string());
                     }
                 }
-                tracing::warn!(account = %account.name, error = %err, "account prewarm failed");
+                tracing::warn!(account = %account.name, error = %err, "account connect failed");
                 Err(err)
             }
         }
@@ -1844,6 +1876,94 @@ impl SessionPool {
             }
             Err(err) => {
                 self.complete_probe_failure(&name, err.to_string()).await?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn claim_maintenance_probe(
+        &self,
+    ) -> Option<(String, AccountConfig, Option<Session>)> {
+        self.refresh_time_based_states().await;
+        let mut state = self.inner.lock().await;
+
+        let probe_candidates: Vec<_> = state
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, node)| {
+                (!node.live_probe_in_flight
+                    && matches!(node.state, AccountState::HalfOpen(_)))
+                .then_some(idx)
+            })
+            .collect();
+        if probe_candidates.is_empty() {
+            return None;
+        }
+
+        let pos = state.cursor % probe_candidates.len();
+        state.cursor += 1;
+        let idx = probe_candidates[pos];
+        let node = &mut state.nodes[idx];
+        let account = node.account.clone();
+        let name = node.account.name.clone();
+        let reconnect_session = node.reconnect_session.clone();
+        node.state = AccountState::Connecting;
+        node.open_until = None;
+        node.live_probe_in_flight = true;
+        tracing::info!(account = %name, "maintenance recovery probe scheduled");
+        Some((name, account, reconnect_session))
+    }
+
+    async fn recover_and_complete_probe(
+        &self,
+        name: &str,
+        account: &AccountConfig,
+        reconnect_session: Option<Session>,
+    ) -> Result<(), PoolError> {
+        match self
+            .recover_account_session(name, account, reconnect_session)
+            .await
+        {
+            Ok(session) => {
+                let pooled = self.wrap_live_session(name.to_string(), session);
+                let mut state = self.inner.lock().await;
+                if let Some(node) = state
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.account.name == name)
+                {
+                    node.account = account.clone();
+                    node.consecutive_failures = 0;
+                    node.current_backoff = node.backoff_base;
+                    node.open_until = None;
+                    node.reconnect_session = None;
+                    node.live_probe_in_flight = false;
+                    node.state = AccountState::Ready(Box::new(pooled));
+                    state.total_reconnections += 1;
+                    tracing::info!(
+                        account = %name,
+                        reconnects = state.total_reconnections,
+                        "maintenance recovery probe succeeded"
+                    );
+                }
+                Ok(())
+            }
+            Err(err) => {
+                let mut state = self.inner.lock().await;
+                if let Some(node) = state
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.account.name == name)
+                {
+                    node.live_probe_in_flight = false;
+                    if is_permanent_auth_failure(&err.to_string()) {
+                        disable_node(node, err.to_string());
+                    } else {
+                        open_node(node, err.to_string());
+                    }
+                }
+                tracing::warn!(account = %name, error = %err, "maintenance recovery probe failed");
                 Err(err)
             }
         }

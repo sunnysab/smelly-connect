@@ -29,8 +29,8 @@ pub struct ProxyCommand {
     pub listen_http: Option<String>,
     #[arg(long)]
     pub listen_socks5: Option<String>,
-    #[arg(long)]
-    pub prewarm: Option<usize>,
+    #[arg(long = "min-pool-size")]
+    pub min_pool_size: Option<usize>,
     #[arg(long)]
     pub keepalive_host: Option<String>,
     #[arg(long)]

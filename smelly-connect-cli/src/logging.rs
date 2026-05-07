@@ -151,7 +151,7 @@ mod tests {
 
     pub fn capture_pool_events_for_test() -> Vec<String> {
         capture_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, || {
-            tracing::info!(configured = 2, prewarm = 1, "pool prewarm start");
+            tracing::info!(configured = 2, min_pool_size = 1, "pool startup");
             tracing::info!(account = "acct-01", "account ready");
             tracing::info!(configured = 2, ready = 1, "pool startup summary");
         })

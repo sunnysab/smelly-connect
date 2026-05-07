@@ -55,7 +55,7 @@ fn routes_command_returns_typed_error_when_management_is_disabled() {
         server = "vpn1.sit.edu.cn"
 
         [pool]
-        prewarm = 1
+        min_pool_size = 1
         connect_timeout_secs = 20
         healthcheck_interval_secs = 60
 

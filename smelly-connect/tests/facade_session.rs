@@ -43,6 +43,6 @@ fn easyconnect_client_builder_collects_credentials() {
 }
 
 #[test]
-fn crate_version_is_0_2_0() {
-    assert_eq!(env!("CARGO_PKG_VERSION"), "0.2.0");
+fn crate_version_is_0_3_0() {
+    assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.0");
 }

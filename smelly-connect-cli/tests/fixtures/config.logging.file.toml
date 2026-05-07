@@ -2,7 +2,7 @@
 server = "vpn1.sit.edu.cn"
 
 [pool]
-prewarm = 1
+min_pool_size = 1
 connect_timeout_secs = 20
 healthcheck_interval_secs = 60
 

@@ -33,7 +33,7 @@ pub struct VpnConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct PoolConfig {
-    pub prewarm: usize,
+    pub min_pool_size: usize,
     pub connect_timeout_secs: u64,
     pub session_connect_timeout_secs: Option<u64>,
     pub healthcheck_interval_secs: u64,
@@ -46,7 +46,7 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
-            prewarm: 1,
+            min_pool_size: 1,
             connect_timeout_secs: 20,
             session_connect_timeout_secs: None,
             healthcheck_interval_secs: 60,
@@ -332,8 +332,8 @@ pub fn merge_proxy_command_typed(
 }
 
 pub fn apply_proxy_overrides(cfg: &mut AppConfig, command: &ProxyCommand) {
-    if let Some(prewarm) = command.prewarm {
-        cfg.pool.prewarm = prewarm;
+    if let Some(min_pool_size) = command.min_pool_size {
+        cfg.pool.min_pool_size = min_pool_size;
     }
     if let Some(listen_http) = &command.listen_http {
         cfg.proxy.http.listen = listen_http.clone();
