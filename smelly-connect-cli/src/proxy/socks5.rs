@@ -16,7 +16,10 @@ use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 
 #[cfg(feature = "test-utils")]
 use super::common::connect_with_timeout;
-use super::common::{LiveRouteBackend, UpstreamConnectError, connect_live_upstream_with_timeout};
+use super::common::{
+    LISTENER_ACCEPT_RETRY_BACKOFF, ListenerAcceptRetryLogState, LiveRouteBackend,
+    UpstreamConnectError, connect_live_upstream_with_timeout, should_retry_listener_accept,
+};
 
 const DEFAULT_MAX_IN_FLIGHT_CONNECTIONS: usize = 1024;
 
@@ -78,6 +81,7 @@ async fn serve_socks5_with_limit(
     let local_addr = listener.local_addr().map_err(|err| err.to_string())?;
     let limiter = Arc::new(Semaphore::new(max_in_flight_connections));
     let mut clients = JoinSet::new();
+    let mut accept_retry_log_state = ListenerAcceptRetryLogState::default();
     let mut shutting_down = *shutdown.borrow();
     tracing::info!(
         protocol = tracing::field::display("socks5"),
@@ -105,7 +109,25 @@ async fn serve_socks5_with_limit(
                 }
             }
             accepted = listener.accept(), if !shutting_down => {
-                let (stream, _) = accepted.map_err(|err| err.to_string())?;
+                let (stream, _) = match accepted {
+                    Ok(accepted) => {
+                        accept_retry_log_state.reset();
+                        accepted
+                    }
+                    Err(err) if should_retry_listener_accept(&err) => {
+                        if accept_retry_log_state.should_warn() {
+                            tracing::warn!(
+                                protocol = tracing::field::display("socks5"),
+                                error = %err,
+                                backoff_ms = LISTENER_ACCEPT_RETRY_BACKOFF.as_millis() as u64,
+                                "socks5 listener accept hit transient fd exhaustion; retrying"
+                            );
+                        }
+                        tokio::time::sleep(LISTENER_ACCEPT_RETRY_BACKOFF).await;
+                        continue;
+                    }
+                    Err(err) => return Err(err.to_string()),
+                };
                 let permit = limiter.clone().try_acquire_owned();
                 let pool = pool.clone();
                 let stats = stats.clone();

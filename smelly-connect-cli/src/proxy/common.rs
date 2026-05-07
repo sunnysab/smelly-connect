@@ -1,6 +1,8 @@
+use std::io;
 use std::time::Duration;
 
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 
 #[derive(Debug, Clone)]
 pub enum UpstreamConnectError {
@@ -13,6 +15,42 @@ pub enum UpstreamConnectError {
 pub enum LiveRouteBackend {
     Vpn,
     Direct,
+}
+
+pub const LISTENER_ACCEPT_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+pub const LISTENER_ACCEPT_WARN_INTERVAL: Duration = Duration::from_secs(5);
+
+const ENFILE_ERRNO: i32 = 23;
+const EMFILE_ERRNO: i32 = 24;
+
+#[derive(Debug, Default)]
+pub struct ListenerAcceptRetryLogState {
+    last_warn_at: Option<Instant>,
+}
+
+pub fn should_retry_listener_accept(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(EMFILE_ERRNO | ENFILE_ERRNO))
+}
+
+impl ListenerAcceptRetryLogState {
+    pub fn should_warn(&mut self) -> bool {
+        let now = Instant::now();
+        match self.last_warn_at {
+            Some(last_warn_at)
+                if now.duration_since(last_warn_at) < LISTENER_ACCEPT_WARN_INTERVAL =>
+            {
+                false
+            }
+            _ => {
+                self.last_warn_at = Some(now);
+                true
+            }
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.last_warn_at = None;
+    }
 }
 
 pub async fn connect_with_timeout<T, E, Fut>(
@@ -95,5 +133,50 @@ where
         ))) => Err(UpstreamConnectError::TimedOut),
         Ok(Err(_err)) => Err(UpstreamConnectError::Failed),
         Err(_) => Err(UpstreamConnectError::TimedOut),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listener_accept_retries_fd_exhaustion_errors() {
+        assert!(should_retry_listener_accept(&io::Error::from_raw_os_error(
+            EMFILE_ERRNO
+        )));
+        assert!(should_retry_listener_accept(&io::Error::from_raw_os_error(
+            ENFILE_ERRNO
+        )));
+    }
+
+    #[test]
+    fn listener_accept_does_not_retry_unrelated_errors() {
+        assert!(!should_retry_listener_accept(&io::Error::other("boom")));
+        assert!(!should_retry_listener_accept(&io::Error::from(
+            io::ErrorKind::ConnectionAborted
+        )));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn listener_accept_retry_warn_state_rate_limits_repeated_warnings() {
+        let mut state = ListenerAcceptRetryLogState::default();
+
+        assert!(state.should_warn());
+        assert!(!state.should_warn());
+
+        tokio::time::advance(LISTENER_ACCEPT_WARN_INTERVAL).await;
+
+        assert!(state.should_warn());
+    }
+
+    #[test]
+    fn listener_accept_retry_warn_state_resets_after_success() {
+        let mut state = ListenerAcceptRetryLogState::default();
+
+        assert!(state.should_warn());
+        state.reset();
+
+        assert!(state.should_warn());
     }
 }
