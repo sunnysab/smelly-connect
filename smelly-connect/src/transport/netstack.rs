@@ -908,9 +908,13 @@ impl TcpSocketState {
 
         if !shared.read_buffer.is_empty() {
             let count = shared.read_buffer.len().min(buf.remaining());
-            let chunk: Vec<u8> = shared.read_buffer.drain(..count).collect();
+            let (front, back) = shared.read_buffer.as_slices();
+            let front_len = front.len().min(count);
+            let back_len = count - front_len;
             tracing::debug!(count, "netstack tcp poll_read data");
-            buf.put_slice(&chunk);
+            buf.put_slice(&front[..front_len]);
+            buf.put_slice(&back[..back_len]);
+            shared.read_buffer.drain(..count);
             return Poll::Ready(Ok(()));
         }
 
@@ -1367,14 +1371,13 @@ fn sync_tcp_socket(socket: &mut tcp::Socket<'static>, state: &Arc<TcpSocketState
 
     while shared.read_buffer.len() < TCP_BUFFER_SIZE && socket.can_recv() {
         let room = (TCP_BUFFER_SIZE - shared.read_buffer.len()).min(SOCKET_CHUNK_SIZE);
-        let mut chunk = vec![0_u8; room];
-        match socket.recv_slice(&mut chunk) {
+        let mut chunk = [0_u8; SOCKET_CHUNK_SIZE];
+        match socket.recv_slice(&mut chunk[..room]) {
             Ok(received) => {
                 if received == 0 {
                     break;
                 }
-                chunk.truncate(received);
-                shared.read_buffer.extend(chunk);
+                shared.read_buffer.extend(chunk[..received].iter().copied());
                 progressed = true;
             }
             Err(err) => {
@@ -1386,9 +1389,9 @@ fn sync_tcp_socket(socket: &mut tcp::Socket<'static>, state: &Arc<TcpSocketState
     }
 
     while socket.can_send() && !shared.write_buffer.is_empty() {
-        let count = shared.write_buffer.len().min(SOCKET_CHUNK_SIZE);
-        let chunk: Vec<u8> = shared.write_buffer.iter().take(count).copied().collect();
-        match socket.send_slice(&chunk) {
+        let chunk = vecdeque_front_chunk(&shared.write_buffer);
+        let count = chunk.len().min(SOCKET_CHUNK_SIZE);
+        match socket.send_slice(&chunk[..count]) {
             Ok(written) => {
                 if written == 0 {
                     break;
@@ -1567,6 +1570,11 @@ fn fail_udp_sends(
     while let Some(send) = pending.pop_front() {
         let _ = send.reply.send(Err(io::Error::new(kind, message.clone())));
     }
+}
+
+fn vecdeque_front_chunk(buffer: &VecDeque<u8>) -> &[u8] {
+    let (front, back) = buffer.as_slices();
+    if front.is_empty() { back } else { front }
 }
 
 fn socket_addr_from_target(target: TargetAddr) -> io::Result<SocketAddr> {
@@ -1860,12 +1868,68 @@ mod tests {
         let mut storage = [0_u8; 8];
         let mut read_buf = ReadBuf::new(&mut storage);
 
-        assert!(matches!(state.poll_read(&mut cx, &mut read_buf), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            state.poll_read(&mut cx, &mut read_buf),
+            Poll::Ready(Ok(()))
+        ));
         assert_eq!(read_buf.filled(), &[1, 2, 3]);
         assert!(matches!(
             state.poll_read(&mut cx, &mut read_buf),
             Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::ConnectionAborted
         ));
+    }
+
+    #[test]
+    fn poll_read_handles_wrapped_vecdeque_without_allocating_copy() {
+        let state = TcpSocketState::new();
+        {
+            let mut shared = acquire_lock(&state.shared);
+            shared.connect_result = Some(Ok(()));
+            shared.read_buffer = VecDeque::with_capacity(8);
+            shared.read_buffer.extend([1, 2, 3, 4, 5, 6]);
+            shared.read_buffer.drain(..4);
+            shared.read_buffer.extend([7, 8, 9, 10]);
+
+            let (front, back) = shared.read_buffer.as_slices();
+            assert!(!front.is_empty());
+            assert!(!back.is_empty());
+        }
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut storage = [0_u8; 5];
+        let mut read_buf = ReadBuf::new(&mut storage);
+
+        assert!(matches!(
+            state.poll_read(&mut cx, &mut read_buf),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(read_buf.filled(), &[5, 6, 7, 8, 9]);
+
+        let mut tail = [0_u8; 2];
+        let mut tail_buf = ReadBuf::new(&mut tail);
+        assert!(matches!(
+            state.poll_read(&mut cx, &mut tail_buf),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(tail_buf.filled(), &[10]);
+    }
+
+    #[test]
+    fn vecdeque_front_chunk_advances_across_wrapped_write_buffer() {
+        let mut buffer = VecDeque::with_capacity(8);
+        buffer.extend([1, 2, 3, 4, 5, 6]);
+        buffer.drain(..4);
+        buffer.extend([7, 8, 9, 10]);
+
+        let (front, back) = buffer.as_slices();
+        assert!(!front.is_empty());
+        assert!(!back.is_empty());
+        let back = back.to_vec();
+
+        assert_eq!(vecdeque_front_chunk(&buffer), front);
+        buffer.drain(..front.len());
+        assert_eq!(vecdeque_front_chunk(&buffer), back.as_slice());
     }
 
     #[test]
