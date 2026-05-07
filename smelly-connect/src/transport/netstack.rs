@@ -269,7 +269,9 @@ impl SmolStack {
         };
 
         tokio::spawn(async move {
-            let _ = actor.run(inbound_rx, outbound_tx, commands_rx).await;
+            if let Err(err) = actor.run(inbound_rx, outbound_tx, commands_rx).await {
+                warn!(error = %err, "netstack actor stopped");
+            }
         });
 
         Self {
@@ -389,10 +391,13 @@ impl NetstackActor {
 
         loop {
             self.drive();
-            self.flush_outbound(&outbound_tx)?;
+            if let Err(err) = self.flush_outbound(&outbound_tx) {
+                self.fail_all(SharedIoError::new(err.kind(), err.to_string()));
+                return Err(err);
+            }
 
             let delay = self.next_delay();
-            tokio::select! {
+            let shutdown_error = tokio::select! {
                 biased;
                 maybe_command = async {
                     if commands_open {
@@ -402,22 +407,39 @@ impl NetstackActor {
                     }
                 } => {
                     match maybe_command {
-                        Some(command) => self.handle_command(command)?,
-                        None => commands_open = false,
+                        Some(command) => {
+                            self.handle_command(command)?;
+                            None
+                        }
+                        None => {
+                            commands_open = false;
+                            None
+                        }
                     }
                 }
                 maybe_packet = inbound_rx.recv() => {
-                    let Some(packet) = maybe_packet else {
-                        return Ok(());
-                    };
-                    self.device.push_inbound(packet);
+                    match maybe_packet {
+                        Some(packet) => {
+                            self.device.push_inbound(packet);
+                            None
+                        }
+                        None => Some(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "packet source closed",
+                        )),
+                    }
                 }
                 _ = async {
                     match delay {
                         Some(delay) => tokio::time::sleep(delay).await,
                         None => pending::<()>().await,
                     }
-                } => {}
+                } => None
+            };
+
+            if let Some(err) = shutdown_error {
+                self.fail_all(SharedIoError::new(err.kind(), err.to_string()));
+                return Err(err);
             }
 
             if !commands_open && inbound_rx.is_closed() {
@@ -754,7 +776,10 @@ impl NetstackActor {
                     break;
                 }
                 Err(TrySendError::Closed(_packet)) => {
-                    return Err(io::Error::other("packet transport closed"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "packet transport closed",
+                    ));
                 }
             }
         }
@@ -792,6 +817,25 @@ impl NetstackActor {
             pending_outbound = self.pending_outbound.len(),
             "netstack socket removed"
         );
+    }
+
+    fn fail_all(&mut self, err: SharedIoError) {
+        for state in self.tcp_sockets.values() {
+            state.on_actor_stopped(err.clone());
+        }
+
+        for state in self.udp_sockets.values() {
+            state.on_actor_stopped(err.clone());
+        }
+
+        for (_, ping) in self.pending_pings.drain() {
+            let _ = ping.reply.send(Err(err.to_io_error()));
+        }
+
+        self.pending_outbound.clear();
+        self.active_handles.clear();
+        self.tcp_sockets.clear();
+        self.udp_sockets.clear();
     }
 
     fn next_local_port(&mut self) -> u16 {
@@ -862,17 +906,17 @@ impl TcpSocketState {
     fn poll_read(&self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let mut shared = acquire_lock(&self.shared);
 
-        if let Some(err) = shared.terminal_error.clone() {
-            tracing::debug!(error = %err.message, "netstack tcp poll_read terminal_error");
-            return Poll::Ready(Err(err.to_io_error()));
-        }
-
         if !shared.read_buffer.is_empty() {
             let count = shared.read_buffer.len().min(buf.remaining());
             let chunk: Vec<u8> = shared.read_buffer.drain(..count).collect();
             tracing::debug!(count, "netstack tcp poll_read data");
             buf.put_slice(&chunk);
             return Poll::Ready(Ok(()));
+        }
+
+        if let Some(err) = shared.terminal_error.clone() {
+            tracing::debug!(error = %err.message, "netstack tcp poll_read terminal_error");
+            return Poll::Ready(Err(err.to_io_error()));
         }
 
         if shared.read_closed {
@@ -913,7 +957,11 @@ impl TcpSocketState {
         let written = available.min(buf.len());
         shared.write_buffer.extend(buf[..written].iter().copied());
         shared.send_queue_empty = false;
-        tracing::debug!(written, write_buffer_len = shared.write_buffer.len(), "netstack tcp poll_write buffered");
+        tracing::debug!(
+            written,
+            write_buffer_len = shared.write_buffer.len(),
+            "netstack tcp poll_write buffered"
+        );
         Poll::Ready(Ok(written))
     }
 
@@ -978,6 +1026,23 @@ impl TcpSocketState {
         shared.close_sent = true;
         wake_all_tcp(&mut shared);
     }
+
+    fn on_actor_stopped(&self, err: SharedIoError) {
+        let mut shared = acquire_lock(&self.shared);
+
+        if shared.connect_result.is_none() {
+            shared.connect_result = Some(Err(err.clone()));
+        }
+        if shared.terminal_error.is_none() {
+            shared.terminal_error = Some(err);
+        }
+        shared.read_closed = true;
+        shared.send_open = false;
+        shared.send_queue_empty = true;
+        shared.close_requested = true;
+        shared.close_sent = true;
+        wake_all_tcp(&mut shared);
+    }
 }
 
 impl UdpSocketState {
@@ -1000,14 +1065,14 @@ impl UdpSocketState {
     ) -> Poll<io::Result<(usize, SocketAddr)>> {
         let mut shared = acquire_lock(&self.shared);
 
-        if let Some(err) = shared.error.clone() {
-            return Poll::Ready(Err(err.to_io_error()));
-        }
-
         if let Some((packet, addr)) = shared.recv_queue.pop_front() {
             let copied = packet.len().min(buf.len());
             buf[..copied].copy_from_slice(&packet[..copied]);
             return Poll::Ready(Ok((copied, addr)));
+        }
+
+        if let Some(err) = shared.error.clone() {
+            return Poll::Ready(Err(err.to_io_error()));
         }
 
         if shared.closed {
@@ -1057,6 +1122,16 @@ impl UdpSocketState {
             io::ErrorKind::BrokenPipe,
             "udp socket closed",
         );
+        take_and_wake(&mut shared.recv_waker);
+    }
+
+    fn on_actor_stopped(&self, err: SharedIoError) {
+        let mut shared = acquire_lock(&self.shared);
+        shared.closed = true;
+        if shared.error.is_none() {
+            shared.error = Some(err.clone());
+        }
+        fail_udp_sends(&mut shared.pending_sends, err.kind, err.message.to_string());
         take_and_wake(&mut shared.recv_waker);
     }
 }
@@ -1350,10 +1425,7 @@ fn sync_tcp_socket(socket: &mut tcp::Socket<'static>, state: &Arc<TcpSocketState
 
     shared.send_open = socket.may_send();
     shared.send_queue_empty = shared.write_buffer.is_empty() && socket.send_queue() == 0;
-    if matches!(shared.connect_result, Some(Ok(())))
-        && !socket.may_recv()
-        && !socket.can_recv()
-    {
+    if matches!(shared.connect_result, Some(Ok(()))) && !socket.may_recv() && !socket.can_recv() {
         shared.read_closed = true;
     }
 
@@ -1372,7 +1444,9 @@ fn sync_tcp_socket(socket: &mut tcp::Socket<'static>, state: &Arc<TcpSocketState
         take_and_wake(&mut shared.write_waker);
     }
     if !was_send_queue_empty && shared.send_queue_empty {
-        tracing::debug!("netstack sync_tcp_socket send_queue_empty transition, waking flush+shutdown");
+        tracing::debug!(
+            "netstack sync_tcp_socket send_queue_empty transition, waking flush+shutdown"
+        );
         take_and_wake(&mut shared.flush_waker);
         take_and_wake(&mut shared.shutdown_waker);
     }
@@ -1590,6 +1664,95 @@ mod tests {
         assert_eq!(second, vec![1, 2, 3, 4]);
     }
 
+    #[tokio::test]
+    async fn connect_fails_when_packet_source_closes() {
+        let (vpn_tx, vpn_rx) = mpsc::channel(4);
+        let (stack_tx, _stack_rx) = mpsc::channel(4);
+        let stack = SmolStack::new(Ipv4Addr::new(10, 0, 0, 8), vpn_rx, stack_tx);
+
+        let connect = {
+            let stack = stack.clone();
+            tokio::spawn(async move {
+                stack
+                    .connect(SocketAddr::from((Ipv4Addr::new(10, 0, 0, 9), 443)))
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        drop(vpn_tx);
+
+        let err = tokio::time::timeout(std::time::Duration::from_millis(200), connect)
+            .await
+            .expect("connect should wake when packet source closes")
+            .expect("connect task should join");
+        let err = match err {
+            Ok(_) => panic!("connect should fail when packet source closes"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[tokio::test]
+    async fn connect_fails_when_packet_transport_closes() {
+        let (_vpn_tx, vpn_rx) = mpsc::channel(4);
+        let (stack_tx, stack_rx) = mpsc::channel(4);
+        let stack = SmolStack::new(Ipv4Addr::new(10, 0, 0, 8), vpn_rx, stack_tx);
+        drop(stack_rx);
+
+        let connect = {
+            let stack = stack.clone();
+            tokio::spawn(async move {
+                stack
+                    .connect(SocketAddr::from((Ipv4Addr::new(10, 0, 0, 9), 443)))
+                    .await
+            })
+        };
+
+        let err = tokio::time::timeout(std::time::Duration::from_millis(200), connect)
+            .await
+            .expect("connect should wake when packet transport closes")
+            .expect("connect task should join");
+        let err = match err {
+            Ok(_) => panic!("connect should fail when packet transport closes"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[tokio::test]
+    async fn udp_recv_fails_when_packet_source_closes() {
+        let (vpn_tx, vpn_rx) = mpsc::channel(4);
+        let (stack_tx, _stack_rx) = mpsc::channel(4);
+        let stack = SmolStack::new(Ipv4Addr::new(10, 0, 0, 8), vpn_rx, stack_tx);
+        let socket = stack.bind_udp().await.expect("udp bind should succeed");
+
+        drop(vpn_tx);
+
+        let mut buf = [0_u8; 32];
+        let err = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            socket.recv_from(&mut buf),
+        )
+        .await
+        .expect("recv should wake when packet source closes")
+        .expect_err("recv should fail when packet source closes");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[tokio::test]
+    async fn ping_reports_transport_close_reason() {
+        let (_vpn_tx, vpn_rx) = mpsc::channel(4);
+        let (stack_tx, stack_rx) = mpsc::channel(4);
+        let stack = SmolStack::new(Ipv4Addr::new(10, 0, 0, 8), vpn_rx, stack_tx);
+        drop(stack_rx);
+
+        let err = stack
+            .ping(Ipv4Addr::new(10, 0, 0, 9))
+            .await
+            .expect_err("ping should fail when packet transport closes");
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+    }
+
     #[test]
     fn shutdown_waits_for_actor_to_send_close() {
         let state = TcpSocketState::new();
@@ -1637,5 +1800,99 @@ mod tests {
             shared.send_queue_empty = true;
         }
         assert!(matches!(state.poll_flush(&mut cx), Poll::Ready(Ok(()))));
+    }
+
+    #[test]
+    fn actor_stop_marks_established_tcp_state_terminal() {
+        let state = TcpSocketState::new();
+        {
+            let mut shared = acquire_lock(&state.shared);
+            shared.connect_result = Some(Ok(()));
+            shared.send_open = true;
+            shared.send_queue_empty = false;
+            shared.write_buffer.push_back(1);
+        }
+
+        state.on_actor_stopped(SharedIoError::new(
+            io::ErrorKind::ConnectionAborted,
+            "packet source closed",
+        ));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut storage = [0_u8; 8];
+        let mut read_buf = ReadBuf::new(&mut storage);
+
+        assert!(matches!(
+            state.poll_read(&mut cx, &mut read_buf),
+            Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::ConnectionAborted
+        ));
+        assert!(matches!(
+            state.poll_write(&mut cx, b"x"),
+            Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::ConnectionAborted
+        ));
+        assert!(matches!(
+            state.poll_flush(&mut cx),
+            Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::ConnectionAborted
+        ));
+        assert!(matches!(
+            state.poll_shutdown(&mut cx),
+            Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::ConnectionAborted
+        ));
+    }
+
+    #[test]
+    fn actor_stop_preserves_buffered_tcp_read_before_error() {
+        let state = TcpSocketState::new();
+        {
+            let mut shared = acquire_lock(&state.shared);
+            shared.connect_result = Some(Ok(()));
+            shared.read_buffer.extend([1, 2, 3]);
+        }
+
+        state.on_actor_stopped(SharedIoError::new(
+            io::ErrorKind::ConnectionAborted,
+            "packet source closed",
+        ));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut storage = [0_u8; 8];
+        let mut read_buf = ReadBuf::new(&mut storage);
+
+        assert!(matches!(state.poll_read(&mut cx, &mut read_buf), Poll::Ready(Ok(()))));
+        assert_eq!(read_buf.filled(), &[1, 2, 3]);
+        assert!(matches!(
+            state.poll_read(&mut cx, &mut read_buf),
+            Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::ConnectionAborted
+        ));
+    }
+
+    #[test]
+    fn actor_stop_preserves_buffered_udp_recv_before_error() {
+        let state = UdpSocketState::new();
+        let addr = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 9), 53));
+        {
+            let mut shared = acquire_lock(&state.shared);
+            shared.recv_queue.push_back((vec![9, 8, 7], addr));
+        }
+
+        state.on_actor_stopped(SharedIoError::new(
+            io::ErrorKind::ConnectionAborted,
+            "packet source closed",
+        ));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut buf = [0_u8; 8];
+
+        assert!(matches!(
+            state.poll_recv_from(&mut cx, &mut buf),
+            Poll::Ready(Ok((3, recv_addr))) if recv_addr == addr && buf[..3] == [9, 8, 7]
+        ));
+        assert!(matches!(
+            state.poll_recv_from(&mut cx, &mut buf),
+            Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::ConnectionAborted
+        ));
     }
 }
