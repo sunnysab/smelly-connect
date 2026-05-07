@@ -863,17 +863,20 @@ impl TcpSocketState {
         let mut shared = acquire_lock(&self.shared);
 
         if let Some(err) = shared.terminal_error.clone() {
+            tracing::debug!(error = %err.message, "netstack tcp poll_read terminal_error");
             return Poll::Ready(Err(err.to_io_error()));
         }
 
         if !shared.read_buffer.is_empty() {
             let count = shared.read_buffer.len().min(buf.remaining());
             let chunk: Vec<u8> = shared.read_buffer.drain(..count).collect();
+            tracing::debug!(count, "netstack tcp poll_read data");
             buf.put_slice(&chunk);
             return Poll::Ready(Ok(()));
         }
 
         if shared.read_closed {
+            tracing::debug!("netstack tcp poll_read EOF (read_closed=true)");
             return Poll::Ready(Ok(()));
         }
 
@@ -885,10 +888,16 @@ impl TcpSocketState {
         let mut shared = acquire_lock(&self.shared);
 
         if let Some(err) = shared.terminal_error.clone() {
+            tracing::debug!(error = %err.message, "netstack tcp poll_write terminal_error");
             return Poll::Ready(Err(err.to_io_error()));
         }
 
         if shared.close_requested || !shared.send_open {
+            tracing::debug!(
+                close_requested = shared.close_requested,
+                send_open = shared.send_open,
+                "netstack tcp poll_write BrokenPipe"
+            );
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "tcp stream closed",
@@ -904,6 +913,7 @@ impl TcpSocketState {
         let written = available.min(buf.len());
         shared.write_buffer.extend(buf[..written].iter().copied());
         shared.send_queue_empty = false;
+        tracing::debug!(written, write_buffer_len = shared.write_buffer.len(), "netstack tcp poll_write buffered");
         Poll::Ready(Ok(written))
     }
 
@@ -911,13 +921,20 @@ impl TcpSocketState {
         let mut shared = acquire_lock(&self.shared);
 
         if let Some(err) = shared.terminal_error.clone() {
+            tracing::debug!(error = %err.message, "netstack tcp poll_flush terminal_error");
             return Poll::Ready(Err(err.to_io_error()));
         }
 
         if shared.write_buffer.is_empty() && shared.send_queue_empty {
+            tracing::debug!("netstack tcp poll_flush Ready");
             return Poll::Ready(Ok(()));
         }
 
+        tracing::debug!(
+            write_buffer_len = shared.write_buffer.len(),
+            send_queue_empty = shared.send_queue_empty,
+            "netstack tcp poll_flush Pending"
+        );
         register_waker(&mut shared.flush_waker, cx.waker());
         Poll::Pending
     }
@@ -926,14 +943,22 @@ impl TcpSocketState {
         let mut shared = acquire_lock(&self.shared);
 
         if let Some(err) = shared.terminal_error.clone() {
+            tracing::debug!(error = %err.message, "netstack tcp poll_shutdown terminal_error");
             return Poll::Ready(Err(err.to_io_error()));
         }
 
         shared.close_requested = true;
         if shared.close_sent && shared.write_buffer.is_empty() && shared.send_queue_empty {
+            tracing::debug!("netstack tcp poll_shutdown Ready");
             return Poll::Ready(Ok(()));
         }
 
+        tracing::debug!(
+            close_sent = shared.close_sent,
+            write_buffer_len = shared.write_buffer.len(),
+            send_queue_empty = shared.send_queue_empty,
+            "netstack tcp poll_shutdown Pending"
+        );
         register_waker(&mut shared.shutdown_waker, cx.waker());
         Poll::Pending
     }
@@ -1294,9 +1319,15 @@ fn sync_tcp_socket(socket: &mut tcp::Socket<'static>, state: &Arc<TcpSocketState
                     break;
                 }
                 shared.write_buffer.drain(..written);
+                tracing::debug!(
+                    written,
+                    remaining = shared.write_buffer.len(),
+                    "netstack sync_tcp_socket drained write_buffer to socket"
+                );
                 progressed = true;
             }
             Err(err) => {
+                tracing::debug!(error = %err, "netstack sync_tcp_socket send_slice error");
                 shared.terminal_error = Some(SharedIoError::new(
                     io::ErrorKind::BrokenPipe,
                     err.to_string(),
@@ -1319,7 +1350,10 @@ fn sync_tcp_socket(socket: &mut tcp::Socket<'static>, state: &Arc<TcpSocketState
 
     shared.send_open = socket.may_send();
     shared.send_queue_empty = shared.write_buffer.is_empty() && socket.send_queue() == 0;
-    if !socket.may_recv() && !socket.can_recv() {
+    if matches!(shared.connect_result, Some(Ok(())))
+        && !socket.may_recv()
+        && !socket.can_recv()
+    {
         shared.read_closed = true;
     }
 
@@ -1338,6 +1372,7 @@ fn sync_tcp_socket(socket: &mut tcp::Socket<'static>, state: &Arc<TcpSocketState
         take_and_wake(&mut shared.write_waker);
     }
     if !was_send_queue_empty && shared.send_queue_empty {
+        tracing::debug!("netstack sync_tcp_socket send_queue_empty transition, waking flush+shutdown");
         take_and_wake(&mut shared.flush_waker);
         take_and_wake(&mut shared.shutdown_waker);
     }
