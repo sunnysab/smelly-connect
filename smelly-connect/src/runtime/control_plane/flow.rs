@@ -91,9 +91,7 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
         .map_err(|err| Error::ControlPlane(ControlPlaneError::AuthFlowFailed(err.to_string())))?;
 
     let authorized_twfid = crate::protocol::parse_login_psw_success(&login_psw_body, &parsed.twfid)
-        .map_err(|err| {
-            Error::ControlPlane(ControlPlaneError::AuthFlowFailed(format!("{err:?}")))
-        })?;
+        .map_err(|err| Error::ControlPlane(ControlPlaneError::from_auth_error(err)))?;
 
     let resource_body = client
         .get(format!("{base_url}/por/rclist.csp"))

@@ -69,6 +69,23 @@ impl std::fmt::Debug for PooledSession {
 #[derive(Debug, Clone)]
 pub struct AccountFailure {
     pub message: String,
+    pub permanent_auth: bool,
+}
+
+impl AccountFailure {
+    fn transient(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            permanent_auth: false,
+        }
+    }
+
+    fn permanent_auth(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            permanent_auth: true,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -748,9 +765,7 @@ impl SessionPool {
                 ),
                 Err(message) => (
                     format!("failed-{idx}"),
-                    AccountState::Open(AccountFailure {
-                        message: message.to_string(),
-                    }),
+                    AccountState::Open(AccountFailure::transient(message)),
                 ),
             };
             nodes.push(AccountNode {
@@ -805,9 +820,7 @@ impl SessionPool {
                     username: name.clone(),
                     password: "pass".to_string(),
                 },
-                state: AccountState::Open(AccountFailure {
-                    message: "not ready".to_string(),
-                }),
+                state: AccountState::Open(AccountFailure::transient("not ready")),
                 reconnect_session: None,
                 flaky_retry: false,
                 consecutive_failures: 0,
@@ -1065,7 +1078,7 @@ impl SessionPool {
                 AccountState::Ready(_) | AccountState::Suspect(_)
             ) {
                 node.consecutive_failures = node.failure_threshold;
-                open_node(node, error.clone());
+                open_node(node, AccountFailure::transient(error.clone()));
                 tracing::warn!(
                     account = %account_name,
                     reason = %error,
@@ -1095,9 +1108,7 @@ impl SessionPool {
             ) {
                 node.consecutive_failures = node.failure_threshold;
                 node.open_until = Some(Instant::now());
-                node.state = AccountState::Open(AccountFailure {
-                    message: error.clone(),
-                });
+                node.state = AccountState::Open(AccountFailure::transient(error.clone()));
                 tracing::warn!(
                     account = %account_name,
                     reason = %error,
@@ -1129,9 +1140,7 @@ impl SessionPool {
                 node.reconnect_session = Some(session.clone());
                 node.consecutive_failures = node.failure_threshold;
                 node.open_until = Some(Instant::now());
-                node.state = AccountState::Open(AccountFailure {
-                    message: error.clone(),
-                });
+                node.state = AccountState::Open(AccountFailure::transient(error.clone()));
                 tracing::warn!(
                     account = %account_name,
                     reason = %error,
@@ -1383,9 +1392,7 @@ impl SessionPool {
                             username: "open-01".to_string(),
                             password: "pass".to_string(),
                         },
-                        state: AccountState::Open(AccountFailure {
-                            message: "open".to_string(),
-                        }),
+                        state: AccountState::Open(AccountFailure::transient("open")),
                         reconnect_session: None,
                         flaky_retry: false,
                         consecutive_failures: 3,
@@ -1448,9 +1455,7 @@ impl SessionPool {
             inner: Arc::new(Mutex::new(PoolState {
                 nodes: vec![AccountNode {
                     account: account.clone(),
-                    state: AccountState::Open(AccountFailure {
-                        message: "vpn unavailable".to_string(),
-                    }),
+                    state: AccountState::Open(AccountFailure::transient("vpn unavailable")),
                     reconnect_session: None,
                     flaky_retry: false,
                     consecutive_failures: 3,
@@ -1508,14 +1513,14 @@ impl SessionPool {
     }
 
     #[cfg(any(test, debug_assertions))]
-    pub async fn report_auth_failure_for_test(&self, account_name: &str, error: &str) {
+    pub async fn report_auth_failure_for_test(&self, account_name: &str, error: PoolError) {
         let mut state = self.inner.lock().await;
         if let Some(node) = state
             .nodes
             .iter_mut()
             .find(|node| node.account.name == account_name)
         {
-            disable_node(node, error.to_string());
+            disable_node(node, account_failure_from_pool_error(&error));
         }
     }
 
@@ -1569,9 +1574,7 @@ impl SessionPool {
             node.current_backoff =
                 next_backoff(node.current_backoff, node.backoff_base, node.backoff_max);
             node.open_until = Some(Instant::now() + node.current_backoff);
-            node.state = AccountState::Open(AccountFailure {
-                message: "forced probe failure".to_string(),
-            });
+            node.state = AccountState::Open(AccountFailure::transient("forced probe failure"));
             let name = node.account.name.clone();
             let backoff = node.current_backoff;
             let account = node.account.clone();
@@ -1691,9 +1694,7 @@ impl SessionPool {
 
                     let session = match std::mem::replace(
                         &mut node.state,
-                        AccountState::Open(AccountFailure {
-                            message: "forced failure".to_string(),
-                        }),
+                        AccountState::Open(AccountFailure::transient("forced failure")),
                     ) {
                         AccountState::Ready(session) | AccountState::Suspect(session) => session,
                         other => {
@@ -1950,10 +1951,11 @@ impl SessionPool {
                     .iter_mut()
                     .find(|node| node.account.name == name)
                 {
-                    if is_permanent_auth_failure(&err.to_string()) {
-                        disable_node(node, err.to_string());
+                    let failure = account_failure_from_pool_error(&err);
+                    if failure.permanent_auth {
+                        disable_node(node, failure);
                     } else {
-                        open_node(node, err.to_string());
+                        open_node(node, failure);
                     }
                 }
                 tracing::warn!(account = %account.name, error = %err, "account connect failed");
@@ -2023,7 +2025,8 @@ impl SessionPool {
                 Ok(Some((name, live)))
             }
             Err(err) => {
-                self.complete_probe_failure(&name, err.to_string()).await?;
+                self.complete_probe_failure(&name, account_failure_from_pool_error(&err))
+                    .await?;
                 Err(err)
             }
         }
@@ -2102,10 +2105,11 @@ impl SessionPool {
                     .find(|node| node.account.name == name)
                 {
                     node.live_probe_in_flight = false;
-                    if is_permanent_auth_failure(&err.to_string()) {
-                        disable_node(node, err.to_string());
+                    let failure = account_failure_from_pool_error(&err);
+                    if failure.permanent_auth {
+                        disable_node(node, failure);
                     } else {
-                        open_node(node, err.to_string());
+                        open_node(node, failure);
                     }
                 }
                 tracing::warn!(account = %name, error = %err, "maintenance recovery probe failed");
@@ -2141,19 +2145,23 @@ impl SessionPool {
         Ok(())
     }
 
-    async fn complete_probe_failure(&self, name: &str, error: String) -> Result<(), PoolError> {
+    async fn complete_probe_failure(
+        &self,
+        name: &str,
+        failure: AccountFailure,
+    ) -> Result<(), PoolError> {
         let mut state = self.inner.lock().await;
         let node = state
             .nodes
             .iter_mut()
             .find(|node| node.account.name == name)
             .ok_or_else(|| PoolError::new(format!("probe target disappeared: {name}")))?;
-        if is_permanent_auth_failure(&error) {
-            disable_node(node, error.clone());
+        if failure.permanent_auth {
+            disable_node(node, failure.clone());
         } else {
-            open_node(node, error.clone());
+            open_node(node, failure.clone());
         }
-        tracing::warn!(account = %name, error = %error, "request-triggered recovery probe failed");
+        tracing::warn!(account = %name, error = %failure.message, "request-triggered recovery probe failed");
         Ok(())
     }
 
@@ -2171,13 +2179,23 @@ impl SessionPool {
     }
 }
 
-fn is_permanent_auth_failure(message: &str) -> bool {
-    message.contains("ControlPlane(AuthFlowFailed(\"MissingSuccessMarker\"))")
+fn account_failure_from_pool_error(error: &PoolError) -> AccountFailure {
+    if is_permanent_auth_failure(error) {
+        AccountFailure::permanent_auth(error.to_string())
+    } else {
+        AccountFailure::transient(error.to_string())
+    }
 }
 
 #[cfg(any(test, debug_assertions))]
-pub fn is_permanent_auth_failure_for_test(message: &str) -> bool {
-    is_permanent_auth_failure(message)
+pub fn is_permanent_auth_failure_for_test(error: &PoolError) -> bool {
+    is_permanent_auth_failure(error)
+}
+
+fn is_permanent_auth_failure(error: &PoolError) -> bool {
+    error
+        .underlying_error()
+        .is_some_and(smelly_connect::Error::is_permanent_auth_failure)
 }
 
 impl SessionPool {

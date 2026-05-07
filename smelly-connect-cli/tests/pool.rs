@@ -7,6 +7,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
 
+fn missing_success_marker_pool_error() -> smelly_connect_cli::pool::PoolError {
+    smelly_connect_cli::pool::PoolError::SessionConnectFailed(smelly_connect::Error::ControlPlane(
+        smelly_connect::error::ControlPlaneError::PermanentAuthFailure(
+            smelly_connect::error::AuthError::MissingSuccessMarker,
+        ),
+    ))
+}
+
 fn startup_pool_config(min_pool_size: usize) -> smelly_connect_cli::config::AppConfig {
     toml::from_str(&format!(
         r#"
@@ -176,15 +184,7 @@ async fn pool_prewarm_refills_parallel_slot_after_failure() {
                     let acct03_notify = Arc::clone(&acct03_notify);
                     async move {
                         match account.name.as_str() {
-                            "acct-01" => {
-                                Err(smelly_connect_cli::pool::PoolError::SessionConnectFailed(
-                                    smelly_connect::Error::ControlPlane(
-                                        smelly_connect::error::ControlPlaneError::AuthFlowFailed(
-                                            "MissingSuccessMarker".to_string(),
-                                        ),
-                                    ),
-                                ))
-                            }
+                            "acct-01" => Err(missing_success_marker_pool_error()),
                             "acct-02" => {
                                 if !acct03_started.load(Ordering::SeqCst) {
                                     tokio::select! {
@@ -273,8 +273,8 @@ async fn pool_prewarm_retries_other_accounts_after_permanent_auth_failure() {
     let outcomes = Arc::new(Mutex::new(VecDeque::from([
         Err(smelly_connect_cli::pool::PoolError::SessionConnectFailed(
             smelly_connect::Error::ControlPlane(
-                smelly_connect::error::ControlPlaneError::AuthFlowFailed(
-                    "MissingSuccessMarker".to_string(),
+                smelly_connect::error::ControlPlaneError::PermanentAuthFailure(
+                    smelly_connect::error::AuthError::MissingSuccessMarker,
                 ),
             ),
         )),
@@ -529,7 +529,7 @@ async fn open_node_reenters_via_timer_into_half_open_after_backoff_expiry() {
 fn auth_failure_message_is_treated_as_permanent_disable() {
     assert!(
         smelly_connect_cli::pool::is_permanent_auth_failure_for_test(
-            "ControlPlane(AuthFlowFailed(\"MissingSuccessMarker\"))"
+            &missing_success_marker_pool_error()
         )
     );
 }
@@ -537,11 +537,8 @@ fn auth_failure_message_is_treated_as_permanent_disable() {
 #[tokio::test(start_paused = true)]
 async fn auth_failure_does_not_reenter_half_open_after_backoff_expiry() {
     let pool = smelly_connect_cli::pool::SessionPool::from_test_accounts(1, 0).await;
-    pool.report_auth_failure_for_test(
-        "acct-01",
-        "ControlPlane(AuthFlowFailed(\"MissingSuccessMarker\"))",
-    )
-    .await;
+    pool.report_auth_failure_for_test("acct-01", missing_success_marker_pool_error())
+        .await;
     tokio::time::advance(std::time::Duration::from_secs(601)).await;
     assert!(pool.state_summary_for_test().await.contains("Open"));
     assert!(!pool.state_summary_for_test().await.contains("HalfOpen"));

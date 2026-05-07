@@ -44,13 +44,9 @@ pub(super) fn build_pool_summary(state: &PoolState) -> PoolSummary {
             AccountState::Connecting => connecting_nodes += 1,
             AccountState::Ready(_) => ready_nodes += 1,
             AccountState::Suspect(_) => suspect_nodes += 1,
-            AccountState::Open(_) => {
+            AccountState::Open(AccountFailure { permanent_auth, .. }) => {
                 open_nodes += 1;
-                if matches!(
-                    &node.state,
-                    AccountState::Open(AccountFailure { message })
-                        if message.contains("ControlPlane(AuthFlowFailed(\"MissingSuccessMarker\"))")
-                ) {
+                if permanent_auth {
                     disabled_auth_nodes += 1;
                 }
                 if node.open_until.is_some() {
@@ -89,16 +85,16 @@ pub(super) fn build_pool_summary(state: &PoolState) -> PoolSummary {
     }
 }
 
-pub(super) fn open_node(node: &mut AccountNode, message: String) {
+pub(super) fn open_node(node: &mut AccountNode, failure: AccountFailure) {
     node.current_backoff = next_backoff(node.current_backoff, node.backoff_base, node.backoff_max);
     node.open_until = Some(Instant::now() + node.current_backoff);
     node.live_probe_in_flight = false;
-    node.state = AccountState::Open(AccountFailure { message });
+    node.state = AccountState::Open(failure);
 }
 
-pub(super) fn disable_node(node: &mut AccountNode, message: String) {
+pub(super) fn disable_node(node: &mut AccountNode, failure: AccountFailure) {
     node.live_probe_in_flight = false;
     node.open_until = None;
     node.reconnect_session = None;
-    node.state = AccountState::Open(AccountFailure { message });
+    node.state = AccountState::Open(failure);
 }

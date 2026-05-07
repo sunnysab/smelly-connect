@@ -12,6 +12,15 @@ pub enum Error {
     Transport(TransportError),
 }
 
+impl Error {
+    pub fn is_permanent_auth_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::ControlPlane(error) if error.is_permanent_auth_failure()
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthError {
     MissingSuccessMarker,
@@ -19,6 +28,19 @@ pub enum AuthError {
     InvalidModulusHex,
     InvalidPublicExponent,
     EncryptFailed,
+}
+
+impl Display for AuthError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::MissingSuccessMarker => "MissingSuccessMarker",
+            Self::MissingTwfId => "MissingTwfId",
+            Self::InvalidModulusHex => "InvalidModulusHex",
+            Self::InvalidPublicExponent => "InvalidPublicExponent",
+            Self::EncryptFailed => "EncryptFailed",
+        };
+        f.write_str(label)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,9 +63,24 @@ pub enum RouteDecisionError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlPlaneError {
     AuthFlowFailed(String),
+    PermanentAuthFailure(AuthError),
     CaptchaRequired,
     NotImplemented,
     ResourceParseFailed(String),
+}
+
+impl ControlPlaneError {
+    pub fn from_auth_error(error: AuthError) -> Self {
+        if matches!(error, AuthError::MissingSuccessMarker) {
+            Self::PermanentAuthFailure(error)
+        } else {
+            Self::AuthFlowFailed(error.to_string())
+        }
+    }
+
+    pub fn is_permanent_auth_failure(&self) -> bool {
+        matches!(self, Self::PermanentAuthFailure(_))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,5 +136,34 @@ impl TransportError {
             | io::ErrorKind::UnexpectedEof => Self::ConnectionClosed,
             _ => Self::ConnectFailed(err.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AuthError, ControlPlaneError, Error};
+
+    #[test]
+    fn missing_success_marker_is_classified_as_permanent_auth_failure() {
+        let error = Error::ControlPlane(ControlPlaneError::from_auth_error(
+            AuthError::MissingSuccessMarker,
+        ));
+        assert!(error.is_permanent_auth_failure());
+        assert!(matches!(
+            error,
+            Error::ControlPlane(ControlPlaneError::PermanentAuthFailure(
+                AuthError::MissingSuccessMarker
+            ))
+        ));
+    }
+
+    #[test]
+    fn other_auth_errors_remain_generic_auth_flow_failures() {
+        let error = ControlPlaneError::from_auth_error(AuthError::MissingTwfId);
+        assert_eq!(
+            error,
+            ControlPlaneError::AuthFlowFailed("MissingTwfId".to_string())
+        );
+        assert!(!error.is_permanent_auth_failure());
     }
 }
