@@ -1,10 +1,10 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::{pending, poll_fn};
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -19,7 +19,8 @@ use smoltcp::time::{Duration as SmolDuration, Instant};
 use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, Ipv4Cidr};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant as TokioInstant;
 use tracing::{debug, warn};
 
 use crate::TargetAddr;
@@ -35,38 +36,116 @@ const ICMP_KEEPALIVE_IDENT: u16 = 0x534d;
 const ICMP_PING_TIMEOUT_MILLIS: u64 = 5_000;
 const UDP_PACKET_CAPACITY: usize = 32;
 const UDP_BUFFER_SIZE: usize = 64 * 1024;
+const SOCKET_CHUNK_SIZE: usize = 16 * 1024;
 
 #[derive(Clone)]
 struct SmolStack {
-    inner: Arc<SmolStackInner>,
+    actor: NetstackActorHandle,
 }
 
-struct SmolStackInner {
-    state: Mutex<NetstackState>,
-    wake: Notify,
-    local_ip: Ipv4Addr,
+#[derive(Clone)]
+struct NetstackActorHandle {
+    commands: mpsc::UnboundedSender<NetstackCommand>,
 }
 
-/// Acquire the netstack mutex lock. If the lock is poisoned, recover it
-/// so a single task panic does not crash the whole process.
-fn acquire_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            warn!("netstack mutex recovered from poison");
-            poisoned.into_inner()
-        }
-    }
-}
-
-struct NetstackState {
+struct NetstackActor {
     device: QueueDevice,
     iface: Interface,
     sockets: SocketSet<'static>,
-    active_handles: std::collections::HashSet<SocketHandle>,
+    active_handles: HashSet<SocketHandle>,
+    tcp_sockets: HashMap<SocketHandle, Arc<TcpSocketState>>,
+    udp_sockets: HashMap<SocketHandle, Arc<UdpSocketState>>,
+    pending_pings: HashMap<SocketHandle, PendingPing>,
     pending_outbound: VecDeque<Vec<u8>>,
+    local_ip: Ipv4Addr,
     next_port: u16,
     next_icmp_seq: u16,
+}
+
+enum NetstackCommand {
+    TcpConnect {
+        addr: SocketAddr,
+        state: Arc<TcpSocketState>,
+        reply: oneshot::Sender<io::Result<SocketHandle>>,
+    },
+    UdpBind {
+        state: Arc<UdpSocketState>,
+        reply: oneshot::Sender<io::Result<(SocketHandle, SocketAddr)>>,
+    },
+    Ping {
+        target: Ipv4Addr,
+        reply: oneshot::Sender<io::Result<()>>,
+    },
+    SocketRead(SocketHandle),
+    SocketWrite(SocketHandle),
+    SocketFlush(SocketHandle),
+    TcpClose(SocketHandle),
+    RemoveSocket(SocketHandle),
+    UdpSend {
+        handle: SocketHandle,
+        target: SocketAddrV4,
+        data: Vec<u8>,
+        reply: oneshot::Sender<io::Result<usize>>,
+    },
+    #[cfg(test)]
+    TestQueueOutbound {
+        packet: Vec<u8>,
+    },
+    #[cfg(test)]
+    TestSnapshot {
+        reply: oneshot::Sender<NetstackSnapshot>,
+    },
+}
+
+struct PendingPing {
+    seq_no: u16,
+    reply: oneshot::Sender<io::Result<()>>,
+    deadline: TokioInstant,
+}
+
+#[derive(Clone, Debug)]
+struct SharedIoError {
+    kind: io::ErrorKind,
+    message: Arc<str>,
+}
+
+struct TcpSocketState {
+    shared: Mutex<TcpSocketShared>,
+}
+
+struct TcpSocketShared {
+    connect_result: Option<Result<(), SharedIoError>>,
+    read_buffer: VecDeque<u8>,
+    write_buffer: VecDeque<u8>,
+    read_closed: bool,
+    send_open: bool,
+    send_queue_empty: bool,
+    close_requested: bool,
+    close_sent: bool,
+    terminal_error: Option<SharedIoError>,
+    connect_waker: Option<Waker>,
+    read_waker: Option<Waker>,
+    write_waker: Option<Waker>,
+    flush_waker: Option<Waker>,
+    shutdown_waker: Option<Waker>,
+}
+
+struct UdpSocketState {
+    shared: Mutex<UdpSocketShared>,
+}
+
+struct UdpSocketShared {
+    recv_queue: VecDeque<(Vec<u8>, SocketAddr)>,
+    pending_sends: VecDeque<PendingUdpSend>,
+    closed: bool,
+    error: Option<SharedIoError>,
+    recv_waker: Option<Waker>,
+}
+
+struct PendingUdpSend {
+    data: Vec<u8>,
+    target: SocketAddrV4,
+    reply: oneshot::Sender<io::Result<usize>>,
 }
 
 struct QueueDevice {
@@ -84,19 +163,39 @@ struct QueueTxToken<'a> {
 }
 
 struct SmolTcpStream {
-    stack: Arc<SmolStackInner>,
+    actor: NetstackActorHandle,
+    state: Arc<TcpSocketState>,
     handle: SocketHandle,
 }
 
 struct PendingConnectGuard {
-    stack: Arc<SmolStackInner>,
+    actor: NetstackActorHandle,
     handle: Option<SocketHandle>,
 }
 
 struct SmolUdpSocket {
-    stack: Arc<SmolStackInner>,
+    actor: NetstackActorHandle,
+    state: Arc<UdpSocketState>,
     handle: SocketHandle,
     local_addr: SocketAddr,
+}
+
+#[cfg(test)]
+struct NetstackSnapshot {
+    active_handles: usize,
+    pending_outbound: usize,
+}
+
+/// Acquire the mutex lock. If the lock is poisoned, recover it
+/// so a single task panic does not crash the whole process.
+fn acquire_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("netstack mutex recovered from poison");
+            poisoned.into_inner()
+        }
+    }
 }
 
 pub fn build_transport_from_packet_device(
@@ -149,33 +248,35 @@ impl SmolStack {
                 .push(IpCidr::Ipv4(Ipv4Cidr::new(local_ip, 32)))
                 .unwrap();
         });
-        // Use 0.0.0.0 as gateway to indicate directly reachable destination
-        // (point-to-point tunnel, no next-hop needed)
         iface
             .routes_mut()
             .add_default_ipv4_route(Ipv4Addr::UNSPECIFIED)
             .unwrap();
 
-        let inner = Arc::new(SmolStackInner {
-            state: Mutex::new(NetstackState {
-                device,
-                iface,
-                sockets: SocketSet::new(vec![]),
-                active_handles: std::collections::HashSet::new(),
-                pending_outbound: VecDeque::new(),
-                next_port: 10000,
-                next_icmp_seq: 1,
-            }),
-            wake: Notify::new(),
+        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
+        let actor = NetstackActor {
+            device,
+            iface,
+            sockets: SocketSet::new(vec![]),
+            active_handles: HashSet::new(),
+            tcp_sockets: HashMap::new(),
+            udp_sockets: HashMap::new(),
+            pending_pings: HashMap::new(),
+            pending_outbound: VecDeque::new(),
             local_ip,
-        });
+            next_port: 10000,
+            next_icmp_seq: 1,
+        };
 
-        let driver = Arc::clone(&inner);
         tokio::spawn(async move {
-            let _ = driver.run(inbound_rx, outbound_tx).await;
+            let _ = actor.run(inbound_rx, outbound_tx, commands_rx).await;
         });
 
-        Self { inner }
+        Self {
+            actor: NetstackActorHandle {
+                commands: commands_tx,
+            },
+        }
     }
 
     async fn connect(&self, addr: SocketAddr) -> io::Result<VpnStream> {
@@ -183,60 +284,281 @@ impl SmolStack {
             return Err(io::Error::other("ipv6 unsupported"));
         }
 
-        let handle = {
-            let mut state = acquire_lock(&self.inner.state);
-            let socket = tcp_socket();
-            let handle = state.sockets.add(socket);
-            state.active_handles.insert(handle);
-            let local_port = state.next_local_port();
-            let remote_ip = match addr.ip() {
-                IpAddr::V4(ip) => ip,
-                IpAddr::V6(_) => return Err(io::Error::other("ipv6 unsupported")),
-            };
-            // SAFETY: iface and sockets are distinct fields of NetstackState.
-            // We split the borrow to satisfy smoltcp's API which requires
-            // &mut Interface (via context()) and &mut SocketSet simultaneously.
-            let iface_ptr = &mut state.iface as *mut Interface;
-            let sockets = &mut state.sockets;
-            let cx = unsafe { &mut *iface_ptr }.context();
-            sockets
-                .get_mut::<tcp::Socket<'static>>(handle)
-                .connect(cx, (remote_ip, addr.port()), local_port)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            debug!(
-                ?handle,
-                local_port,
-                remote_addr = %addr,
-                active_handles = state.active_handles.len(),
-                pending_outbound = state.pending_outbound.len(),
-                "netstack tcp connect started"
-            );
-            handle
-        };
+        let state = Arc::new(TcpSocketState::new());
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.actor.send(NetstackCommand::TcpConnect {
+            addr,
+            state: Arc::clone(&state),
+            reply: reply_tx,
+        })?;
+        let handle = recv_actor_reply(reply_rx).await?;
 
-        self.inner.wake.notify_one();
         let mut guard = PendingConnectGuard {
-            stack: Arc::clone(&self.inner),
+            actor: self.actor.clone(),
             handle: Some(handle),
         };
-
-        let connected = poll_fn(|cx| self.inner.poll_connect(handle, cx)).await;
-        connected?;
+        poll_fn(|cx| state.poll_connect(cx)).await?;
         guard.handle = None;
 
         Ok(VpnStream::new(SmolTcpStream {
-            stack: Arc::clone(&self.inner),
+            actor: self.actor.clone(),
+            state,
             handle,
         }))
     }
 
     async fn ping(&self, target: Ipv4Addr) -> io::Result<()> {
-        let (handle, seq_no) = {
-            let mut state = acquire_lock(&self.inner.state);
-            let socket = icmp_socket();
-            let handle = state.sockets.add(socket);
-            state.active_handles.insert(handle);
-            let seq_no = state.next_icmp_seq();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.actor.send(NetstackCommand::Ping {
+            target,
+            reply: reply_tx,
+        })?;
+        recv_actor_reply(reply_rx).await
+    }
+
+    async fn bind_udp(&self) -> io::Result<VpnUdpSocket> {
+        let state = Arc::new(UdpSocketState::new());
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.actor.send(NetstackCommand::UdpBind {
+            state: Arc::clone(&state),
+            reply: reply_tx,
+        })?;
+        let (handle, local_addr) = recv_actor_reply(reply_rx).await?;
+
+        Ok(VpnUdpSocket::new(SmolUdpSocket {
+            actor: self.actor.clone(),
+            state,
+            handle,
+            local_addr,
+        }))
+    }
+
+    #[cfg(test)]
+    async fn queue_outbound_for_test(&self, packet: Vec<u8>) {
+        self.actor
+            .send(NetstackCommand::TestQueueOutbound { packet })
+            .expect("test command should reach netstack actor");
+    }
+
+    #[cfg(test)]
+    async fn snapshot(&self) -> NetstackSnapshot {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.actor
+            .send(NetstackCommand::TestSnapshot { reply: reply_tx })
+            .expect("test snapshot should reach netstack actor");
+        reply_rx.await.expect("test snapshot reply should succeed")
+    }
+}
+
+impl NetstackActorHandle {
+    fn send(&self, command: NetstackCommand) -> io::Result<()> {
+        self.commands
+            .send(command)
+            .map_err(|_| io::Error::other("netstack actor stopped"))
+    }
+
+    fn remove_socket(&self, handle: SocketHandle) {
+        let _ = self.commands.send(NetstackCommand::RemoveSocket(handle));
+    }
+
+    fn notify_read(&self, handle: SocketHandle) {
+        let _ = self.commands.send(NetstackCommand::SocketRead(handle));
+    }
+
+    fn notify_write(&self, handle: SocketHandle) {
+        let _ = self.commands.send(NetstackCommand::SocketWrite(handle));
+    }
+
+    fn notify_flush(&self, handle: SocketHandle) {
+        let _ = self.commands.send(NetstackCommand::SocketFlush(handle));
+    }
+
+    fn request_close(&self, handle: SocketHandle) {
+        let _ = self.commands.send(NetstackCommand::TcpClose(handle));
+    }
+}
+
+impl NetstackActor {
+    async fn run(
+        mut self,
+        mut inbound_rx: mpsc::Receiver<Vec<u8>>,
+        outbound_tx: mpsc::Sender<Vec<u8>>,
+        mut commands_rx: mpsc::UnboundedReceiver<NetstackCommand>,
+    ) -> io::Result<()> {
+        let mut commands_open = true;
+
+        loop {
+            self.drive();
+            self.flush_outbound(&outbound_tx)?;
+
+            let delay = self.next_delay();
+            tokio::select! {
+                biased;
+                maybe_command = async {
+                    if commands_open {
+                        commands_rx.recv().await
+                    } else {
+                        pending::<Option<NetstackCommand>>().await
+                    }
+                } => {
+                    match maybe_command {
+                        Some(command) => self.handle_command(command)?,
+                        None => commands_open = false,
+                    }
+                }
+                maybe_packet = inbound_rx.recv() => {
+                    let Some(packet) = maybe_packet else {
+                        return Ok(());
+                    };
+                    self.device.push_inbound(packet);
+                }
+                _ = async {
+                    match delay {
+                        Some(delay) => tokio::time::sleep(delay).await,
+                        None => pending::<()>().await,
+                    }
+                } => {}
+            }
+
+            if !commands_open && inbound_rx.is_closed() {
+                return Ok(());
+            }
+        }
+    }
+
+    fn handle_command(&mut self, command: NetstackCommand) -> io::Result<()> {
+        match command {
+            NetstackCommand::TcpConnect { addr, state, reply } => {
+                let _ = reply.send(self.start_tcp_connect(addr, state));
+            }
+            NetstackCommand::UdpBind { state, reply } => {
+                let _ = reply.send(self.start_udp_bind(state));
+            }
+            NetstackCommand::Ping { target, reply } => {
+                if let Err(err) = self.start_ping(target, reply) {
+                    warn!(error = %err, "netstack ping setup failed");
+                }
+            }
+            NetstackCommand::SocketRead(handle)
+            | NetstackCommand::SocketWrite(handle)
+            | NetstackCommand::SocketFlush(handle)
+            | NetstackCommand::TcpClose(handle) => {
+                debug!(?handle, "netstack actor socket wake");
+            }
+            NetstackCommand::RemoveSocket(handle) => {
+                self.remove_socket(handle);
+            }
+            NetstackCommand::UdpSend {
+                handle,
+                target,
+                data,
+                reply,
+            } => {
+                if let Some(state) = self.udp_sockets.get(&handle).cloned() {
+                    state.enqueue_send(target, data, reply);
+                } else {
+                    let _ = reply.send(Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "udp socket closed",
+                    )));
+                }
+            }
+            #[cfg(test)]
+            NetstackCommand::TestQueueOutbound { packet } => {
+                self.device.outbound.push_back(packet);
+            }
+            #[cfg(test)]
+            NetstackCommand::TestSnapshot { reply } => {
+                let _ = reply.send(NetstackSnapshot {
+                    active_handles: self.active_handles.len(),
+                    pending_outbound: self.pending_outbound.len(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn start_tcp_connect(
+        &mut self,
+        addr: SocketAddr,
+        state: Arc<TcpSocketState>,
+    ) -> io::Result<SocketHandle> {
+        let remote_ip = match addr.ip() {
+            IpAddr::V4(ip) => ip,
+            IpAddr::V6(_) => return Err(io::Error::other("ipv6 unsupported")),
+        };
+
+        let handle = self.sockets.add(tcp_socket());
+        self.active_handles.insert(handle);
+        self.tcp_sockets.insert(handle, Arc::clone(&state));
+
+        let local_port = self.next_local_port();
+        let connect_result = {
+            let (iface, sockets) = (&mut self.iface, &mut self.sockets);
+            sockets.get_mut::<tcp::Socket<'static>>(handle).connect(
+                iface.context(),
+                (remote_ip, addr.port()),
+                local_port,
+            )
+        };
+
+        if let Err(err) = connect_result {
+            self.remove_socket(handle);
+            return Err(io::Error::other(err.to_string()));
+        }
+
+        debug!(
+            ?handle,
+            local_port,
+            remote_addr = %addr,
+            active_handles = self.active_handles.len(),
+            pending_outbound = self.pending_outbound.len(),
+            "netstack tcp connect started"
+        );
+
+        Ok(handle)
+    }
+
+    fn start_udp_bind(
+        &mut self,
+        state: Arc<UdpSocketState>,
+    ) -> io::Result<(SocketHandle, SocketAddr)> {
+        let handle = self.sockets.add(udp_socket());
+        self.active_handles.insert(handle);
+        self.udp_sockets.insert(handle, Arc::clone(&state));
+
+        let local_port = self.next_local_port();
+        if let Err(err) = self
+            .sockets
+            .get_mut::<udp::Socket<'static>>(handle)
+            .bind(local_port)
+        {
+            self.remove_socket(handle);
+            return Err(io::Error::other(err.to_string()));
+        }
+
+        Ok((
+            handle,
+            SocketAddr::new(IpAddr::V4(self.local_ip), local_port),
+        ))
+    }
+
+    fn start_ping(
+        &mut self,
+        target: Ipv4Addr,
+        reply: oneshot::Sender<io::Result<()>>,
+    ) -> io::Result<()> {
+        let handle = self.sockets.add(icmp_socket());
+        self.active_handles.insert(handle);
+        let seq_no = self.next_icmp_seq();
+
+        let result = (|| {
+            let socket = self.sockets.get_mut::<icmp::Socket<'static>>(handle);
+            socket
+                .bind(icmp::Endpoint::Ident(ICMP_KEEPALIVE_IDENT))
+                .map_err(|err| io::Error::other(err.to_string()))?;
+
             let mut packet = [0_u8; 8];
             let repr = Icmpv4Repr::EchoRequest {
                 ident: ICMP_KEEPALIVE_IDENT,
@@ -247,162 +569,186 @@ impl SmolStack {
                 &mut Icmpv4Packet::new_unchecked(&mut packet),
                 &ChecksumCapabilities::default(),
             );
-            state
-                .sockets
-                .get_mut::<icmp::Socket<'static>>(handle)
-                .bind(icmp::Endpoint::Ident(ICMP_KEEPALIVE_IDENT))
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            state
-                .sockets
-                .get_mut::<icmp::Socket<'static>>(handle)
+
+            socket
                 .send_slice(&packet, IpAddress::Ipv4(target))
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            (handle, seq_no)
-        };
+                .map_err(|err| io::Error::other(err.to_string()))
+        })();
 
-        self.inner.wake.notify_one();
+        if let Err(err) = result {
+            self.remove_socket(handle);
+            let _ = reply.send(Err(err));
+            return Ok(());
+        }
 
-        let deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_millis(ICMP_PING_TIMEOUT_MILLIS);
-        let result = loop {
-            let maybe_reply = {
-                let mut state = acquire_lock(&self.inner.state);
-                let socket = state.sockets.get_mut::<icmp::Socket<'static>>(handle);
-                if socket.can_recv() {
-                    let mut buffer = [0_u8; ICMP_BUFFER_SIZE];
-                    let (n, _) = socket
-                        .recv_slice(&mut buffer)
-                        .map_err(|err| io::Error::other(err.to_string()))?;
+        self.pending_pings.insert(
+            handle,
+            PendingPing {
+                seq_no,
+                reply,
+                deadline: TokioInstant::now()
+                    + std::time::Duration::from_millis(ICMP_PING_TIMEOUT_MILLIS),
+            },
+        );
+
+        Ok(())
+    }
+
+    fn drive(&mut self) {
+        for _ in 0..16 {
+            let outbound_before = self.device.outbound.len();
+            let mut progressed = false;
+
+            progressed |= self.sync_tcp_sockets();
+            progressed |= self.sync_udp_sockets();
+            let _ = self
+                .iface
+                .poll(Instant::now(), &mut self.device, &mut self.sockets);
+            progressed |= self.sync_tcp_sockets();
+            progressed |= self.sync_udp_sockets();
+            progressed |= self.sync_pending_pings();
+
+            if !progressed && self.device.outbound.len() == outbound_before {
+                break;
+            }
+        }
+
+        self.pending_outbound.extend(self.device.take_outbound());
+    }
+
+    fn sync_tcp_sockets(&mut self) -> bool {
+        let handles: Vec<_> = self.tcp_sockets.keys().copied().collect();
+        let mut progressed = false;
+
+        for handle in handles {
+            let Some(state) = self.tcp_sockets.get(&handle).cloned() else {
+                continue;
+            };
+            let socket = self.sockets.get_mut::<tcp::Socket<'static>>(handle);
+            progressed |= sync_tcp_socket(socket, &state);
+        }
+
+        progressed
+    }
+
+    fn sync_udp_sockets(&mut self) -> bool {
+        let handles: Vec<_> = self.udp_sockets.keys().copied().collect();
+        let mut progressed = false;
+
+        for handle in handles {
+            let Some(state) = self.udp_sockets.get(&handle).cloned() else {
+                continue;
+            };
+            let socket = self.sockets.get_mut::<udp::Socket<'static>>(handle);
+            progressed |= sync_udp_socket(socket, &state);
+        }
+
+        progressed
+    }
+
+    fn sync_pending_pings(&mut self) -> bool {
+        let handles: Vec<_> = self.pending_pings.keys().copied().collect();
+        let mut progressed = false;
+        let now = TokioInstant::now();
+        let mut done = Vec::new();
+
+        for handle in handles {
+            let Some(ping) = self.pending_pings.get(&handle) else {
+                continue;
+            };
+
+            if now >= ping.deadline {
+                done.push((
+                    handle,
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "icmp ping timed out",
+                    )),
+                ));
+                progressed = true;
+                continue;
+            }
+
+            let socket = self.sockets.get_mut::<icmp::Socket<'static>>(handle);
+            if !socket.can_recv() {
+                continue;
+            }
+
+            let mut buffer = [0_u8; ICMP_BUFFER_SIZE];
+            let result = socket
+                .recv_slice(&mut buffer)
+                .map_err(|err| io::Error::other(err.to_string()))
+                .and_then(|(n, _)| {
                     let packet = Icmpv4Packet::new_checked(&buffer[..n])
                         .map_err(|err| io::Error::other(err.to_string()))?;
-                    match Icmpv4Repr::parse(&packet, &ChecksumCapabilities::default())
-                        .map_err(|err| io::Error::other(err.to_string()))?
-                    {
-                        Icmpv4Repr::EchoReply { ident, seq_no, .. } => Some((ident, seq_no)),
-                        _ => None,
+                    let repr = Icmpv4Repr::parse(&packet, &ChecksumCapabilities::default())
+                        .map_err(|err| io::Error::other(err.to_string()))?;
+                    match repr {
+                        Icmpv4Repr::EchoReply { ident, seq_no, .. }
+                            if ident == ICMP_KEEPALIVE_IDENT && seq_no == ping.seq_no =>
+                        {
+                            Ok(())
+                        }
+                        _ => Err(io::Error::other("unexpected icmp echo response")),
                     }
-                } else {
-                    None
-                }
-            };
+                });
 
-            if let Some((ident, reply_seq)) = maybe_reply
-                && ident == ICMP_KEEPALIVE_IDENT
-                && reply_seq == seq_no
-            {
-                break Ok(());
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                break Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "icmp ping timed out",
-                ));
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        };
-
-        self.inner.remove_socket(handle);
-        result
-    }
-
-    async fn bind_udp(&self) -> io::Result<VpnUdpSocket> {
-        let (handle, local_addr) = {
-            let mut state = acquire_lock(&self.inner.state);
-            let socket = udp_socket();
-            let handle = state.sockets.add(socket);
-            state.active_handles.insert(handle);
-            let local_port = state.next_local_port();
-            state
-                .sockets
-                .get_mut::<udp::Socket<'static>>(handle)
-                .bind(local_port)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            (
-                handle,
-                SocketAddr::new(IpAddr::V4(self.inner.local_ip), local_port),
-            )
-        };
-        self.inner.wake.notify_one();
-        Ok(VpnUdpSocket::new(SmolUdpSocket {
-            stack: Arc::clone(&self.inner),
-            handle,
-            local_addr,
-        }))
-    }
-}
-
-impl SmolStackInner {
-    async fn run(
-        self: Arc<Self>,
-        mut inbound_rx: mpsc::Receiver<Vec<u8>>,
-        outbound_tx: mpsc::Sender<Vec<u8>>,
-    ) -> io::Result<()> {
-        self.flush(None, &outbound_tx).await?;
-
-        loop {
-            let delay = self.next_delay();
-            tokio::select! {
-                maybe_packet = inbound_rx.recv() => {
-                    let Some(packet) = maybe_packet else {
-                        return Ok(());
-                    };
-                    self.flush(Some(packet), &outbound_tx).await?;
-                }
-                _ = self.wake.notified() => {
-                    self.flush(None, &outbound_tx).await?;
-                }
-                _ = async {
-                    match delay {
-                        Some(delay) => tokio::time::sleep(delay).await,
-                        None => pending::<()>().await,
-                    }
-                } => {
-                    self.flush(None, &outbound_tx).await?;
-                }
-            }
-        }
-    }
-
-    async fn flush(
-        &self,
-        inbound: Option<Vec<u8>>,
-        outbound_tx: &mpsc::Sender<Vec<u8>>,
-    ) -> io::Result<()> {
-        {
-            let mut state = acquire_lock(&self.state);
-            if let Some(packet) = inbound {
-                state.device.push_inbound(packet);
-            }
-            // Batch poll: multiple rounds until no new packets are generated.
-            for _ in 0..16 {
-                state.poll();
-                if state.device.outbound.is_empty() {
-                    break;
-                }
-            }
-            let outbound_packets = state.device.take_outbound();
-            state.pending_outbound.extend(outbound_packets);
+            done.push((handle, result));
+            progressed = true;
         }
 
-        loop {
-            let packet = {
-                let mut state = acquire_lock(&self.state);
-                state.pending_outbound.pop_front()
-            };
-            let Some(packet) = packet else {
-                break;
-            };
+        for (handle, result) in done {
+            if let Some(ping) = self.pending_pings.remove(&handle) {
+                let _ = ping.reply.send(result);
+            }
+            self.remove_socket(handle);
+        }
 
+        progressed
+    }
+
+    fn next_delay(&mut self) -> Option<std::time::Duration> {
+        if !self.pending_outbound.is_empty() || self.has_pending_local_work() {
+            return Some(std::time::Duration::from_millis(1));
+        }
+
+        let mut delay = self
+            .iface
+            .poll_delay(Instant::now(), &self.sockets)
+            .map(|delay| std::time::Duration::from_millis(delay.total_millis()));
+
+        let now = TokioInstant::now();
+        for ping in self.pending_pings.values() {
+            let ping_delay = ping.deadline.saturating_duration_since(now);
+            delay = Some(match delay {
+                Some(current) => current.min(ping_delay),
+                None => ping_delay,
+            });
+        }
+
+        delay
+    }
+
+    fn has_pending_local_work(&self) -> bool {
+        self.tcp_sockets.values().any(|state| {
+            let shared = acquire_lock(&state.shared);
+            !shared.write_buffer.is_empty()
+                || (shared.close_requested && (!shared.close_sent || !shared.send_queue_empty))
+        }) || self.udp_sockets.values().any(|state| {
+            let shared = acquire_lock(&state.shared);
+            !shared.pending_sends.is_empty()
+        })
+    }
+
+    fn flush_outbound(&mut self, outbound_tx: &mpsc::Sender<Vec<u8>>) -> io::Result<()> {
+        while let Some(packet) = self.pending_outbound.pop_front() {
             match outbound_tx.try_send(packet) {
                 Ok(()) => {}
                 Err(TrySendError::Full(packet)) => {
-                    let mut state = acquire_lock(&self.state);
-                    state.pending_outbound.push_front(packet);
+                    self.pending_outbound.push_front(packet);
                     warn!(
-                        pending_outbound = state.pending_outbound.len(),
-                        active_handles = state.active_handles.len(),
+                        pending_outbound = self.pending_outbound.len(),
+                        active_handles = self.active_handles.len(),
                         "netstack outbound queue backed up"
                     );
                     break;
@@ -412,59 +758,40 @@ impl SmolStackInner {
                 }
             }
         }
+
         Ok(())
     }
 
-    fn next_delay(&self) -> Option<std::time::Duration> {
-        let mut state = acquire_lock(&self.state);
-        if !state.pending_outbound.is_empty() {
-            return Some(std::time::Duration::from_millis(1));
-        }
-        let now = Instant::now();
-        let NetstackState { iface, sockets, .. } = &mut *state;
-        iface
-            .poll_delay(now, sockets)
-            .map(|delay| std::time::Duration::from_millis(delay.total_millis()))
-    }
-
-    fn poll_connect(&self, handle: SocketHandle, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut state = acquire_lock(&self.state);
-        let socket = state.sockets.get_mut::<tcp::Socket<'static>>(handle);
-
-        if socket.may_send() {
-            return Poll::Ready(Ok(()));
+    fn remove_socket(&mut self, handle: SocketHandle) {
+        if !self.active_handles.remove(&handle) {
+            return;
         }
 
-        if matches!(socket.state(), tcp::State::Closed | tcp::State::TimeWait) {
-            return Poll::Ready(Err(io::Error::new(
+        if let Some(state) = self.tcp_sockets.remove(&handle) {
+            state.on_removed(Some(SharedIoError::new(
                 io::ErrorKind::ConnectionAborted,
-                "tcp connect failed",
+                "tcp socket removed",
             )));
         }
 
-        socket.register_send_waker(cx.waker());
-        Poll::Pending
-    }
-
-    fn remove_socket(&self, handle: SocketHandle) {
-        let mut state = acquire_lock(&self.state);
-        if state.active_handles.remove(&handle) {
-            let _ = state.sockets.remove(handle);
-            debug!(
-                ?handle,
-                active_handles = state.active_handles.len(),
-                pending_outbound = state.pending_outbound.len(),
-                "netstack socket removed"
-            );
+        if let Some(state) = self.udp_sockets.remove(&handle) {
+            state.on_removed();
         }
-    }
-}
 
-impl NetstackState {
-    fn poll(&mut self) {
-        let _ = self
-            .iface
-            .poll(Instant::now(), &mut self.device, &mut self.sockets);
+        if let Some(ping) = self.pending_pings.remove(&handle) {
+            let _ = ping.reply.send(Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "icmp ping cancelled",
+            )));
+        }
+
+        let _ = self.sockets.remove(handle);
+        debug!(
+            ?handle,
+            active_handles = self.active_handles.len(),
+            pending_outbound = self.pending_outbound.len(),
+            "netstack socket removed"
+        );
     }
 
     fn next_local_port(&mut self) -> u16 {
@@ -480,6 +807,232 @@ impl NetstackState {
         let seq = self.next_icmp_seq;
         self.next_icmp_seq = self.next_icmp_seq.wrapping_add(1);
         seq
+    }
+}
+
+impl SharedIoError {
+    fn new(kind: io::ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: Arc::<str>::from(message.into()),
+        }
+    }
+
+    fn other(message: impl Into<String>) -> Self {
+        Self::new(io::ErrorKind::Other, message)
+    }
+
+    fn to_io_error(&self) -> io::Error {
+        io::Error::new(self.kind, self.message.to_string())
+    }
+}
+
+impl TcpSocketState {
+    fn new() -> Self {
+        Self {
+            shared: Mutex::new(TcpSocketShared {
+                connect_result: None,
+                read_buffer: VecDeque::new(),
+                write_buffer: VecDeque::new(),
+                read_closed: false,
+                send_open: false,
+                send_queue_empty: true,
+                close_requested: false,
+                close_sent: false,
+                terminal_error: None,
+                connect_waker: None,
+                read_waker: None,
+                write_waker: None,
+                flush_waker: None,
+                shutdown_waker: None,
+            }),
+        }
+    }
+
+    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut shared = acquire_lock(&self.shared);
+        if let Some(result) = &shared.connect_result {
+            return Poll::Ready(result.clone().map_err(|err| err.to_io_error()));
+        }
+
+        register_waker(&mut shared.connect_waker, cx.waker());
+        Poll::Pending
+    }
+
+    fn poll_read(&self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        let mut shared = acquire_lock(&self.shared);
+
+        if let Some(err) = shared.terminal_error.clone() {
+            return Poll::Ready(Err(err.to_io_error()));
+        }
+
+        if !shared.read_buffer.is_empty() {
+            let count = shared.read_buffer.len().min(buf.remaining());
+            let chunk: Vec<u8> = shared.read_buffer.drain(..count).collect();
+            buf.put_slice(&chunk);
+            return Poll::Ready(Ok(()));
+        }
+
+        if shared.read_closed {
+            return Poll::Ready(Ok(()));
+        }
+
+        register_waker(&mut shared.read_waker, cx.waker());
+        Poll::Pending
+    }
+
+    fn poll_write(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        let mut shared = acquire_lock(&self.shared);
+
+        if let Some(err) = shared.terminal_error.clone() {
+            return Poll::Ready(Err(err.to_io_error()));
+        }
+
+        if shared.close_requested || !shared.send_open {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "tcp stream closed",
+            )));
+        }
+
+        let available = TCP_BUFFER_SIZE.saturating_sub(shared.write_buffer.len());
+        if available == 0 {
+            register_waker(&mut shared.write_waker, cx.waker());
+            return Poll::Pending;
+        }
+
+        let written = available.min(buf.len());
+        shared.write_buffer.extend(buf[..written].iter().copied());
+        shared.send_queue_empty = false;
+        Poll::Ready(Ok(written))
+    }
+
+    fn poll_flush(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut shared = acquire_lock(&self.shared);
+
+        if let Some(err) = shared.terminal_error.clone() {
+            return Poll::Ready(Err(err.to_io_error()));
+        }
+
+        if shared.close_sent && shared.write_buffer.is_empty() && shared.send_queue_empty {
+            return Poll::Ready(Ok(()));
+        }
+
+        register_waker(&mut shared.flush_waker, cx.waker());
+        Poll::Pending
+    }
+
+    fn poll_shutdown(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut shared = acquire_lock(&self.shared);
+
+        if let Some(err) = shared.terminal_error.clone() {
+            return Poll::Ready(Err(err.to_io_error()));
+        }
+
+        shared.close_requested = true;
+        if shared.close_sent && shared.write_buffer.is_empty() && shared.send_queue_empty {
+            return Poll::Ready(Ok(()));
+        }
+
+        register_waker(&mut shared.shutdown_waker, cx.waker());
+        Poll::Pending
+    }
+
+    fn on_removed(&self, connect_error: Option<SharedIoError>) {
+        let mut shared = acquire_lock(&self.shared);
+
+        if shared.connect_result.is_none() {
+            shared.connect_result = Some(Err(connect_error.unwrap_or_else(|| {
+                SharedIoError::new(io::ErrorKind::ConnectionAborted, "tcp socket removed")
+            })));
+        }
+        shared.read_closed = true;
+        shared.send_open = false;
+        shared.send_queue_empty = true;
+        shared.close_requested = true;
+        shared.close_sent = true;
+        wake_all_tcp(&mut shared);
+    }
+}
+
+impl UdpSocketState {
+    fn new() -> Self {
+        Self {
+            shared: Mutex::new(UdpSocketShared {
+                recv_queue: VecDeque::new(),
+                pending_sends: VecDeque::new(),
+                closed: false,
+                error: None,
+                recv_waker: None,
+            }),
+        }
+    }
+
+    fn poll_recv_from(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        let mut shared = acquire_lock(&self.shared);
+
+        if let Some(err) = shared.error.clone() {
+            return Poll::Ready(Err(err.to_io_error()));
+        }
+
+        if let Some((packet, addr)) = shared.recv_queue.pop_front() {
+            let copied = packet.len().min(buf.len());
+            buf[..copied].copy_from_slice(&packet[..copied]);
+            return Poll::Ready(Ok((copied, addr)));
+        }
+
+        if shared.closed {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "udp socket closed",
+            )));
+        }
+
+        register_waker(&mut shared.recv_waker, cx.waker());
+        Poll::Pending
+    }
+
+    fn enqueue_send(
+        &self,
+        target: SocketAddrV4,
+        data: Vec<u8>,
+        reply: oneshot::Sender<io::Result<usize>>,
+    ) {
+        let mut shared = acquire_lock(&self.shared);
+
+        if let Some(err) = shared.error.clone() {
+            let _ = reply.send(Err(err.to_io_error()));
+            return;
+        }
+
+        if shared.closed {
+            let _ = reply.send(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "udp socket closed",
+            )));
+            return;
+        }
+
+        shared.pending_sends.push_back(PendingUdpSend {
+            data,
+            target,
+            reply,
+        });
+    }
+
+    fn on_removed(&self) {
+        let mut shared = acquire_lock(&self.shared);
+        shared.closed = true;
+        fail_udp_sends(
+            &mut shared.pending_sends,
+            io::ErrorKind::BrokenPipe,
+            "udp socket closed",
+        );
+        take_and_wake(&mut shared.recv_waker);
     }
 }
 
@@ -569,29 +1122,13 @@ impl AsyncRead for SmolTcpStream {
             return Poll::Ready(Ok(()));
         }
 
-        let mut state = acquire_lock(&self.stack.state);
-        let socket = state.sockets.get_mut::<tcp::Socket<'static>>(self.handle);
-
-        if socket.can_recv() {
-            let mut chunk = vec![0_u8; buf.remaining().min(16 * 1024)];
-            match socket.recv_slice(&mut chunk) {
-                Ok(n) => {
-                    buf.put_slice(&chunk[..n]);
-                    self.stack.wake.notify_one();
-                    return Poll::Ready(Ok(()));
-                }
-                Err(err) => {
-                    return Poll::Ready(Err(io::Error::other(err.to_string())));
-                }
+        match self.state.poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                self.actor.notify_read(self.handle);
+                Poll::Ready(Ok(()))
             }
+            other => other,
         }
-
-        if !socket.may_recv() {
-            return Poll::Ready(Ok(()));
-        }
-
-        socket.register_recv_waker(cx.waker());
-        Poll::Pending
     }
 }
 
@@ -601,67 +1138,47 @@ impl AsyncWrite for SmolTcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        let mut state = acquire_lock(&self.stack.state);
-        let socket = state.sockets.get_mut::<tcp::Socket<'static>>(self.handle);
-
-        if socket.can_send() {
-            let written = socket
-                .send_slice(buf)
-                .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))?;
-            self.stack.wake.notify_one();
-            return Poll::Ready(Ok(written));
+        match self.state.poll_write(cx, buf) {
+            Poll::Ready(Ok(written)) => {
+                self.actor.notify_write(self.handle);
+                Poll::Ready(Ok(written))
+            }
+            other => other,
         }
-
-        if !socket.may_send() {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "tcp stream closed",
-            )));
-        }
-
-        socket.register_send_waker(cx.waker());
-        Poll::Pending
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        let mut state = acquire_lock(&self.stack.state);
-        let socket = state.sockets.get_mut::<tcp::Socket<'static>>(self.handle);
-
-        if socket.send_queue() == 0 {
-            return Poll::Ready(Ok(()));
+        match self.state.poll_flush(cx) {
+            Poll::Pending => {
+                self.actor.notify_flush(self.handle);
+                Poll::Pending
+            }
+            other => other,
         }
-
-        socket.register_send_waker(cx.waker());
-        Poll::Pending
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        let mut state = acquire_lock(&self.stack.state);
-        let socket = state.sockets.get_mut::<tcp::Socket<'static>>(self.handle);
-        socket.close();
-        self.stack.wake.notify_one();
-
-        if socket.send_queue() == 0 {
-            return Poll::Ready(Ok(()));
+        match self.state.poll_shutdown(cx) {
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => {
+                self.actor.request_close(self.handle);
+                Poll::Pending
+            }
         }
-
-        socket.register_send_waker(cx.waker());
-        Poll::Pending
     }
 }
 
 impl Drop for SmolTcpStream {
     fn drop(&mut self) {
-        self.stack.remove_socket(self.handle);
-        self.stack.wake.notify_one();
+        self.actor.remove_socket(self.handle);
     }
 }
 
 impl Drop for PendingConnectGuard {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
-            self.stack.remove_socket(handle);
-            self.stack.wake.notify_one();
+            self.actor.remove_socket(handle);
         }
     }
 }
@@ -673,35 +1190,19 @@ impl AsyncDatagramSocket for SmolUdpSocket {
         target: SocketAddr,
     ) -> Pin<Box<dyn std::future::Future<Output = io::Result<usize>> + Send + 'a>> {
         Box::pin(async move {
-            if !matches!(target.ip(), IpAddr::V4(_)) {
-                return Err(io::Error::other("ipv6 unsupported"));
-            }
-            poll_fn(|cx| {
-                let mut state = acquire_lock(&self.stack.state);
-                let socket = state.sockets.get_mut::<udp::Socket<'static>>(self.handle);
-                if socket.can_send() {
-                    let target = match target {
-                        SocketAddr::V4(addr) => addr,
-                        SocketAddr::V6(_) => {
-                            return Poll::Ready(Err(io::Error::other("ipv6 unsupported")));
-                        }
-                    };
-                    socket
-                        .send_slice(data, target)
-                        .map_err(|err| io::Error::other(err.to_string()))?;
-                    self.stack.wake.notify_one();
-                    return Poll::Ready(Ok(data.len()));
-                }
-                if !socket.is_open() {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "udp socket closed",
-                    )));
-                }
-                socket.register_send_waker(cx.waker());
-                Poll::Pending
-            })
-            .await
+            let target = match target {
+                SocketAddr::V4(addr) => addr,
+                SocketAddr::V6(_) => return Err(io::Error::other("ipv6 unsupported")),
+            };
+
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.actor.send(NetstackCommand::UdpSend {
+                handle: self.handle,
+                target,
+                data: data.to_vec(),
+                reply: reply_tx,
+            })?;
+            recv_actor_reply(reply_rx).await
         })
     }
 
@@ -711,28 +1212,11 @@ impl AsyncDatagramSocket for SmolUdpSocket {
     ) -> Pin<Box<dyn std::future::Future<Output = io::Result<(usize, SocketAddr)>> + Send + 'a>>
     {
         Box::pin(async move {
-            poll_fn(|cx| {
-                let mut state = acquire_lock(&self.stack.state);
-                let socket = state.sockets.get_mut::<udp::Socket<'static>>(self.handle);
-                if socket.can_recv() {
-                    let (n, metadata) = socket
-                        .recv_slice(buf)
-                        .map_err(|err| io::Error::other(err.to_string()))?;
-                    self.stack.wake.notify_one();
-                    return Poll::Ready(
-                        socket_addr_from_endpoint(metadata.endpoint).map(|addr| (n, addr)),
-                    );
-                }
-                if !socket.is_open() {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "udp socket closed",
-                    )));
-                }
-                socket.register_recv_waker(cx.waker());
-                Poll::Pending
-            })
-            .await
+            let result = poll_fn(|cx| self.state.poll_recv_from(cx, buf)).await;
+            if result.is_ok() {
+                self.actor.notify_read(self.handle);
+            }
+            result
         })
     }
 
@@ -743,8 +1227,236 @@ impl AsyncDatagramSocket for SmolUdpSocket {
 
 impl Drop for SmolUdpSocket {
     fn drop(&mut self) {
-        self.stack.remove_socket(self.handle);
-        self.stack.wake.notify_one();
+        self.actor.remove_socket(self.handle);
+    }
+}
+
+async fn recv_actor_reply<T>(reply: oneshot::Receiver<io::Result<T>>) -> io::Result<T> {
+    match reply.await {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::other("netstack actor stopped")),
+    }
+}
+
+fn sync_tcp_socket(socket: &mut tcp::Socket<'static>, state: &Arc<TcpSocketState>) -> bool {
+    let mut shared = acquire_lock(&state.shared);
+    let mut progressed = false;
+    let was_buffer_full = shared.write_buffer.len() >= TCP_BUFFER_SIZE;
+    let was_send_open = shared.send_open;
+    let was_send_queue_empty = shared.send_queue_empty;
+    let was_read_closed = shared.read_closed;
+    let was_read_empty = shared.read_buffer.is_empty();
+    let was_close_sent = shared.close_sent;
+
+    if shared.connect_result.is_none() {
+        if socket.may_send() {
+            shared.connect_result = Some(Ok(()));
+            take_and_wake(&mut shared.connect_waker);
+            progressed = true;
+        } else if matches!(socket.state(), tcp::State::Closed | tcp::State::TimeWait) {
+            shared.connect_result = Some(Err(SharedIoError::new(
+                io::ErrorKind::ConnectionAborted,
+                "tcp connect failed",
+            )));
+            shared.read_closed = true;
+            shared.send_open = false;
+            wake_all_tcp(&mut shared);
+            return true;
+        }
+    }
+
+    while shared.read_buffer.len() < TCP_BUFFER_SIZE && socket.can_recv() {
+        let room = (TCP_BUFFER_SIZE - shared.read_buffer.len()).min(SOCKET_CHUNK_SIZE);
+        let mut chunk = vec![0_u8; room];
+        match socket.recv_slice(&mut chunk) {
+            Ok(received) => {
+                if received == 0 {
+                    break;
+                }
+                chunk.truncate(received);
+                shared.read_buffer.extend(chunk);
+                progressed = true;
+            }
+            Err(err) => {
+                shared.terminal_error = Some(SharedIoError::other(err.to_string()));
+                wake_all_tcp(&mut shared);
+                return true;
+            }
+        }
+    }
+
+    while socket.can_send() && !shared.write_buffer.is_empty() {
+        let count = shared.write_buffer.len().min(SOCKET_CHUNK_SIZE);
+        let chunk: Vec<u8> = shared.write_buffer.iter().take(count).copied().collect();
+        match socket.send_slice(&chunk) {
+            Ok(written) => {
+                if written == 0 {
+                    break;
+                }
+                shared.write_buffer.drain(..written);
+                progressed = true;
+            }
+            Err(err) => {
+                shared.terminal_error = Some(SharedIoError::new(
+                    io::ErrorKind::BrokenPipe,
+                    err.to_string(),
+                ));
+                wake_all_tcp(&mut shared);
+                return true;
+            }
+        }
+    }
+
+    if shared.close_requested
+        && !shared.close_sent
+        && shared.write_buffer.is_empty()
+        && socket.may_send()
+    {
+        socket.close();
+        shared.close_sent = true;
+        progressed = true;
+    }
+
+    shared.send_open = socket.may_send();
+    shared.send_queue_empty = shared.write_buffer.is_empty() && socket.send_queue() == 0;
+    if !socket.may_recv() && !socket.can_recv() {
+        shared.read_closed = true;
+    }
+
+    if was_read_empty && !shared.read_buffer.is_empty() {
+        take_and_wake(&mut shared.read_waker);
+    }
+    if !was_read_closed && shared.read_closed {
+        take_and_wake(&mut shared.read_waker);
+    }
+
+    let is_buffer_full = shared.write_buffer.len() >= TCP_BUFFER_SIZE;
+    if (was_buffer_full && !is_buffer_full)
+        || (!was_send_open && shared.send_open)
+        || (shared.close_requested && !shared.send_open)
+    {
+        take_and_wake(&mut shared.write_waker);
+    }
+    if !was_send_queue_empty && shared.send_queue_empty {
+        take_and_wake(&mut shared.flush_waker);
+        take_and_wake(&mut shared.shutdown_waker);
+    }
+    if !was_close_sent && shared.close_sent && shared.send_queue_empty {
+        take_and_wake(&mut shared.shutdown_waker);
+    }
+    if !shared.close_requested && was_send_open && !shared.send_open {
+        take_and_wake(&mut shared.write_waker);
+    }
+
+    progressed
+}
+
+fn sync_udp_socket(socket: &mut udp::Socket<'static>, state: &Arc<UdpSocketState>) -> bool {
+    let mut shared = acquire_lock(&state.shared);
+    let mut progressed = false;
+    let was_recv_empty = shared.recv_queue.is_empty();
+    let was_closed = shared.closed;
+
+    while shared.recv_queue.len() < UDP_PACKET_CAPACITY && socket.can_recv() {
+        let mut packet = vec![0_u8; UDP_BUFFER_SIZE];
+        match socket.recv_slice(&mut packet) {
+            Ok((received, metadata)) => {
+                packet.truncate(received);
+                match socket_addr_from_endpoint(metadata.endpoint) {
+                    Ok(addr) => {
+                        shared.recv_queue.push_back((packet, addr));
+                        progressed = true;
+                    }
+                    Err(err) => {
+                        shared.error = Some(SharedIoError::other(err.to_string()));
+                        fail_udp_sends(
+                            &mut shared.pending_sends,
+                            io::ErrorKind::Other,
+                            err.to_string(),
+                        );
+                        take_and_wake(&mut shared.recv_waker);
+                        return true;
+                    }
+                }
+            }
+            Err(err) => {
+                shared.error = Some(SharedIoError::other(err.to_string()));
+                fail_udp_sends(
+                    &mut shared.pending_sends,
+                    io::ErrorKind::Other,
+                    err.to_string(),
+                );
+                take_and_wake(&mut shared.recv_waker);
+                return true;
+            }
+        }
+    }
+
+    while socket.can_send() {
+        let Some(pending) = shared.pending_sends.pop_front() else {
+            break;
+        };
+        let size = pending.data.len();
+        match socket.send_slice(&pending.data, pending.target) {
+            Ok(()) => {
+                let _ = pending.reply.send(Ok(size));
+                progressed = true;
+            }
+            Err(err) => {
+                let _ = pending.reply.send(Err(io::Error::other(err.to_string())));
+                progressed = true;
+            }
+        }
+    }
+
+    if !socket.is_open() {
+        shared.closed = true;
+        fail_udp_sends(
+            &mut shared.pending_sends,
+            io::ErrorKind::BrokenPipe,
+            "udp socket closed",
+        );
+    }
+
+    if was_recv_empty && !shared.recv_queue.is_empty() {
+        take_and_wake(&mut shared.recv_waker);
+    }
+    if !was_closed && shared.closed {
+        take_and_wake(&mut shared.recv_waker);
+    }
+
+    progressed
+}
+
+fn wake_all_tcp(shared: &mut TcpSocketShared) {
+    take_and_wake(&mut shared.connect_waker);
+    take_and_wake(&mut shared.read_waker);
+    take_and_wake(&mut shared.write_waker);
+    take_and_wake(&mut shared.flush_waker);
+    take_and_wake(&mut shared.shutdown_waker);
+}
+
+fn register_waker(slot: &mut Option<Waker>, waker: &Waker) {
+    match slot {
+        Some(existing) if existing.will_wake(waker) => {}
+        _ => *slot = Some(waker.clone()),
+    }
+}
+
+fn take_and_wake(slot: &mut Option<Waker>) {
+    if let Some(waker) = slot.take() {
+        waker.wake();
+    }
+}
+
+fn fail_udp_sends(
+    pending: &mut VecDeque<PendingUdpSend>,
+    kind: io::ErrorKind,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    while let Some(send) = pending.pop_front() {
+        let _ = send.reply.send(Err(io::Error::new(kind, message.clone())));
     }
 }
 
@@ -795,6 +1507,11 @@ fn socket_addr_from_endpoint(endpoint: smoltcp::wire::IpEndpoint) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::task::{Context, Poll, Waker};
+
+    fn noop_waker() -> Waker {
+        Waker::noop().clone()
+    }
 
     #[tokio::test]
     async fn cancelled_connect_releases_pending_socket_handle() {
@@ -809,9 +1526,9 @@ mod tests {
         .await;
         assert!(result.is_err(), "connect should time out in test");
 
-        let state = acquire_lock(&stack.inner.state);
-        assert!(
-            state.active_handles.is_empty(),
+        let snapshot = stack.snapshot().await;
+        assert_eq!(
+            snapshot.active_handles, 0,
             "timed out connect leaked active socket handles"
         );
     }
@@ -823,33 +1540,39 @@ mod tests {
         let stack = SmolStack::new(Ipv4Addr::new(10, 0, 0, 8), vpn_rx, stack_tx.clone());
 
         stack_tx.send(vec![9, 9, 9]).await.unwrap();
-        {
-            let mut state = acquire_lock(&stack.inner.state);
-            state.device.outbound.push_back(vec![1, 2, 3, 4]);
-        }
+        stack.queue_outbound_for_test(vec![1, 2, 3, 4]).await;
 
-        tokio::time::timeout(
-            std::time::Duration::from_millis(20),
-            stack.inner.flush(None, &stack_tx),
-        )
-        .await
-        .expect("flush should not block on full outbound channel")
-        .expect("flush should succeed");
-
-        {
-            let state = acquire_lock(&stack.inner.state);
-            assert_eq!(state.pending_outbound.len(), 1);
-        }
+        let snapshot = stack.snapshot().await;
+        assert_eq!(snapshot.pending_outbound, 1);
 
         let first = stack_rx.recv().await.unwrap();
         assert_eq!(first, vec![9, 9, 9]);
 
-        stack
-            .inner
-            .flush(None, &stack_tx)
+        let second = tokio::time::timeout(std::time::Duration::from_millis(100), stack_rx.recv())
             .await
-            .expect("flush should retry pending outbound");
-        let second = stack_rx.recv().await.unwrap();
+            .expect("driver should retry pending outbound packet")
+            .expect("stack outbound channel should yield queued packet");
         assert_eq!(second, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn shutdown_waits_for_actor_to_send_close() {
+        let state = TcpSocketState::new();
+        {
+            let mut shared = acquire_lock(&state.shared);
+            shared.send_open = true;
+            shared.send_queue_empty = true;
+        }
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(state.poll_shutdown(&mut cx), Poll::Pending));
+
+        {
+            let mut shared = acquire_lock(&state.shared);
+            shared.close_sent = true;
+        }
+
+        assert!(matches!(state.poll_shutdown(&mut cx), Poll::Ready(Ok(()))));
     }
 }
