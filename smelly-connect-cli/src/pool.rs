@@ -119,6 +119,14 @@ const DEFAULT_VPN_HEALTH_PROBE_ATTEMPTS: usize = 3;
 const DEFAULT_VPN_HEALTH_PROBE_DELAY: Duration = Duration::from_millis(200);
 const RECOVERY_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+#[cfg(any(test, debug_assertions))]
+type TestConnectHook = Arc<dyn Fn(&AccountConfig) -> Result<Session, PoolError> + Send + Sync>;
+
+#[cfg(any(test, debug_assertions))]
+tokio::task_local! {
+    static TEST_CONNECT_HOOK: TestConnectHook;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoolError {
     Message(String),
@@ -262,6 +270,21 @@ impl std::error::Error for PoolError {}
 impl SessionPool {
     pub async fn from_config_allow_empty(cfg: &AppConfig) -> Result<Self, PoolError> {
         Self::from_config_with_startup_mode(cfg, PoolStartupMode::AllowEmpty).await
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub async fn from_config_with_connect_hook_for_test<F>(
+        cfg: &AppConfig,
+        startup_mode: PoolStartupMode,
+        hook: F,
+    ) -> Result<Self, PoolError>
+    where
+        F: Fn(&AccountConfig) -> Result<Session, PoolError> + Send + Sync + 'static,
+    {
+        let hook: TestConnectHook = Arc::new(hook);
+        TEST_CONNECT_HOOK
+            .scope(hook, Self::from_config_with_startup_mode(cfg, startup_mode))
+            .await
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -1550,8 +1573,12 @@ impl SessionPool {
     }
 
     async fn prewarm(&self, count: usize) {
-        for _ in 0..count {
-            let _ = self.connect_one_configured().await;
+        while self.ready_count().await < count {
+            match self.connect_one_configured().await {
+                Ok(()) => {}
+                Err(_) if self.has_configured_accounts().await => continue,
+                Err(_) => break,
+            }
         }
     }
 
@@ -1599,6 +1626,14 @@ impl SessionPool {
     async fn has_busy_live_connects(&self) -> bool {
         let state = self.inner.lock().await;
         !state.busy_live_connects.is_empty()
+    }
+
+    async fn has_configured_accounts(&self) -> bool {
+        let state = self.inner.lock().await;
+        state
+            .nodes
+            .iter()
+            .any(|node| matches!(node.state, AccountState::Configured(_)))
     }
 
     pub async fn finish_live_connect_attempt(&self, account_name: &str) {
@@ -1885,6 +1920,18 @@ async fn connect_account(
     allow_all_routes: bool,
     _keepalive_target: Option<&str>,
 ) -> Result<Session, PoolError> {
+    #[cfg(any(test, debug_assertions))]
+    if let Ok(result) = TEST_CONNECT_HOOK.try_with(|hook| hook(account)) {
+        return result.map(|session| {
+            apply_pool_routing(
+                session,
+                local_route_overrides,
+                route_policy,
+                allow_all_routes,
+            )
+        });
+    }
+
     let client = EasyConnectClient::builder(server.to_string())
         .credentials(account.username.clone(), account.password.clone())
         .with_captcha_handler(CaptchaHandler::from_async(|_, _| async move {

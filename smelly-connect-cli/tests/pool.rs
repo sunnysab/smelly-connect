@@ -1,5 +1,8 @@
 #![cfg(feature = "test-utils")]
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
 #[tokio::test]
 async fn pool_prewarms_first_n_accounts() {
     let pool = smelly_connect_cli::pool::SessionPool::from_test_accounts(4, 2).await;
@@ -66,6 +69,101 @@ async fn pool_continues_startup_when_some_prewarm_accounts_fail() {
         smelly_connect_cli::pool::SessionPool::from_test_outcomes([Ok("a"), Err("x"), Ok("b")], 3)
             .await;
     assert_eq!(pool.ready_count().await, 2);
+}
+
+#[tokio::test]
+async fn pool_prewarm_retries_other_accounts_after_permanent_auth_failure() {
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+        [pool]
+        prewarm = 2
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+        failure_threshold = 3
+        backoff_base_secs = 30
+        backoff_max_secs = 600
+        allow_request_triggered_probe = true
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+        [[accounts]]
+        name = "acct-02"
+        username = "user2"
+        password = "pass2"
+        [[accounts]]
+        name = "acct-03"
+        username = "user3"
+        password = "pass3"
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+    )
+    .unwrap();
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let outcomes = Arc::new(Mutex::new(VecDeque::from([
+        Err(smelly_connect_cli::pool::PoolError::SessionConnectFailed(
+            smelly_connect::Error::ControlPlane(
+                smelly_connect::error::ControlPlaneError::AuthFlowFailed(
+                    "MissingSuccessMarker".to_string(),
+                ),
+            ),
+        )),
+        Ok(
+            smelly_connect::test_support::session::session_with_domain_match(
+                "acct-02.example.test",
+                std::net::Ipv4Addr::new(10, 0, 0, 8),
+            ),
+        ),
+        Ok(
+            smelly_connect::test_support::session::session_with_domain_match(
+                "acct-03.example.test",
+                std::net::Ipv4Addr::new(10, 0, 0, 9),
+            ),
+        ),
+    ])));
+
+    let pool = smelly_connect_cli::pool::SessionPool::from_config_with_connect_hook_for_test(
+        &cfg,
+        smelly_connect_cli::pool::PoolStartupMode::RequireReady,
+        {
+            let attempts = Arc::clone(&attempts);
+            let outcomes = Arc::clone(&outcomes);
+            move |account| {
+                attempts.lock().unwrap().push(account.name.clone());
+                outcomes
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("prewarm attempt outcome should exist")
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(pool.ready_count().await, 2);
+    assert_eq!(
+        attempts.lock().unwrap().as_slice(),
+        &["acct-01", "acct-02", "acct-03"]
+    );
+    assert!(outcomes.lock().unwrap().is_empty());
+
+    let state_summary = pool.state_summary_for_test().await;
+    assert!(state_summary.contains("acct-01:Open"));
+    assert!(state_summary.contains("acct-02:Ready"));
+    assert!(state_summary.contains("acct-03:Ready"));
+
+    let summary = pool.summary().await;
+    assert_eq!(summary.ready_nodes, 2);
+    assert_eq!(summary.disabled_auth_nodes, 1);
+    assert_eq!(summary.configured_nodes, 0);
 }
 
 #[tokio::test]
