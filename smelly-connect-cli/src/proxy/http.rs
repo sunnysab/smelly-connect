@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http::header::{CONNECTION, EXPECT, HOST, PROXY_AUTHORIZATION};
-use http::{HeaderValue, Method, Request, Response, StatusCode, Uri};
+use http::{HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri};
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::body::{Body as HyperBody, Frame, Incoming};
 use hyper::server::conn::http1 as hyper_server_http1;
@@ -73,6 +73,13 @@ enum ResponseBodyKind {
     ContentLength(usize),
     Chunked,
     ReadToEnd,
+}
+
+struct ParsedResponseHead {
+    status_code: u16,
+    body_kind: ResponseBodyKind,
+    can_reuse: bool,
+    forwarded_headers: Vec<(HeaderName, HeaderValue)>,
 }
 
 struct CountedBody<B> {
@@ -245,6 +252,12 @@ pub use tests::proxy_http_expect_continue_for_test;
 
 #[cfg(feature = "test-utils")]
 pub use tests::proxy_http_strips_proxy_authorization_for_test;
+
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_http_preserves_non_utf8_request_header_bytes_for_test;
+
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_http_preserves_non_utf8_response_header_bytes_for_test;
 
 #[cfg(feature = "test-utils")]
 pub use tests::proxy_http_streams_response_body_for_test;
@@ -820,31 +833,25 @@ async fn forward_request(
         parts.method,
         uri,
         http_version_text(parts.version)
-    );
+    )
+    .into_bytes();
     let mut forwarded_headers = http::HeaderMap::new();
     for (name, value) in &parts.headers {
         if should_strip_request_header(name) {
             continue;
         }
         forwarded_headers.insert(name.clone(), value.clone());
-        upstream_request.push_str(name.as_str());
-        upstream_request.push_str(": ");
-        upstream_request.push_str(&String::from_utf8_lossy(value.as_bytes()));
-        upstream_request.push_str("\r\n");
+        push_header_line(&mut upstream_request, name, value);
     }
     forwarded_headers.insert(CONNECTION, HeaderValue::from_static("close"));
-    upstream_request.push_str("Connection: close\r\n\r\n");
+    upstream_request.extend_from_slice(b"Connection: close\r\n\r\n");
 
     record_client_to_upstream(
         connection.as_ref(),
         estimate_request_size(&parts.method, &uri, parts.version, &forwarded_headers, 0),
     );
 
-    if upstream
-        .write_all(upstream_request.as_bytes())
-        .await
-        .is_err()
-    {
+    if upstream.write_all(&upstream_request).await.is_err() {
         return empty_response(StatusCode::BAD_GATEWAY);
     }
 
@@ -907,30 +914,24 @@ where
         parts.method,
         uri,
         http_version_text(parts.version)
-    );
+    )
+    .into_bytes();
     let mut forwarded_headers = http::HeaderMap::new();
     for (name, value) in &parts.headers {
         if should_strip_request_header(name) {
             continue;
         }
         forwarded_headers.insert(name.clone(), value.clone());
-        upstream_request.push_str(name.as_str());
-        upstream_request.push_str(": ");
-        upstream_request.push_str(&String::from_utf8_lossy(value.as_bytes()));
-        upstream_request.push_str("\r\n");
+        push_header_line(&mut upstream_request, name, value);
     }
-    upstream_request.push_str("\r\n");
+    upstream_request.extend_from_slice(b"\r\n");
 
     record_client_to_upstream(
         connection.as_ref(),
         estimate_request_size(&parts.method, &uri, parts.version, &forwarded_headers, 0),
     );
 
-    if upstream
-        .write_all(upstream_request.as_bytes())
-        .await
-        .is_err()
-    {
+    if upstream.write_all(&upstream_request).await.is_err() {
         return (empty_response(StatusCode::BAD_GATEWAY), None);
     }
 
@@ -1040,34 +1041,14 @@ async fn read_upstream_response(
         .await
         .map_err(|err| err.to_string())?;
     let header_bytes = &buffer[..header_end];
-    let header_text = String::from_utf8_lossy(header_bytes);
-    let mut lines = header_text.split("\r\n").filter(|line| !line.is_empty());
-    let status_line = lines
-        .next()
-        .ok_or_else(|| "missing status line".to_string())?;
-    let status_code = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
-    let header_lines: Vec<&str> = lines.collect();
-    let body_kind = response_body_kind(status_code, &header_lines);
+    let head = parse_upstream_response_head(header_bytes)?;
     let initial_body = buffer[header_end..].to_vec();
-    let mut builder = Response::builder().status(status_code);
-    for header in header_lines {
-        if let Some((name, value)) = header.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("connection")
-                || name.trim().eq_ignore_ascii_case("keep-alive")
-                || (matches!(body_kind, ResponseBodyKind::Chunked)
-                    && name.trim().eq_ignore_ascii_case("transfer-encoding"))
-            {
-                continue;
-            }
-            builder = builder.header(name.trim(), value.trim());
-        }
+    let mut builder = Response::builder().status(head.status_code);
+    for (name, value) in head.forwarded_headers {
+        builder = builder.header(name, value);
     }
     builder = builder.header(CONNECTION, "close");
-    let body = build_response_body(upstream, body_kind, initial_body, connection)?;
+    let body = build_response_body(upstream, head.body_kind, initial_body, connection)?;
     builder.body(body).map_err(|err| err.to_string())
 }
 
@@ -1083,46 +1064,21 @@ where
         .await
         .map_err(|err| err.to_string())?;
     let header_bytes = &buffer[..header_end];
-    let header_text = String::from_utf8_lossy(header_bytes);
-    let mut lines = header_text.split("\r\n").filter(|line| !line.is_empty());
-    let status_line = lines
-        .next()
-        .ok_or_else(|| "missing status line".to_string())?;
-    let status_code = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
-    let header_lines: Vec<&str> = lines.collect();
-    let body_kind = response_body_kind(status_code, &header_lines);
+    let head = parse_upstream_response_head(header_bytes)?;
     let initial_body = buffer[header_end..].to_vec();
-    let can_reuse = response_allows_reuse(&header_lines)
-        && matches!(
-            body_kind,
-            ResponseBodyKind::None | ResponseBodyKind::ContentLength(_)
-        );
 
-    if !can_reuse {
-        let mut builder = Response::builder().status(status_code);
-        for header in &header_lines {
-            if let Some((name, value)) = header.split_once(':') {
-                if name.trim().eq_ignore_ascii_case("connection")
-                    || name.trim().eq_ignore_ascii_case("keep-alive")
-                    || (matches!(body_kind, ResponseBodyKind::Chunked)
-                        && name.trim().eq_ignore_ascii_case("transfer-encoding"))
-                {
-                    continue;
-                }
-                builder = builder.header(name.trim(), value.trim());
-            }
+    if !head.can_reuse {
+        let mut builder = Response::builder().status(head.status_code);
+        for (name, value) in head.forwarded_headers {
+            builder = builder.header(name, value);
         }
         builder = builder.header(CONNECTION, "close");
-        let body = build_response_body(upstream, body_kind, initial_body, connection)?;
+        let body = build_response_body(upstream, head.body_kind, initial_body, connection)?;
         let response = builder.body(body).map_err(|err| err.to_string())?;
         return Ok((response, None));
     }
 
-    let body = match body_kind {
+    let body = match head.body_kind {
         ResponseBodyKind::None => Vec::new(),
         ResponseBodyKind::ContentLength(length) => {
             let mut body = initial_body;
@@ -1149,16 +1105,9 @@ where
         connection.add_upstream_to_client_bytes(body.len() as u64);
     }
 
-    let mut builder = Response::builder().status(status_code);
-    for header in &header_lines {
-        if let Some((name, value)) = header.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("connection")
-                || name.trim().eq_ignore_ascii_case("keep-alive")
-            {
-                continue;
-            }
-            builder = builder.header(name.trim(), value.trim());
-        }
+    let mut builder = Response::builder().status(head.status_code);
+    for (name, value) in head.forwarded_headers {
+        builder = builder.header(name, value);
     }
     let response = builder
         .body(full_body(body, connection))
@@ -1174,6 +1123,83 @@ fn response_allows_reuse(header_lines: &[&str]) -> bool {
                     .split(',')
                     .any(|token| token.trim().eq_ignore_ascii_case("close"))
         })
+    })
+}
+
+fn push_header_line(buffer: &mut Vec<u8>, name: &HeaderName, value: &HeaderValue) {
+    buffer.extend_from_slice(name.as_str().as_bytes());
+    buffer.extend_from_slice(b": ");
+    buffer.extend_from_slice(value.as_bytes());
+    buffer.extend_from_slice(b"\r\n");
+}
+
+fn trim_ascii_http_whitespace(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|idx| idx + 1)
+        .unwrap_or(start);
+    &bytes[start..end]
+}
+
+fn parse_upstream_response_head(header_bytes: &[u8]) -> Result<ParsedResponseHead, String> {
+    let mut lines = header_bytes
+        .split(|byte| *byte == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .filter(|line| !line.is_empty());
+    let status_line = lines
+        .next()
+        .ok_or_else(|| "missing status line".to_string())?;
+    let status_line =
+        std::str::from_utf8(status_line).map_err(|_| "invalid status line encoding".to_string())?;
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid status line: {status_line}"))?;
+
+    let mut forwarded_headers = Vec::new();
+    let mut ascii_header_lines = Vec::new();
+    for header in lines {
+        let Some(separator) = header.iter().position(|byte| *byte == b':') else {
+            continue;
+        };
+        let name_bytes = trim_ascii_http_whitespace(&header[..separator]);
+        let value_bytes = trim_ascii_http_whitespace(&header[separator + 1..]);
+        let name = HeaderName::from_bytes(name_bytes).map_err(|err| err.to_string())?;
+        let value = HeaderValue::from_bytes(value_bytes).map_err(|err| err.to_string())?;
+        if let Ok(value_text) = value.to_str() {
+            ascii_header_lines.push(format!("{}: {value_text}", name.as_str()));
+        }
+        forwarded_headers.push((name, value));
+    }
+
+    let header_lines: Vec<&str> = ascii_header_lines.iter().map(String::as_str).collect();
+    let body_kind = response_body_kind(status_code, &header_lines);
+    let can_reuse = response_allows_reuse(&header_lines)
+        && matches!(
+            body_kind,
+            ResponseBodyKind::None | ResponseBodyKind::ContentLength(_)
+        );
+    let forwarded_headers = forwarded_headers
+        .into_iter()
+        .filter(|(name, _)| {
+            !name.as_str().eq_ignore_ascii_case("connection")
+                && !name.as_str().eq_ignore_ascii_case("keep-alive")
+                && !(matches!(body_kind, ResponseBodyKind::Chunked)
+                    && name.as_str().eq_ignore_ascii_case("transfer-encoding"))
+        })
+        .collect();
+
+    Ok(ParsedResponseHead {
+        status_code,
+        body_kind,
+        can_reuse,
+        forwarded_headers,
     })
 }
 
@@ -1896,6 +1922,75 @@ mod tests {
             .unwrap_or_default()
             .to_string();
         Ok(HttpBodyTestResult { body })
+    }
+
+    pub async fn proxy_http_preserves_non_utf8_request_header_bytes_for_test()
+    -> Result<HttpBodyTestResult, String> {
+        let upstream = spawn_non_utf8_request_header_capture_upstream().await;
+        let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+        let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
+            TcpStream::connect(upstream).await
+        })
+        .await?;
+
+        let mut client = TcpStream::connect(addr)
+            .await
+            .map_err(|err| err.to_string())?;
+        client
+            .write_all(
+                b"GET http://intranet.zju.edu.cn/health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nX-Test: \x80\xffbin\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .map_err(|err| err.to_string())?;
+        let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+        let body = response
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
+        Ok(HttpBodyTestResult { body })
+    }
+
+    pub async fn proxy_http_preserves_non_utf8_response_header_bytes_for_test() -> Result<(), String>
+    {
+        let upstream = spawn_non_utf8_response_header_upstream().await;
+        let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+        let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
+            TcpStream::connect(upstream).await
+        })
+        .await?;
+
+        let mut client = TcpStream::connect(addr)
+            .await
+            .map_err(|err| err.to_string())?;
+        client
+            .write_all(
+                b"GET http://intranet.zju.edu.cn/health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let expected_header = b"x-test: \x80\xffbin\r\n";
+        if !response
+            .windows(expected_header.len())
+            .any(|window| window == expected_header)
+        {
+            return Err(format!(
+                "proxy rewrote upstream header bytes: {:?}",
+                response
+            ));
+        }
+        Ok(())
     }
 
     pub async fn proxy_http_streams_response_body_for_test()
@@ -3244,6 +3339,68 @@ mod tests {
                 body.len()
             );
             socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        addr
+    }
+
+    async fn spawn_non_utf8_request_header_capture_upstream() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..n]);
+                if find_header_end(&request).is_some() {
+                    break;
+                }
+            }
+            let expected_header = b"x-test: \x80\xffbin\r\n";
+            let body = if request
+                .windows(expected_header.len())
+                .any(|window| window == expected_header)
+            {
+                "preserved"
+            } else {
+                "rewritten"
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        addr
+    }
+
+    async fn spawn_non_utf8_response_header_upstream() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    return;
+                }
+                request.extend_from_slice(&chunk[..n]);
+                if find_header_end(&request).is_some() {
+                    break;
+                }
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nX-Test: \x80\xffbin\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                )
+                .await
+                .unwrap();
         });
         addr
     }

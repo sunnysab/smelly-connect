@@ -77,6 +77,22 @@ async fn http_proxy_does_not_forward_proxy_authorization_header() {
 }
 
 #[tokio::test]
+async fn http_proxy_preserves_non_utf8_request_header_bytes() {
+    let result =
+        smelly_connect_cli::proxy::http::proxy_http_preserves_non_utf8_request_header_bytes_for_test()
+            .await
+            .unwrap();
+    assert_eq!(result.body, "preserved");
+}
+
+#[tokio::test]
+async fn http_proxy_preserves_non_utf8_response_header_bytes() {
+    smelly_connect_cli::proxy::http::proxy_http_preserves_non_utf8_response_header_bytes_for_test()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn http_proxy_streams_upstream_response_without_full_buffering() {
     let result = smelly_connect_cli::proxy::http::proxy_http_streams_response_body_for_test()
         .await
