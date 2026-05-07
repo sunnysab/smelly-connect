@@ -1,15 +1,15 @@
 services:
   smelly-connect:
     build:
-      context: ..
-      dockerfile: deploy/Dockerfile
+      context: .
+      dockerfile: Dockerfile
     image: smelly-connect-cli:latest
     container_name: smelly-connect
     restart: unless-stopped
     cap_add:
       - NET_RAW
     volumes:
-      - ../config.toml:/etc/smelly-connect/config.toml:ro
+      - ./config.toml:/etc/smelly-connect/config.toml:ro
     command:
       - --config
       - /etc/smelly-connect/config.toml

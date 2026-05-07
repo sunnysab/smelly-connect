@@ -266,7 +266,7 @@ Configured → Connecting → Ready ⇄ Suspect
 ### Docker
 
 ```bash
-docker build -f deploy/Dockerfile -t smelly-connect-cli:latest .
+docker build -t smelly-connect-cli:latest .
 docker run --rm \
   --cap-add=NET_RAW \
   -p 127.0.0.1:8080:8080 \
@@ -278,13 +278,13 @@ docker run --rm \
 
 `--cap-add=NET_RAW` 仅供容器内原生 ICMP 使用；若仅靠 smoltcp 用户态隧道保活则不需要。
 
-也支持 `docker compose`：见 [`deploy/docker-compose.yml`](deploy/docker-compose.yml)。
+也支持 `docker compose`：见 [`docker-compose.yml`](docker-compose.yml)。
 
 ### systemd
 
 1. 二进制安装到 `/usr/local/bin/smelly-connect-cli`
 2. 配置文件放到 `/etc/smelly-connect/config.toml`
-3. 安装 [`deploy/smelly-connect-cli.service`](deploy/smelly-connect-cli.service) 到 `/etc/systemd/system/`
+3. 安装 [`smelly-connect-cli.service`](smelly-connect-cli.service) 到 `/etc/systemd/system/`
 4. 创建运行用户：
 
 ```bash
@@ -352,5 +352,4 @@ let handle = session.start_icmp_keepalive("jwxt.sit.edu.cn", Duration::from_secs
 
 // SOCKS5 / 本地 HTTP 代理 见 CLI proxy 模式
 ```
-
 
