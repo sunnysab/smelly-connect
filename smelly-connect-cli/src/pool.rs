@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
+#[cfg(any(test, debug_assertions))]
+use std::future::Future;
 use std::net::IpAddr;
+#[cfg(any(test, debug_assertions))]
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,6 +15,7 @@ use smelly_connect::{
     CaptchaError, CaptchaHandler, EasyConnectClient, LocalRouteOverrides, Session,
 };
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::config::{AccountConfig, AppConfig, RoutingDefaultAction};
@@ -120,11 +125,19 @@ const DEFAULT_VPN_HEALTH_PROBE_DELAY: Duration = Duration::from_millis(200);
 const RECOVERY_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[cfg(any(test, debug_assertions))]
-type TestConnectHook = Arc<dyn Fn(&AccountConfig) -> Result<Session, PoolError> + Send + Sync>;
+type TestConnectFuture = Pin<Box<dyn Future<Output = Result<Session, PoolError>> + Send>>;
+
+#[cfg(any(test, debug_assertions))]
+type TestConnectHook = Arc<dyn Fn(AccountConfig) -> TestConnectFuture + Send + Sync>;
 
 #[cfg(any(test, debug_assertions))]
 tokio::task_local! {
     static TEST_CONNECT_HOOK: TestConnectHook;
+}
+
+#[cfg(any(test, debug_assertions))]
+fn current_test_connect_hook() -> Option<TestConnectHook> {
+    TEST_CONNECT_HOOK.try_with(Arc::clone).ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,7 +294,24 @@ impl SessionPool {
     where
         F: Fn(&AccountConfig) -> Result<Session, PoolError> + Send + Sync + 'static,
     {
-        let hook: TestConnectHook = Arc::new(hook);
+        Self::from_config_with_async_connect_hook_for_test(cfg, startup_mode, move |account| {
+            let result = hook(&account);
+            async move { result }
+        })
+        .await
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub async fn from_config_with_async_connect_hook_for_test<F, Fut>(
+        cfg: &AppConfig,
+        startup_mode: PoolStartupMode,
+        hook: F,
+    ) -> Result<Self, PoolError>
+    where
+        F: Fn(AccountConfig) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Session, PoolError>> + Send + 'static,
+    {
+        let hook: TestConnectHook = Arc::new(move |account| Box::pin(hook(account)));
         TEST_CONNECT_HOOK
             .scope(hook, Self::from_config_with_startup_mode(cfg, startup_mode))
             .await
@@ -1573,11 +1603,43 @@ impl SessionPool {
     }
 
     async fn prewarm(&self, count: usize) {
-        while self.ready_count().await < count {
-            match self.connect_one_configured().await {
-                Ok(()) => {}
-                Err(_) if self.has_configured_accounts().await => continue,
-                Err(_) => break,
+        if count == 0 {
+            return;
+        }
+
+        #[cfg(any(test, debug_assertions))]
+        let test_connect_hook = current_test_connect_hook();
+        let mut pending = JoinSet::new();
+
+        loop {
+            let ready = self.ready_count().await;
+            if ready >= count {
+                break;
+            }
+
+            while ready + pending.len() < count {
+                if !self.has_configured_accounts().await {
+                    break;
+                }
+                let pool = self.clone();
+                #[cfg(any(test, debug_assertions))]
+                let test_connect_hook = test_connect_hook.clone();
+                pending.spawn(async move {
+                    pool.connect_one_configured_with_test_hook(
+                        #[cfg(any(test, debug_assertions))]
+                        test_connect_hook,
+                    )
+                    .await
+                });
+            }
+
+            match pending.join_next().await {
+                Some(Ok(Ok(()))) | Some(Ok(Err(_))) => {}
+                Some(Err(err)) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+                Some(Err(err)) => {
+                    tracing::warn!(error = %err, "pool prewarm task did not complete cleanly");
+                }
+                None => break,
             }
         }
     }
@@ -1642,6 +1704,17 @@ impl SessionPool {
     }
 
     async fn connect_one_configured(&self) -> Result<(), PoolError> {
+        self.connect_one_configured_with_test_hook(
+            #[cfg(any(test, debug_assertions))]
+            current_test_connect_hook(),
+        )
+        .await
+    }
+
+    async fn connect_one_configured_with_test_hook(
+        &self,
+        #[cfg(any(test, debug_assertions))] test_connect_hook: Option<TestConnectHook>,
+    ) -> Result<(), PoolError> {
         let (name, account, server) = {
             let mut state = self.inner.lock().await;
             let Some(server) = self.server.clone() else {
@@ -1666,10 +1739,14 @@ impl SessionPool {
             &server,
             &account,
             self.connect_timeout,
-            &self.local_route_overrides,
-            self.route_policy,
-            self.allow_all_routes,
-            self.keepalive_target.as_deref(),
+            ConnectAccountContext {
+                local_route_overrides: &self.local_route_overrides,
+                route_policy: self.route_policy,
+                allow_all_routes: self.allow_all_routes,
+                _keepalive_target: self.keepalive_target.as_deref(),
+                #[cfg(any(test, debug_assertions))]
+                test_connect_hook,
+            },
         )
         .await
         {
@@ -1879,10 +1956,14 @@ impl SessionPool {
             server,
             account,
             self.connect_timeout,
-            &self.local_route_overrides,
-            self.route_policy,
-            self.allow_all_routes,
-            self.keepalive_target.as_deref(),
+            ConnectAccountContext {
+                local_route_overrides: &self.local_route_overrides,
+                route_policy: self.route_policy,
+                allow_all_routes: self.allow_all_routes,
+                _keepalive_target: self.keepalive_target.as_deref(),
+                #[cfg(any(test, debug_assertions))]
+                test_connect_hook: current_test_connect_hook(),
+            },
         )
         .await
     }
@@ -1911,23 +1992,29 @@ async fn probe_live_session_health(
     Err(())
 }
 
+struct ConnectAccountContext<'a> {
+    local_route_overrides: &'a LocalRouteOverrides,
+    route_policy: RoutePolicy,
+    allow_all_routes: bool,
+    _keepalive_target: Option<&'a str>,
+    #[cfg(any(test, debug_assertions))]
+    test_connect_hook: Option<TestConnectHook>,
+}
+
 async fn connect_account(
     server: &str,
     account: &AccountConfig,
     timeout: Duration,
-    local_route_overrides: &LocalRouteOverrides,
-    route_policy: RoutePolicy,
-    allow_all_routes: bool,
-    _keepalive_target: Option<&str>,
+    ctx: ConnectAccountContext<'_>,
 ) -> Result<Session, PoolError> {
     #[cfg(any(test, debug_assertions))]
-    if let Ok(result) = TEST_CONNECT_HOOK.try_with(|hook| hook(account)) {
-        return result.map(|session| {
+    if let Some(hook) = ctx.test_connect_hook {
+        return hook(account.clone()).await.map(|session| {
             apply_pool_routing(
                 session,
-                local_route_overrides,
-                route_policy,
-                allow_all_routes,
+                ctx.local_route_overrides,
+                ctx.route_policy,
+                ctx.allow_all_routes,
             )
         });
     }
@@ -1948,9 +2035,9 @@ async fn connect_account(
         .map_err(PoolError::session_connect_failed)?;
     let session = apply_pool_routing(
         session,
-        local_route_overrides,
-        route_policy,
-        allow_all_routes,
+        ctx.local_route_overrides,
+        ctx.route_policy,
+        ctx.allow_all_routes,
     );
     Ok(session)
 }

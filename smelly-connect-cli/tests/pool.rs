@@ -1,7 +1,47 @@
 #![cfg(feature = "test-utils")]
 
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::Notify;
+
+fn startup_pool_config(prewarm: usize) -> smelly_connect_cli::config::AppConfig {
+    toml::from_str(&format!(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+        [pool]
+        prewarm = {prewarm}
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+        failure_threshold = 3
+        backoff_base_secs = 30
+        backoff_max_secs = 600
+        allow_request_triggered_probe = true
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+        [[accounts]]
+        name = "acct-02"
+        username = "user2"
+        password = "pass2"
+        [[accounts]]
+        name = "acct-03"
+        username = "user3"
+        password = "pass3"
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#
+    ))
+    .unwrap()
+}
 
 #[tokio::test]
 async fn pool_prewarms_first_n_accounts() {
@@ -71,41 +111,124 @@ async fn pool_continues_startup_when_some_prewarm_accounts_fail() {
     assert_eq!(pool.ready_count().await, 2);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pool_prewarm_starts_multiple_connects_concurrently() {
+    let cfg = startup_pool_config(2);
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let inflight = Arc::new(AtomicUsize::new(0));
+    let max_inflight = Arc::new(AtomicUsize::new(0));
+
+    let pool = smelly_connect_cli::pool::SessionPool::from_config_with_async_connect_hook_for_test(
+        &cfg,
+        smelly_connect_cli::pool::PoolStartupMode::RequireReady,
+        {
+            let attempts = Arc::clone(&attempts);
+            let inflight = Arc::clone(&inflight);
+            let max_inflight = Arc::clone(&max_inflight);
+            move |account| {
+                attempts.lock().unwrap().push(account.name.clone());
+                let inflight = Arc::clone(&inflight);
+                let max_inflight = Arc::clone(&max_inflight);
+                async move {
+                    let current = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_inflight.fetch_max(current, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(75)).await;
+                    inflight.fetch_sub(1, Ordering::SeqCst);
+                    Ok(
+                        smelly_connect::test_support::session::session_with_domain_match(
+                            &format!("{}.example.test", account.name),
+                            std::net::Ipv4Addr::new(10, 0, 0, current as u8 + 7),
+                        ),
+                    )
+                }
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut attempts = attempts.lock().unwrap().clone();
+    attempts.sort();
+    assert_eq!(pool.ready_count().await, 2);
+    assert_eq!(attempts, vec!["acct-01".to_string(), "acct-02".to_string()]);
+    assert_eq!(max_inflight.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pool_prewarm_refills_parallel_slot_after_failure() {
+    let cfg = startup_pool_config(2);
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let acct03_started = Arc::new(AtomicBool::new(false));
+    let acct03_notify = Arc::new(Notify::new());
+
+    let pool = tokio::time::timeout(
+        Duration::from_secs(2),
+        smelly_connect_cli::pool::SessionPool::from_config_with_async_connect_hook_for_test(
+            &cfg,
+            smelly_connect_cli::pool::PoolStartupMode::RequireReady,
+            {
+                let attempts = Arc::clone(&attempts);
+                let acct03_started = Arc::clone(&acct03_started);
+                let acct03_notify = Arc::clone(&acct03_notify);
+                move |account| {
+                    attempts.lock().unwrap().push(account.name.clone());
+                    let acct03_started = Arc::clone(&acct03_started);
+                    let acct03_notify = Arc::clone(&acct03_notify);
+                    async move {
+                        match account.name.as_str() {
+                            "acct-01" => {
+                                Err(smelly_connect_cli::pool::PoolError::SessionConnectFailed(
+                                    smelly_connect::Error::ControlPlane(
+                                        smelly_connect::error::ControlPlaneError::AuthFlowFailed(
+                                            "MissingSuccessMarker".to_string(),
+                                        ),
+                                    ),
+                                ))
+                            }
+                            "acct-02" => {
+                                if !acct03_started.load(Ordering::SeqCst) {
+                                    tokio::select! {
+                                        _ = acct03_notify.notified() => {}
+                                        _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                                            panic!("acct-03 should start before acct-02 finishes");
+                                        }
+                                    }
+                                }
+                                Ok(smelly_connect::test_support::session::session_with_domain_match(
+                                        "acct-02.example.test",
+                                        std::net::Ipv4Addr::new(10, 0, 0, 8),
+                                    ))
+                            }
+                            "acct-03" => {
+                                acct03_started.store(true, Ordering::SeqCst);
+                                acct03_notify.notify_waiters();
+                                Ok(smelly_connect::test_support::session::session_with_domain_match(
+                                        "acct-03.example.test",
+                                        std::net::Ipv4Addr::new(10, 0, 0, 9),
+                                    ))
+                            }
+                            other => panic!("unexpected account: {other}"),
+                        }
+                    }
+                }
+            },
+        ),
+    )
+    .await
+    .expect("prewarm should not stall")
+    .unwrap();
+
+    assert_eq!(pool.ready_count().await, 2);
+    assert_eq!(
+        attempts.lock().unwrap().as_slice(),
+        &["acct-01", "acct-02", "acct-03"]
+    );
+    assert_eq!(pool.summary().await.disabled_auth_nodes, 1);
+}
+
 #[tokio::test]
 async fn pool_prewarm_retries_other_accounts_after_permanent_auth_failure() {
-    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
-        r#"
-        [vpn]
-        server = "vpn1.sit.edu.cn"
-        [pool]
-        prewarm = 2
-        connect_timeout_secs = 20
-        healthcheck_interval_secs = 60
-        failure_threshold = 3
-        backoff_base_secs = 30
-        backoff_max_secs = 600
-        allow_request_triggered_probe = true
-        [[accounts]]
-        name = "acct-01"
-        username = "user1"
-        password = "pass1"
-        [[accounts]]
-        name = "acct-02"
-        username = "user2"
-        password = "pass2"
-        [[accounts]]
-        name = "acct-03"
-        username = "user3"
-        password = "pass3"
-        [proxy.http]
-        enabled = true
-        listen = "127.0.0.1:8080"
-        [proxy.socks5]
-        enabled = false
-        listen = "127.0.0.1:1080"
-        "#,
-    )
-    .unwrap();
+    let cfg = startup_pool_config(2);
     let attempts = Arc::new(Mutex::new(Vec::new()));
     let outcomes = Arc::new(Mutex::new(VecDeque::from([
         Err(smelly_connect_cli::pool::PoolError::SessionConnectFailed(
