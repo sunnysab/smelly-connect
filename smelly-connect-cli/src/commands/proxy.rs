@@ -189,6 +189,8 @@ where
         );
     }
 
+    pool.shutdown().await;
+
     match first_error {
         Some(err) => Err(CliError::Command(err)),
         None => Ok(()),

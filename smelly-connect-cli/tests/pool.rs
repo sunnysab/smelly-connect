@@ -226,6 +226,46 @@ async fn pool_prewarm_refills_parallel_slot_after_failure() {
     assert_eq!(pool.summary().await.disabled_auth_nodes, 1);
 }
 
+#[tokio::test(start_paused = true)]
+async fn background_maintenance_healthchecks_stop_after_explicit_shutdown() {
+    let pool = smelly_connect_cli::pool::SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let running = pool.background_maintenance_running_flag_for_test();
+
+    pool.start_background_maintenance_for_test();
+    tokio::task::yield_now().await;
+    assert!(running.load(Ordering::SeqCst));
+
+    pool.shutdown().await;
+    tokio::task::yield_now().await;
+    assert!(!running.load(Ordering::SeqCst));
+}
+
+#[tokio::test(start_paused = true)]
+async fn background_maintenance_does_not_start_after_prior_shutdown() {
+    let pool = smelly_connect_cli::pool::SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let running = pool.background_maintenance_running_flag_for_test();
+
+    pool.shutdown().await;
+    pool.start_background_maintenance_for_test();
+    tokio::task::yield_now().await;
+
+    assert!(!running.load(Ordering::SeqCst));
+}
+
+#[tokio::test(start_paused = true)]
+async fn background_maintenance_healthchecks_stop_when_last_pool_handle_drops() {
+    let pool = smelly_connect_cli::pool::SessionPool::from_named_ready_accounts(["acct-01"]).await;
+    let running = pool.background_maintenance_running_flag_for_test();
+
+    pool.start_background_maintenance_for_test();
+    tokio::task::yield_now().await;
+    assert!(running.load(Ordering::SeqCst));
+
+    drop(pool);
+    tokio::task::yield_now().await;
+    assert!(!running.load(Ordering::SeqCst));
+}
+
 #[tokio::test]
 async fn pool_prewarm_retries_other_accounts_after_permanent_auth_failure() {
     let cfg = startup_pool_config(2);

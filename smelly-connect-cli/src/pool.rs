@@ -6,7 +6,8 @@ use std::future::Future;
 use std::net::IpAddr;
 #[cfg(any(test, debug_assertions))]
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use smelly_connect::domain::route_policy::RoutePolicy;
@@ -14,8 +15,8 @@ use smelly_connect::session::normalize_override_domain;
 use smelly_connect::{
     CaptchaError, CaptchaHandler, EasyConnectClient, LocalRouteOverrides, Session,
 };
-use tokio::sync::Mutex;
-use tokio::task::JoinSet;
+use tokio::sync::{Mutex, watch};
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 
 use crate::config::{AccountConfig, AppConfig, RoutingDefaultAction};
@@ -104,9 +105,78 @@ struct PoolState {
     total_reconnections: u64,
 }
 
-#[derive(Clone)]
+struct PoolMaintenance {
+    shutdown_tx: watch::Sender<bool>,
+    task: StdMutex<Option<JoinHandle<()>>>,
+    running: Arc<AtomicBool>,
+}
+
+impl PoolMaintenance {
+    fn new_shared() -> Arc<Self> {
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        Arc::new(Self {
+            shutdown_tx,
+            task: StdMutex::new(None),
+            running: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    fn subscribe(&self) -> watch::Receiver<bool> {
+        self.shutdown_tx.subscribe()
+    }
+
+    fn install(&self, task: JoinHandle<()>) {
+        let mut slot = self
+            .task
+            .lock()
+            .expect("pool maintenance task mutex poisoned");
+        if slot.is_some() {
+            task.abort();
+            return;
+        }
+        *slot = Some(task);
+    }
+
+    fn signal_shutdown(&self) {
+        self.shutdown_tx.send_replace(true);
+    }
+
+    async fn shutdown(&self) {
+        self.signal_shutdown();
+        let task = {
+            let mut slot = self
+                .task
+                .lock()
+                .expect("pool maintenance task mutex poisoned");
+            slot.take()
+        };
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+        self.running.store(false, Ordering::Release);
+    }
+
+    fn abort(&self) {
+        self.signal_shutdown();
+        let task = {
+            let mut slot = self
+                .task
+                .lock()
+                .expect("pool maintenance task mutex poisoned");
+            slot.take()
+        };
+        if let Some(task) = task {
+            task.abort();
+        }
+        self.running.store(false, Ordering::Release);
+    }
+}
+
 pub struct SessionPool {
     inner: Arc<Mutex<PoolState>>,
+    maintenance: Arc<PoolMaintenance>,
+    user_refs: Arc<AtomicUsize>,
+    counts_for_shutdown: bool,
     healthcheck_interval: Duration,
     #[cfg(any(test, debug_assertions))]
     retry_delay: Duration,
@@ -118,6 +188,20 @@ pub struct SessionPool {
     server: Option<String>,
     allow_request_triggered_probe: bool,
     min_pool_size: usize,
+}
+
+impl Clone for SessionPool {
+    fn clone(&self) -> Self {
+        self.clone_with_refcount(true)
+    }
+}
+
+impl Drop for SessionPool {
+    fn drop(&mut self) {
+        if self.counts_for_shutdown && self.user_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.maintenance.abort();
+        }
+    }
 }
 
 const DEFAULT_SESSION_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
@@ -282,6 +366,29 @@ impl Display for PoolError {
 impl std::error::Error for PoolError {}
 
 impl SessionPool {
+    fn clone_with_refcount(&self, counts_for_shutdown: bool) -> Self {
+        if counts_for_shutdown {
+            self.user_refs.fetch_add(1, Ordering::Relaxed);
+        }
+        Self {
+            inner: Arc::clone(&self.inner),
+            maintenance: Arc::clone(&self.maintenance),
+            user_refs: Arc::clone(&self.user_refs),
+            counts_for_shutdown,
+            healthcheck_interval: self.healthcheck_interval,
+            #[cfg(any(test, debug_assertions))]
+            retry_delay: self.retry_delay,
+            connect_timeout: self.connect_timeout,
+            local_route_overrides: self.local_route_overrides.clone(),
+            route_policy: self.route_policy,
+            allow_all_routes: self.allow_all_routes,
+            keepalive_target: self.keepalive_target.clone(),
+            server: self.server.clone(),
+            allow_request_triggered_probe: self.allow_request_triggered_probe,
+            min_pool_size: self.min_pool_size,
+        }
+    }
+
     pub async fn from_config_allow_empty(cfg: &AppConfig) -> Result<Self, PoolError> {
         Self::from_config_with_startup_mode(cfg, PoolStartupMode::AllowEmpty).await
     }
@@ -357,6 +464,9 @@ impl SessionPool {
                 busy_live_connects: HashSet::new(),
                 total_reconnections: 0,
             })),
+            maintenance: PoolMaintenance::new_shared(),
+            user_refs: Arc::new(AtomicUsize::new(1)),
+            counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
@@ -400,6 +510,9 @@ impl SessionPool {
                 busy_live_connects: HashSet::new(),
                 total_reconnections: 0,
             })),
+            maintenance: PoolMaintenance::new_shared(),
+            user_refs: Arc::new(AtomicUsize::new(1)),
+            counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
@@ -455,6 +568,9 @@ impl SessionPool {
                 busy_live_connects: HashSet::new(),
                 total_reconnections: 0,
             })),
+            maintenance: PoolMaintenance::new_shared(),
+            user_refs: Arc::new(AtomicUsize::new(1)),
+            counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
@@ -513,6 +629,9 @@ impl SessionPool {
                 busy_live_connects: HashSet::new(),
                 total_reconnections: 0,
             })),
+            maintenance: PoolMaintenance::new_shared(),
+            user_refs: Arc::new(AtomicUsize::new(1)),
+            counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
@@ -579,6 +698,9 @@ impl SessionPool {
                 busy_live_connects: HashSet::new(),
                 total_reconnections: 0,
             })),
+            maintenance: PoolMaintenance::new_shared(),
+            user_refs: Arc::new(AtomicUsize::new(1)),
+            counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
@@ -662,6 +784,9 @@ impl SessionPool {
                 busy_live_connects: HashSet::new(),
                 total_reconnections: 0,
             })),
+            maintenance: PoolMaintenance::new_shared(),
+            user_refs: Arc::new(AtomicUsize::new(1)),
+            counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
@@ -708,6 +833,9 @@ impl SessionPool {
                 busy_live_connects: HashSet::new(),
                 total_reconnections: 0,
             })),
+            maintenance: PoolMaintenance::new_shared(),
+            user_refs: Arc::new(AtomicUsize::new(1)),
+            counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(1),
@@ -749,6 +877,9 @@ impl SessionPool {
                 busy_live_connects: HashSet::new(),
                 total_reconnections: 0,
             })),
+            maintenance: PoolMaintenance::new_shared(),
+            user_refs: Arc::new(AtomicUsize::new(1)),
+            counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_millis(100),
@@ -801,6 +932,9 @@ impl SessionPool {
                 busy_live_connects: HashSet::new(),
                 total_reconnections: 0,
             })),
+            maintenance: PoolMaintenance::new_shared(),
+            user_refs: Arc::new(AtomicUsize::new(1)),
+            counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
             #[cfg(any(test, debug_assertions))]
             retry_delay: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
@@ -884,6 +1018,10 @@ impl SessionPool {
         self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
         build_pool_summary(&state)
+    }
+
+    pub async fn shutdown(&self) {
+        self.maintenance.shutdown().await;
     }
 
     pub async fn routes_snapshot(&self) -> RoutesSnapshot {
@@ -1028,7 +1166,7 @@ impl SessionPool {
         }
         let account_name = account_name.to_string();
         let error = error.into();
-        let pool = self.clone();
+        let pool = self.clone_with_refcount(false);
         let session = session.clone();
         tokio::spawn(async move {
             let result = probe_live_session_health(
@@ -1047,13 +1185,29 @@ impl SessionPool {
 
     fn spawn_background_maintenance_task(&self) {
         let interval = self.healthcheck_interval;
-        let pool = self.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(interval).await;
-                pool.run_periodic_maintenance_once().await;
+        let pool = self.clone_with_refcount(false);
+        let maintenance = Arc::clone(&self.maintenance);
+        let mut shutdown = self.maintenance.subscribe();
+        self.maintenance.install(tokio::spawn(async move {
+            maintenance.running.store(true, Ordering::Release);
+            if *shutdown.borrow() {
+                maintenance.running.store(false, Ordering::Release);
+                return;
             }
-        });
+            loop {
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(interval) => {
+                        pool.run_periodic_maintenance_once().await;
+                    }
+                }
+            }
+            maintenance.running.store(false, Ordering::Release);
+        }));
     }
 
     async fn run_periodic_maintenance_once(&self) {
@@ -1115,14 +1269,14 @@ impl SessionPool {
         session: &Session,
     ) -> Option<Arc<std::sync::Mutex<smelly_connect::KeepaliveHandle>>> {
         let target = self.keepalive_target.clone()?;
-        let pool = self.clone();
+        let pool = self.clone_with_refcount(false);
         let account_name = account_name.to_string();
         Some(Arc::new(std::sync::Mutex::new(
             session.start_icmp_keepalive_with_failure_handler(
                 target,
                 DEFAULT_SESSION_KEEPALIVE_INTERVAL,
                 move || {
-                    let pool = pool.clone();
+                    let pool = pool.clone_with_refcount(false);
                     let account_name = account_name.clone();
                     tokio::spawn(async move {
                         pool.report_live_session_unhealthy(
@@ -1278,6 +1432,9 @@ impl SessionPool {
                 busy_live_connects: HashSet::new(),
                 total_reconnections: 0,
             })),
+            maintenance: PoolMaintenance::new_shared(),
+            user_refs: Arc::new(AtomicUsize::new(1)),
+            counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
@@ -1319,6 +1476,9 @@ impl SessionPool {
                 busy_live_connects: HashSet::new(),
                 total_reconnections: 0,
             })),
+            maintenance: PoolMaintenance::new_shared(),
+            user_refs: Arc::new(AtomicUsize::new(1)),
+            counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
@@ -1387,11 +1547,11 @@ impl SessionPool {
     #[cfg(any(test, debug_assertions))]
     pub async fn run_concurrent_probe_race_for_test(&self) -> ProbeRaceResult {
         let first = {
-            let pool = self.clone();
+            let pool = self.clone_with_refcount(false);
             tokio::spawn(async move { pool.try_request_triggered_probe_for_test().await })
         };
         let second = {
-            let pool = self.clone();
+            let pool = self.clone_with_refcount(false);
             tokio::spawn(async move { pool.try_request_triggered_probe_for_test().await })
         };
 
@@ -1451,6 +1611,16 @@ impl SessionPool {
     #[cfg(any(test, debug_assertions))]
     pub async fn run_periodic_healthcheck_once_for_test(&self) {
         self.run_periodic_healthcheck_once().await;
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn start_background_maintenance_for_test(&self) {
+        self.spawn_background_maintenance_task();
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn background_maintenance_running_flag_for_test(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.maintenance.running)
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -1642,7 +1812,7 @@ impl SessionPool {
             while ready + pending.len() < target {
                 // Prefer connecting fresh Configured accounts, fall back to HalfOpen.
                 if self.has_configured_accounts().await {
-                    let pool = self.clone();
+                    let pool = self.clone_with_refcount(false);
                     #[cfg(any(test, debug_assertions))]
                     let test_connect_hook = test_connect_hook.clone();
                     pending.spawn(async move {
@@ -1655,7 +1825,7 @@ impl SessionPool {
                 } else if let Some((name, account, reconnect_session)) =
                     self.claim_maintenance_probe().await
                 {
-                    let pool = self.clone();
+                    let pool = self.clone_with_refcount(false);
                     pending.spawn(async move {
                         pool.recover_and_complete_probe(&name, &account, reconnect_session)
                             .await
@@ -1881,9 +2051,7 @@ impl SessionPool {
         }
     }
 
-    async fn claim_maintenance_probe(
-        &self,
-    ) -> Option<(String, AccountConfig, Option<Session>)> {
+    async fn claim_maintenance_probe(&self) -> Option<(String, AccountConfig, Option<Session>)> {
         self.refresh_time_based_states().await;
         let mut state = self.inner.lock().await;
 
@@ -1892,9 +2060,8 @@ impl SessionPool {
             .iter()
             .enumerate()
             .filter_map(|(idx, node)| {
-                (!node.live_probe_in_flight
-                    && matches!(node.state, AccountState::HalfOpen(_)))
-                .then_some(idx)
+                (!node.live_probe_in_flight && matches!(node.state, AccountState::HalfOpen(_)))
+                    .then_some(idx)
             })
             .collect();
         if probe_candidates.is_empty() {
