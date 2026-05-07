@@ -251,12 +251,8 @@ async fn handle_live_client(
                 match connect_live_upstream_with_timeout(connect_timeout, &session, &host, port)
                     .await
                 {
-                    Ok((upstream, _route_backend)) => {
-                        pool.finish_live_connect_attempt(&account_name).await;
-                        upstream
-                    }
+                    Ok((upstream, _route_backend)) => upstream,
                     Err((err, route_backend)) => {
-                        pool.finish_live_connect_attempt(&account_name).await;
                         if !matches!(err, UpstreamConnectError::RouteRejected) {
                             stats.record_connect_failure();
                         }

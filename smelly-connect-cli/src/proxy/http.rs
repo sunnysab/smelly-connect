@@ -529,12 +529,10 @@ async fn handle_live_request(
         .await
         {
             Ok((upstream, route_backend)) => {
-                pool.finish_live_connect_attempt(&account_name).await;
                 log_upstream_connect_success(request_id, "connect", &target, connect_started);
                 (upstream, route_backend)
             }
             Err((err, route_backend)) => {
-                pool.finish_live_connect_attempt(&account_name).await;
                 log_upstream_connect_failure(request_id, "connect", &target, connect_started, &err);
                 if !matches!(err, UpstreamConnectError::RouteRejected) {
                     stats.record_connect_failure();
@@ -602,12 +600,10 @@ async fn handle_live_request(
             log_upstream_connect_start(request_id, "http", &account_name, &target, connect_timeout);
             match connect_live_upstream_with_timeout(connect_timeout, &session, &host, port).await {
                 Ok((upstream, route_backend)) => {
-                    pool.finish_live_connect_attempt(&account_name).await;
                     log_upstream_connect_success(request_id, "http", &target, connect_started);
                     Ok((upstream, route_backend))
                 }
                 Err((err, route_backend)) => {
-                    pool.finish_live_connect_attempt(&account_name).await;
                     log_upstream_connect_failure(
                         request_id,
                         "http",
@@ -2893,10 +2889,7 @@ mod tests {
         if request.method() == Method::CONNECT {
             let (host, port, target) = match resolve_connect_target(&request) {
                 Ok(target) => target,
-                Err(_) => {
-                    pool.finish_live_connect_attempt(&account_name).await;
-                    return empty_response(StatusCode::BAD_REQUEST);
-                }
+                Err(_) => return empty_response(StatusCode::BAD_REQUEST),
             };
             tracing::info!(
                 request_id,
@@ -2971,10 +2964,7 @@ mod tests {
 
         let (host, port, target, uri) = match resolve_forward_target(&request) {
             Ok(target) => target,
-            Err(_) => {
-                pool.finish_live_connect_attempt(&account_name).await;
-                return empty_response(StatusCode::BAD_REQUEST);
-            }
+            Err(_) => return empty_response(StatusCode::BAD_REQUEST),
         };
         tracing::info!(
             request_id,

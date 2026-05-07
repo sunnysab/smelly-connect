@@ -606,6 +606,7 @@ async fn timed_out_live_session_recovery_prefers_transport_rebuild_before_relogi
 
     let recovered = pool.next_live_session().await.unwrap();
     assert_eq!(recovered.0, "acct-01");
+    assert_eq!(pool.summary().await.total_reconnections, 1);
 }
 
 #[tokio::test(start_paused = true)]
