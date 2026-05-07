@@ -914,7 +914,7 @@ impl TcpSocketState {
             return Poll::Ready(Err(err.to_io_error()));
         }
 
-        if shared.close_sent && shared.write_buffer.is_empty() && shared.send_queue_empty {
+        if shared.write_buffer.is_empty() && shared.send_queue_empty {
             return Poll::Ready(Ok(()));
         }
 
@@ -1574,5 +1574,33 @@ mod tests {
         }
 
         assert!(matches!(state.poll_shutdown(&mut cx), Poll::Ready(Ok(()))));
+    }
+
+    #[test]
+    fn flush_completes_without_shutdown_once_buffers_drain() {
+        let state = TcpSocketState::new();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        {
+            let mut shared = acquire_lock(&state.shared);
+            shared.send_open = true;
+            shared.send_queue_empty = true;
+        }
+        assert!(matches!(state.poll_flush(&mut cx), Poll::Ready(Ok(()))));
+
+        {
+            let mut shared = acquire_lock(&state.shared);
+            shared.write_buffer.push_back(1);
+            shared.send_queue_empty = false;
+        }
+        assert!(matches!(state.poll_flush(&mut cx), Poll::Pending));
+
+        {
+            let mut shared = acquire_lock(&state.shared);
+            shared.write_buffer.clear();
+            shared.send_queue_empty = true;
+        }
+        assert!(matches!(state.poll_flush(&mut cx), Poll::Ready(Ok(()))));
     }
 }
