@@ -22,6 +22,7 @@ mod inner;
 mod runtime;
 
 use inner::{LegacyDataPlaneConfig, SessionInner};
+pub(crate) use runtime::SessionReqwestProxy;
 use runtime::SessionRuntime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,6 +383,16 @@ impl EasyConnectSession {
         crate::integration::http_proxy::start_http_proxy(self.clone(), bind)
             .await
             .map_err(|err| Error::Proxy(ProxyError::BindFailed(err.to_string())))
+    }
+
+    pub(crate) async fn reqwest_proxy(&self) -> Result<Arc<SessionReqwestProxy>, Error> {
+        self.inner
+            .runtime
+            .shared_reqwest_proxy(|| async {
+                self.start_http_proxy(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                    .await
+            })
+            .await
     }
 
     pub async fn rebuild_transport(&self) -> Result<Self, Error> {

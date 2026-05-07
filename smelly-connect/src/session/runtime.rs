@@ -1,12 +1,17 @@
-use std::sync::Mutex;
+use std::future::Future;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex, Weak};
 
+use crate::error::{Error, IntegrationError};
+use crate::proxy::http::ProxyHandle;
 use crate::runtime::tasks::keepalive::KeepaliveHandle;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 
 pub(crate) struct SessionRuntime {
     legacy_tunnel: Mutex<Option<smelly_tls::TunnelConnection>>,
     keepalive: Mutex<Option<KeepaliveHandle>>,
     connect_gate: std::sync::Arc<Semaphore>,
+    reqwest_proxy: AsyncMutex<Weak<SessionReqwestProxy>>,
 }
 
 impl Default for SessionRuntime {
@@ -15,6 +20,7 @@ impl Default for SessionRuntime {
             legacy_tunnel: Mutex::new(None),
             keepalive: Mutex::new(None),
             connect_gate: std::sync::Arc::new(Semaphore::new(16)),
+            reqwest_proxy: AsyncMutex::new(Weak::new()),
         }
     }
 }
@@ -28,6 +34,7 @@ impl SessionRuntime {
             legacy_tunnel: Mutex::new(legacy_tunnel),
             keepalive: Mutex::new(keepalive),
             connect_gate: std::sync::Arc::new(Semaphore::new(1)),
+            reqwest_proxy: AsyncMutex::new(Weak::new()),
         }
     }
 
@@ -45,6 +52,24 @@ impl SessionRuntime {
             .await
             .expect("connect gate semaphore closed")
     }
+
+    pub(crate) async fn shared_reqwest_proxy<F, Fut>(
+        &self,
+        create: F,
+    ) -> Result<Arc<SessionReqwestProxy>, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<ProxyHandle, Error>>,
+    {
+        let mut cached = self.reqwest_proxy.lock().await;
+        if let Some(proxy) = cached.upgrade() {
+            return Ok(proxy);
+        }
+
+        let proxy = Arc::new(SessionReqwestProxy::new(create().await?)?);
+        *cached = Arc::downgrade(&proxy);
+        Ok(proxy)
+    }
 }
 
 impl Drop for SessionRuntime {
@@ -55,5 +80,61 @@ impl Drop for SessionRuntime {
         if let Ok(keepalive) = self.keepalive.get_mut() {
             let _ = keepalive.take();
         }
+    }
+}
+
+pub(crate) struct SessionReqwestProxy {
+    local_addr: SocketAddr,
+    proxy_url: reqwest::Url,
+    handle: Mutex<Option<ProxyHandle>>,
+}
+
+impl SessionReqwestProxy {
+    fn new(handle: ProxyHandle) -> Result<Self, Error> {
+        let local_addr = handle.local_addr();
+        let proxy_url = reqwest::Url::parse(&format!("http://{local_addr}")).map_err(|err| {
+            Error::Integration(IntegrationError::ClientBuildFailed(err.to_string()))
+        })?;
+
+        Ok(Self {
+            local_addr,
+            proxy_url,
+            handle: Mutex::new(Some(handle)),
+        })
+    }
+
+    pub(crate) fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    pub(crate) fn proxy_url(&self) -> &reqwest::Url {
+        &self.proxy_url
+    }
+}
+
+impl Drop for SessionReqwestProxy {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.get_mut().ok().and_then(Option::take) else {
+            return;
+        };
+
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = handle.shutdown().await;
+            });
+            return;
+        }
+
+        std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async move {
+                let _ = handle.shutdown().await;
+            });
+        });
     }
 }
