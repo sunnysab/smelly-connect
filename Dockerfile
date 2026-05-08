@@ -22,15 +22,17 @@ RUN set -eux; \
 
 FROM alpine:3.23
 
-RUN addgroup -S smelly-connect \
-    && adduser -S -D -h /var/lib/smelly-connect -G smelly-connect smelly-connect \
-    && install -d -o smelly-connect -g smelly-connect /var/lib/smelly-connect
+RUN addgroup -S vpn \
+    && adduser -S -D -h /var/lib/vpn -G vpn vpn \
+    && install -d -o vpn -g vpn /var/lib/vpn /run/smelly-connect
 
 COPY --from=builder /out/smelly-connect-cli /usr/local/bin/smelly-connect-cli
 COPY config.toml.example /etc/smelly-connect/config.toml.example
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-USER smelly-connect
-WORKDIR /var/lib/smelly-connect
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 
-ENTRYPOINT ["/usr/local/bin/smelly-connect-cli"]
+WORKDIR /var/lib/vpn
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["--config", "/etc/smelly-connect/config.toml", "proxy"]

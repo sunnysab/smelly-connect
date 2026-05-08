@@ -268,7 +268,6 @@ Configured → Connecting → Ready ⇄ Suspect
 ```bash
 docker build -t smelly-connect-cli:latest .
 docker run --rm \
-  --cap-add=NET_RAW \
   -p 127.0.0.1:8080:8080 \
   -p 127.0.0.1:1080:1080 \
   -p 127.0.0.1:9090:9090 \
@@ -276,7 +275,7 @@ docker run --rm \
   smelly-connect-cli:latest
 ```
 
-`--cap-add=NET_RAW` 仅供容器内原生 ICMP 使用；若仅靠 smoltcp 用户态隧道保活则不需要。
+镜像入口会先以 root 读取挂载的配置文件，再复制到容器内仅 `vpn:vpn` 可读的位置，然后以 `vpn:vpn` 启动主进程。因此宿主机上的 `config.toml` 即使保持 `0600` 也可以直接挂载使用。
 
 也支持 `docker compose`：见 [`docker-compose.yml`](docker-compose.yml)。
 
@@ -352,4 +351,3 @@ let handle = session.start_icmp_keepalive("jwxt.sit.edu.cn", Duration::from_secs
 
 // SOCKS5 / 本地 HTTP 代理 见 CLI proxy 模式
 ```
-
