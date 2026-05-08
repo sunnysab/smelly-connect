@@ -131,13 +131,13 @@ impl EasyConnectSession {
             server_addr,
             token,
             legacy_cipher_hint,
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-utils"))]
             transport_rebuilder: None,
         });
         self
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn with_transport_rebuild_for_test<F>(mut self, rebuilder: F) -> Self
     where
         F: Fn() -> Result<TransportStack, Error> + Send + Sync + 'static,
@@ -401,7 +401,7 @@ impl EasyConnectSession {
                 "legacy data plane unavailable".to_string(),
             ))
         })?;
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-utils"))]
         let (client_ip, transport, request_ip_tunnel) = if let Some(rebuilder) =
             &cfg.transport_rebuilder
         {
@@ -426,7 +426,7 @@ impl EasyConnectSession {
                     .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
             (client_ip, transport, Some(request_ip_tunnel))
         };
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, feature = "test-utils")))]
         let (client_ip, transport, request_ip_tunnel) = {
             let (client_ip, request_ip_tunnel) =
                 crate::auth::control::request_ip_via_tunnel_with_conn(
@@ -474,7 +474,7 @@ impl EasyConnectSession {
         let server_addr = cfg.server_addr;
         let token = cfg.token.clone();
         let legacy_cipher_hint = cfg.legacy_cipher_hint.clone();
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-utils"))]
         let transport_rebuilder = cfg.transport_rebuilder.clone();
         let client_ip = self.inner.client_ip;
         let resources = self.inner.resources.clone();
@@ -487,7 +487,7 @@ impl EasyConnectSession {
         drop(self);
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-utils"))]
         let (transport, request_ip_tunnel) = if let Some(rebuilder) = transport_rebuilder {
             (rebuilder()?, None)
         } else if let Some(request_ip_tunnel) = request_ip_tunnel {
@@ -527,7 +527,7 @@ impl EasyConnectSession {
             .await?;
             return Ok(rebuilt);
         };
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, feature = "test-utils")))]
         let (transport, request_ip_tunnel) = if let Some(request_ip_tunnel) = request_ip_tunnel {
             let recv = crate::auth::control::open_recv_tunnel(
                 server_addr,

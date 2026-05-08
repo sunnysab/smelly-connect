@@ -1,4 +1,4 @@
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,7 +73,7 @@ impl RuntimeStats {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn seed_protocol_for_test(&self, protocol: &str, values: BTreeMap<&str, u64>) {
         let stats = match protocol {
             "http" => &self.http,
@@ -108,12 +108,12 @@ impl RuntimeStats {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn record_connect_failure_for_test(&self) {
         self.record_connect_failure();
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn record_connect_success_for_test(&self) {
         self.record_connect_success();
     }

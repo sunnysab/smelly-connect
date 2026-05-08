@@ -136,7 +136,7 @@ fn format_routes(listen: &str, routes: RoutesSnapshot) -> String {
     lines.join("\n")
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -167,5 +167,5 @@ mod tests {
     }
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 pub use tests::*;

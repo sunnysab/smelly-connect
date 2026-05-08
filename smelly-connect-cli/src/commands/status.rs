@@ -208,7 +208,7 @@ fn format_bytes(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit_index])
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -252,5 +252,5 @@ mod tests {
     }
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 pub use tests::*;

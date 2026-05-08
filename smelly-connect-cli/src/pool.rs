@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 use std::future::Future;
 use std::net::IpAddr;
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -26,7 +26,7 @@ mod state;
 
 use selection::next_selectable_index;
 use state::disable_node;
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 use state::next_backoff;
 use state::{build_pool_summary, open_node, state_label};
 
@@ -39,7 +39,7 @@ pub struct PooledSession {
 }
 
 impl PooledSession {
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     fn new(account_name: String, session: Option<Session>) -> Self {
         Self {
             account_name,
@@ -194,7 +194,7 @@ pub struct SessionPool {
     user_refs: Arc<AtomicUsize>,
     counts_for_shutdown: bool,
     healthcheck_interval: Duration,
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     retry_delay: Duration,
     connect_timeout: Duration,
     local_route_overrides: LocalRouteOverrides,
@@ -226,18 +226,18 @@ const DEFAULT_VPN_HEALTH_PROBE_ATTEMPTS: usize = 3;
 const DEFAULT_VPN_HEALTH_PROBE_DELAY: Duration = Duration::from_millis(200);
 const RECOVERY_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 type TestConnectFuture = Pin<Box<dyn Future<Output = Result<Session, PoolError>> + Send>>;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 type TestConnectHook = Arc<dyn Fn(AccountConfig) -> TestConnectFuture + Send + Sync>;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 tokio::task_local! {
     static TEST_CONNECT_HOOK: TestConnectHook;
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 fn current_test_connect_hook() -> Option<TestConnectHook> {
     TEST_CONNECT_HOOK.try_with(Arc::clone).ok()
 }
@@ -393,7 +393,7 @@ impl SessionPool {
             user_refs: Arc::clone(&self.user_refs),
             counts_for_shutdown,
             healthcheck_interval: self.healthcheck_interval,
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-utils"))]
             retry_delay: self.retry_delay,
             connect_timeout: self.connect_timeout,
             local_route_overrides: self.local_route_overrides.clone(),
@@ -411,7 +411,7 @@ impl SessionPool {
         Self::from_config_with_startup_mode(cfg, PoolStartupMode::AllowEmpty).await
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_config_with_connect_hook_for_test<F>(
         cfg: &AppConfig,
         startup_mode: PoolStartupMode,
@@ -427,7 +427,7 @@ impl SessionPool {
         .await
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_config_with_async_connect_hook_for_test<F, Fut>(
         cfg: &AppConfig,
         startup_mode: PoolStartupMode,
@@ -443,7 +443,7 @@ impl SessionPool {
             .await
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_test_accounts(total: usize, ready_count: usize) -> Self {
         let mut nodes = Vec::new();
         for idx in 0..total {
@@ -485,7 +485,7 @@ impl SessionPool {
             user_refs: Arc::new(AtomicUsize::new(1)),
             counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-utils"))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -499,7 +499,7 @@ impl SessionPool {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_named_ready_accounts<const N: usize>(names: [&str; N]) -> Self {
         let nodes = names
             .into_iter()
@@ -531,7 +531,7 @@ impl SessionPool {
             user_refs: Arc::new(AtomicUsize::new(1)),
             counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-utils"))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -589,7 +589,7 @@ impl SessionPool {
             user_refs: Arc::new(AtomicUsize::new(1)),
             counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-utils"))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -603,12 +603,12 @@ impl SessionPool {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_live_sessions_for_test(entries: Vec<(&str, Session)>) -> Self {
         Self::from_live_sessions_with_route_policy_for_test(entries, RoutePolicy::default()).await
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_live_sessions_with_route_policy_for_test(
         entries: Vec<(&str, Session)>,
         route_policy: RoutePolicy,
@@ -650,7 +650,7 @@ impl SessionPool {
             user_refs: Arc::new(AtomicUsize::new(1)),
             counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-utils"))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides,
@@ -664,7 +664,7 @@ impl SessionPool {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_live_sessions_with_keepalive_target_for_test(
         entries: Vec<(&str, Session)>,
         keepalive_target: &str,
@@ -674,7 +674,7 @@ impl SessionPool {
         pool
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_live_sessions_with_active_keepalive_for_test(
         entries: Vec<(&str, Session)>,
         keepalive_target: &str,
@@ -686,7 +686,7 @@ impl SessionPool {
         pool
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_connecting_recovery_for_test(
         account_name: &str,
         session: Session,
@@ -719,7 +719,7 @@ impl SessionPool {
             user_refs: Arc::new(AtomicUsize::new(1)),
             counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-utils"))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -750,7 +750,7 @@ impl SessionPool {
         pool
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_test_outcomes<const N: usize>(
         outcomes: [Result<&str, &str>; N],
         min_ready: usize,
@@ -803,7 +803,7 @@ impl SessionPool {
             user_refs: Arc::new(AtomicUsize::new(1)),
             counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-utils"))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -817,7 +817,7 @@ impl SessionPool {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_failed_accounts(total: usize) -> Self {
         let mut nodes = Vec::new();
         for idx in 0..total {
@@ -850,7 +850,7 @@ impl SessionPool {
             user_refs: Arc::new(AtomicUsize::new(1)),
             counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-utils"))]
             retry_delay: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -864,7 +864,7 @@ impl SessionPool {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_flaky_account_for_test() -> Self {
         Self {
             inner: Arc::new(Mutex::new(PoolState {
@@ -894,7 +894,7 @@ impl SessionPool {
             user_refs: Arc::new(AtomicUsize::new(1)),
             counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-utils"))]
             retry_delay: Duration::from_millis(100),
             connect_timeout: Duration::from_secs(20),
             local_route_overrides: LocalRouteOverrides::default(),
@@ -952,7 +952,7 @@ impl SessionPool {
             user_refs: Arc::new(AtomicUsize::new(1)),
             counts_for_shutdown: true,
             healthcheck_interval: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-utils"))]
             retry_delay: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
             connect_timeout: cfg.session_connect_timeout(),
             local_route_overrides: build_local_route_overrides(&cfg.routing)?,
@@ -998,7 +998,7 @@ impl SessionPool {
             .count()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn state_summary_for_test(&self) -> String {
         self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
@@ -1345,7 +1345,7 @@ impl SessionPool {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn has_selectable_nodes_for_test(&self) -> bool {
         self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
@@ -1357,7 +1357,7 @@ impl SessionPool {
         })
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_mixed_state_pool_for_test() -> Self {
         Self {
             inner: Arc::new(Mutex::new(PoolState {
@@ -1459,7 +1459,7 @@ impl SessionPool {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_exhausted_pool_for_test() -> Self {
         let account = AccountConfig {
             name: "acct-01".to_string(),
@@ -1501,7 +1501,7 @@ impl SessionPool {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn collect_selected_accounts_for_test(&self, count: usize) -> Vec<String> {
         let mut out = Vec::new();
         for _ in 0..count {
@@ -1513,7 +1513,7 @@ impl SessionPool {
         out
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn current_backoff_for_test(&self) -> Duration {
         let state = self.inner.lock().await;
         state
@@ -1523,12 +1523,12 @@ impl SessionPool {
             .unwrap_or_default()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn connect_timeout_for_test(&self) -> Duration {
         self.connect_timeout
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn report_auth_failure_for_test(&self, account_name: &str, error: PoolError) {
         let mut state = self.inner.lock().await;
         if let Some(node) = state
@@ -1540,7 +1540,7 @@ impl SessionPool {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn try_request_triggered_probe_for_test(&self) -> Result<PooledSession, PoolError> {
         let Some((name, account, _reconnect_session)) =
             self.claim_request_triggered_probe().await?
@@ -1553,7 +1553,7 @@ impl SessionPool {
         Ok(session)
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn run_concurrent_probe_race_for_test(&self) -> ProbeRaceResult {
         let first = {
             let pool = self.clone_with_refcount(false);
@@ -1583,7 +1583,7 @@ impl SessionPool {
         results
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn force_probe_failure_for_test(&self) {
         let mut state = self.inner.lock().await;
         if let Some(node) = state.nodes.first_mut() {
@@ -1610,32 +1610,32 @@ impl SessionPool {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn next_account_name(&self) -> Result<String, PoolError> {
         Ok(self.next_session().await?.account_name().to_string())
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn run_periodic_healthcheck_once_for_test(&self) {
         self.run_periodic_healthcheck_once().await;
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn start_background_maintenance_for_test(&self) {
         self.spawn_background_maintenance_task();
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn background_maintenance_running_flag_for_test(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.maintenance.running)
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn keepalive_target_for_test(&self) -> Option<String> {
         self.keepalive_target.clone()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     async fn arm_keepalives_for_live_sessions_for_test(&self) {
         let mut state = self.inner.lock().await;
         for node in &mut state.nodes {
@@ -1671,7 +1671,7 @@ impl SessionPool {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn ensure_additional_capacity_for_test(&self) -> Result<(), PoolError> {
         let mut state = self.inner.lock().await;
         if let Some(node) = state
@@ -1686,12 +1686,12 @@ impl SessionPool {
         Err(PoolError::new("no configurable account remaining"))
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn force_one_failure_for_test(&self) {
         self.force_failures_for_test(1).await;
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn force_failures_for_test(&self, count: u32) {
         for _ in 0..count {
             let mut should_retry = None;
@@ -1803,7 +1803,7 @@ impl SessionPool {
             return;
         }
 
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, feature = "test-utils"))]
         let test_connect_hook = current_test_connect_hook();
         let mut pending = JoinSet::new();
 
@@ -1818,11 +1818,11 @@ impl SessionPool {
                 // Prefer connecting fresh Configured accounts, fall back to HalfOpen.
                 if self.has_configured_accounts().await {
                     let pool = self.clone_with_refcount(false);
-                    #[cfg(any(test, debug_assertions))]
+                    #[cfg(any(test, feature = "test-utils"))]
                     let test_connect_hook = test_connect_hook.clone();
                     pending.spawn(async move {
                         pool.connect_one_configured_with_test_hook(
-                            #[cfg(any(test, debug_assertions))]
+                            #[cfg(any(test, feature = "test-utils"))]
                             test_connect_hook,
                         )
                         .await
@@ -1902,7 +1902,7 @@ impl SessionPool {
 
     async fn connect_one_configured(&self) -> Result<(), PoolError> {
         self.connect_one_configured_with_test_hook(
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-utils"))]
             current_test_connect_hook(),
         )
         .await
@@ -1910,7 +1910,7 @@ impl SessionPool {
 
     async fn connect_one_configured_with_test_hook(
         &self,
-        #[cfg(any(test, debug_assertions))] test_connect_hook: Option<TestConnectHook>,
+        #[cfg(any(test, feature = "test-utils"))] test_connect_hook: Option<TestConnectHook>,
     ) -> Result<(), PoolError> {
         let (name, account, server) = {
             let mut state = self.inner.lock().await;
@@ -1942,7 +1942,7 @@ impl SessionPool {
                 allow_all_routes: self.allow_all_routes,
                 _keepalive_target: self.keepalive_target.as_deref(),
                 server_cert_policy: self.server_cert_policy.clone(),
-                #[cfg(any(test, debug_assertions))]
+                #[cfg(any(test, feature = "test-utils"))]
                 test_connect_hook,
             },
         )
@@ -2204,7 +2204,7 @@ fn account_failure_from_pool_error(error: &PoolError) -> AccountFailure {
     }
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 pub fn is_permanent_auth_failure_for_test(error: &PoolError) -> bool {
     is_permanent_auth_failure(error)
 }
@@ -2256,7 +2256,7 @@ impl SessionPool {
                 allow_all_routes: self.allow_all_routes,
                 _keepalive_target: self.keepalive_target.as_deref(),
                 server_cert_policy: self.server_cert_policy.clone(),
-                #[cfg(any(test, debug_assertions))]
+                #[cfg(any(test, feature = "test-utils"))]
                 test_connect_hook: current_test_connect_hook(),
             },
         )
@@ -2293,7 +2293,7 @@ struct ConnectAccountContext<'a> {
     allow_all_routes: bool,
     _keepalive_target: Option<&'a str>,
     server_cert_policy: smelly_connect::ServerCertPolicy,
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     test_connect_hook: Option<TestConnectHook>,
 }
 
@@ -2303,7 +2303,7 @@ async fn connect_account(
     timeout: Duration,
     ctx: ConnectAccountContext<'_>,
 ) -> Result<Session, PoolError> {
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     if let Some(hook) = ctx.test_connect_hook {
         return hook(account.clone()).await.map(|session| {
             apply_pool_routing(

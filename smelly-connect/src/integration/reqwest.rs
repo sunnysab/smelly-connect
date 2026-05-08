@@ -12,7 +12,7 @@ pub async fn build_client(session: &EasyConnectSession) -> Result<reqwest::Clien
     Ok(client)
 }
 
-#[cfg(any(test, debug_assertions, feature = "test-utils"))]
+#[cfg(any(test, feature = "test-utils"))]
 #[doc(hidden)]
 pub async fn build_client_for_test(
     session: &EasyConnectSession,

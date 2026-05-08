@@ -1,14 +1,14 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 use crate::error::Error;
 use crate::resolver::SessionResolver;
 use crate::resource::ResourceSet;
 use crate::session::runtime::SessionRuntime;
 use crate::transport::TransportStack;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) type TransportRebuilder =
     dyn Fn() -> Result<TransportStack, Error> + Send + Sync + 'static;
 
@@ -28,6 +28,6 @@ pub(crate) struct LegacyDataPlaneConfig {
     pub(crate) server_addr: SocketAddr,
     pub(crate) token: crate::protocol::DerivedToken,
     pub(crate) legacy_cipher_hint: Option<String>,
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) transport_rebuilder: Option<Arc<TransportRebuilder>>,
 }

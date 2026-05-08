@@ -1,14 +1,14 @@
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 use std::net::SocketAddr;
 
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
@@ -55,7 +55,7 @@ pub async fn serve_management(
         .map_err(|err| err.to_string())
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn fetch_json_for_test(
     pool: SessionPool,
     runtime_stats: RuntimeStats,
@@ -111,7 +111,7 @@ async fn routes(State(state): State<ManagementState>) -> Json<crate::pool::Route
     Json(state.pool.routes_snapshot().await)
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 async fn request_json(addr: SocketAddr, path: &str) -> Result<String, String> {
     let mut client = TcpStream::connect(addr)
         .await

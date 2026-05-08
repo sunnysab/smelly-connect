@@ -351,13 +351,13 @@ pub fn load_typed(path: impl AsRef<Path>) -> Result<AppConfig, CliError> {
     toml::from_str(&body).map_err(|err| CliError::Config(err.to_string()))
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 pub fn load_for_test(path: impl AsRef<Path>) -> Result<AppConfig, String> {
     let body = fs::read_to_string(path).map_err(|err| err.to_string())?;
     toml::from_str(&body).map_err(|err| err.to_string())
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-utils"))]
 pub fn merge_for_test<const N: usize>(
     path: impl AsRef<Path>,
     args: [&str; N],
