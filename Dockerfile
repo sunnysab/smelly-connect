@@ -1,4 +1,4 @@
-FROM rust:1.94-alpine AS builder
+FROM rust:1.95-alpine AS builder
 WORKDIR /build
 
 RUN apk add --no-cache \
@@ -20,7 +20,7 @@ RUN set -eux; \
     cargo build -p smelly-connect-cli --release --features management-api --target "$rust_target"; \
     install -Dm755 "target/$rust_target/release/smelly-connect-cli" /out/smelly-connect-cli
 
-FROM alpine:3.22
+FROM alpine:3.23
 
 RUN addgroup -S smelly-connect \
     && adduser -S -D -h /var/lib/smelly-connect -G smelly-connect smelly-connect \
