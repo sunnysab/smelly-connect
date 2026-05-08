@@ -40,24 +40,97 @@ fn pool_logs_prewarm_summary_and_ready_events() {
 }
 
 #[test]
-fn http_request_logs_protocol_target_and_account() {
+fn http_request_logs_vpn_route_and_account() {
     let events = smelly_connect_cli::logging::capture_http_request_log_for_test();
-    assert!(events.iter().any(|line| line.contains("protocol=http")));
-    assert!(events.iter().any(|line| line.contains("account=acct-01")));
+    let accepted = events
+        .iter()
+        .find(|line| line.contains("request accepted") && line.contains("protocol=http"))
+        .unwrap();
+    assert!(accepted.contains("route=vpn"));
+    assert!(accepted.contains("account=acct-01"));
+
+    let connect_start = events
+        .iter()
+        .find(|line| line.contains("http upstream connect start"))
+        .unwrap();
+    assert!(connect_start.contains("route=vpn"));
+    assert!(connect_start.contains("account=acct-01"));
 }
 
 #[test]
-fn http_connect_request_logs_protocol_connect_and_account() {
+fn http_request_logs_direct_route_without_account() {
+    let events = smelly_connect_cli::logging::capture_http_direct_request_log_for_test();
+    let accepted = events
+        .iter()
+        .find(|line| line.contains("request accepted") && line.contains("protocol=http"))
+        .unwrap();
+    assert!(accepted.contains("route=direct"));
+    assert!(!accepted.contains("account="));
+
+    let connect_start = events
+        .iter()
+        .find(|line| line.contains("http upstream connect start"))
+        .unwrap();
+    assert!(connect_start.contains("route=direct"));
+    assert!(!connect_start.contains("account="));
+}
+
+#[test]
+fn http_connect_request_logs_vpn_route_and_account() {
     let events = smelly_connect_cli::logging::capture_http_connect_log_for_test();
-    assert!(events.iter().any(|line| line.contains("protocol=connect")));
-    assert!(events.iter().any(|line| line.contains("account=acct-01")));
+    let accepted = events
+        .iter()
+        .find(|line| line.contains("request accepted") && line.contains("protocol=connect"))
+        .unwrap();
+    assert!(accepted.contains("route=vpn"));
+    assert!(accepted.contains("account=acct-01"));
+
+    let connect_start = events
+        .iter()
+        .find(|line| line.contains("http upstream connect start"))
+        .unwrap();
+    assert!(connect_start.contains("route=vpn"));
+    assert!(connect_start.contains("account=acct-01"));
 }
 
 #[test]
-fn socks5_request_logs_protocol_target_and_account() {
+fn http_connect_request_logs_direct_route_without_account() {
+    let events = smelly_connect_cli::logging::capture_http_direct_connect_log_for_test();
+    let accepted = events
+        .iter()
+        .find(|line| line.contains("request accepted") && line.contains("protocol=connect"))
+        .unwrap();
+    assert!(accepted.contains("route=direct"));
+    assert!(!accepted.contains("account="));
+
+    let connect_start = events
+        .iter()
+        .find(|line| line.contains("http upstream connect start"))
+        .unwrap();
+    assert!(connect_start.contains("route=direct"));
+    assert!(!connect_start.contains("account="));
+}
+
+#[test]
+fn socks5_request_logs_vpn_route_and_account() {
     let events = smelly_connect_cli::logging::capture_socks5_request_log_for_test();
-    assert!(events.iter().any(|line| line.contains("protocol=socks5")));
-    assert!(events.iter().any(|line| line.contains("account=acct-01")));
+    let accepted = events
+        .iter()
+        .find(|line| line.contains("request accepted") && line.contains("protocol=socks5"))
+        .unwrap();
+    assert!(accepted.contains("route=vpn"));
+    assert!(accepted.contains("account=acct-01"));
+}
+
+#[test]
+fn socks5_request_logs_direct_route_without_account() {
+    let events = smelly_connect_cli::logging::capture_socks5_direct_request_log_for_test();
+    let accepted = events
+        .iter()
+        .find(|line| line.contains("request accepted") && line.contains("protocol=socks5"))
+        .unwrap();
+    assert!(accepted.contains("route=direct"));
+    assert!(!accepted.contains("account="));
 }
 
 #[test]

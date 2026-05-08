@@ -18,7 +18,8 @@ use crate::runtime::{ConnectionGuard, ProxyProtocol, RuntimeStats};
 use super::common::connect_with_timeout;
 use super::common::{
     LISTENER_ACCEPT_RETRY_BACKOFF, ListenerAcceptRetryLogState, LiveRouteBackend,
-    UpstreamConnectError, connect_live_upstream_with_timeout, should_retry_listener_accept,
+    UpstreamConnectError, connect_planned_live_upstream_with_timeout, log_request_accepted,
+    plan_live_upstream_connect, should_retry_listener_accept,
 };
 
 const DEFAULT_MAX_IN_FLIGHT_CONNECTIONS: usize = 1024;
@@ -240,43 +241,69 @@ async fn handle_live_client(
     match cmd {
         Socks5Command::TCPConnect => {
             let (host, port) = target_addr.into_string_and_port();
-            tracing::info!(
-                protocol = tracing::field::display("socks5"),
-                target = %format!("{host}:{port}"),
-                account = %account_name,
-                "request accepted"
-            );
-
-            let mut upstream =
-                match connect_live_upstream_with_timeout(connect_timeout, &session, &host, port)
-                    .await
-                {
-                    Ok((upstream, _route_backend)) => upstream,
-                    Err((err, route_backend)) => {
-                        if !matches!(err, UpstreamConnectError::RouteRejected) {
-                            stats.record_connect_failure();
-                        }
-                        if matches!(route_backend, LiveRouteBackend::Vpn)
-                            && !matches!(
-                                err,
-                                UpstreamConnectError::RouteRejected
-                                    | UpstreamConnectError::TimedOut
-                            )
-                        {
-                            pool.report_live_session_unhealthy_if_probe_fails(
-                                &account_name,
-                                &session,
-                                format!("{err:?}"),
-                            )
-                            .await;
-                        }
-                        proto
-                            .reply_error(&map_socks5_reply_error(&err))
-                            .await
-                            .map_err(|reply_err| reply_err.to_string())?;
-                        return Ok(());
+            let target = format!("{host}:{port}");
+            let route_plan = match plan_live_upstream_connect(&session, &host, port).await {
+                Ok(route_plan) => route_plan,
+                Err((err, route_backend)) => {
+                    if !matches!(err, UpstreamConnectError::RouteRejected) {
+                        stats.record_connect_failure();
                     }
-                };
+                    if matches!(route_backend, LiveRouteBackend::Vpn)
+                        && !matches!(
+                            err,
+                            UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
+                        )
+                    {
+                        pool.report_live_session_unhealthy_if_probe_fails(
+                            &account_name,
+                            &session,
+                            format!("{err:?}"),
+                        )
+                        .await;
+                    }
+                    proto
+                        .reply_error(&map_socks5_reply_error(&err))
+                        .await
+                        .map_err(|reply_err| reply_err.to_string())?;
+                    return Ok(());
+                }
+            };
+            let route_backend = route_plan.backend();
+            log_request_accepted(None, "socks5", &target, route_backend, &account_name);
+            let mut upstream = match connect_planned_live_upstream_with_timeout(
+                connect_timeout,
+                &session,
+                &host,
+                port,
+                route_plan,
+            )
+            .await
+            {
+                Ok((upstream, _route_backend)) => upstream,
+                Err((err, route_backend)) => {
+                    if !matches!(err, UpstreamConnectError::RouteRejected) {
+                        stats.record_connect_failure();
+                    }
+                    if matches!(route_backend, LiveRouteBackend::Vpn)
+                        && !matches!(
+                            err,
+                            UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
+                        )
+                    {
+                        pool.report_live_session_unhealthy_if_probe_fails(
+                            &account_name,
+                            &session,
+                            format!("{err:?}"),
+                        )
+                        .await;
+                    }
+                    proto
+                        .reply_error(&map_socks5_reply_error(&err))
+                        .await
+                        .map_err(|reply_err| reply_err.to_string())?;
+                    return Ok(());
+                }
+            };
             stats.record_connect_success();
             let connection = stats.open_connection(ProxyProtocol::Socks5);
             let mut client = proto
@@ -504,6 +531,8 @@ pub use tests::proxy_socks5_ipv6_for_test;
 pub use tests::proxy_socks5_live_failure_for_test;
 #[cfg(feature = "test-utils")]
 pub use tests::proxy_socks5_live_timeout_reply_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_socks5_live_vpn_connect_for_test;
 #[cfg(feature = "test-utils")]
 pub use tests::proxy_socks5_no_ready_session_for_test;
 #[cfg(feature = "test-utils")]
@@ -787,6 +816,59 @@ mod tests {
         }
 
         let request = build_domain_connect_request("example.test", upstream.port());
+        client
+            .write_all(&request)
+            .await
+            .map_err(|err| err.to_string())?;
+        let reply = read_socks5_reply(&mut client).await?;
+        if reply[1] != 0x00 {
+            return Err(format!("unexpected socks5 reply code: {}", reply[1]));
+        }
+
+        client
+            .write_all(b"ping")
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut echoed = [0_u8; 4];
+        client
+            .read_exact(&mut echoed)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(Socks5ProxyTestResult {
+            account_name: "acct-01".to_string(),
+            used_pool_selection: true,
+            echoed_bytes: echoed.to_vec(),
+        })
+    }
+
+    pub async fn proxy_socks5_live_vpn_connect_for_test() -> Result<Socks5ProxyTestResult, String> {
+        let upstream = spawn_echo_upstream().await;
+        let session = smelly_connect::test_support::session::session_with_domain_match(
+            "vpn.test",
+            std::net::Ipv4Addr::LOCALHOST,
+        );
+        let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+        let addr =
+            spawn_live_test_socks5(pool, RuntimeStats::default(), DEFAULT_CONNECT_TIMEOUT, None)
+                .await?;
+
+        let mut client = TcpStream::connect(addr)
+            .await
+            .map_err(|err| err.to_string())?;
+        client
+            .write_all(&[0x05, 0x01, 0x00])
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut method_reply = [0_u8; 2];
+        client
+            .read_exact(&mut method_reply)
+            .await
+            .map_err(|err| err.to_string())?;
+        if method_reply != [0x05, 0x00] {
+            return Err(format!("unexpected method reply: {method_reply:?}"));
+        }
+
+        let request = build_domain_connect_request("vpn.test", upstream.port());
         client
             .write_all(&request)
             .await
@@ -1583,11 +1665,12 @@ mod tests {
             }
         };
 
-        tracing::info!(
-            protocol = tracing::field::display("socks5"),
-            target = %format!("{host}:{port}"),
-            account = %account_name,
-            "request accepted"
+        log_request_accepted(
+            None,
+            "socks5",
+            &format!("{host}:{port}"),
+            LiveRouteBackend::Vpn,
+            &account_name,
         );
 
         let upstream = connector(account_name, host, port);

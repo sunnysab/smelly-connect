@@ -85,6 +85,10 @@ pub use tests::capture_http_connect_log_for_test;
 #[cfg(feature = "test-utils")]
 pub use tests::capture_http_connect_tunnel_log_for_test;
 #[cfg(feature = "test-utils")]
+pub use tests::capture_http_direct_connect_log_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::capture_http_direct_request_log_for_test;
+#[cfg(feature = "test-utils")]
 pub use tests::capture_http_live_failure_warn_for_test;
 #[cfg(feature = "test-utils")]
 pub use tests::capture_http_request_log_for_test;
@@ -102,6 +106,8 @@ pub use tests::capture_one_info_line_for_test;
 pub use tests::capture_pool_events_for_test;
 #[cfg(feature = "test-utils")]
 pub use tests::capture_pool_recovery_log_for_test;
+#[cfg(feature = "test-utils")]
+pub use tests::capture_socks5_direct_request_log_for_test;
 #[cfg(feature = "test-utils")]
 pub use tests::capture_socks5_live_failure_warn_for_test;
 #[cfg(feature = "test-utils")]
@@ -159,13 +165,25 @@ mod tests {
 
     pub fn capture_http_request_log_for_test() -> Vec<String> {
         capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
-            let _ = crate::proxy::http::proxy_http_for_test().await;
+            let _ = crate::proxy::http::proxy_http_live_vpn_forward_for_test().await;
         })
     }
 
     pub fn capture_http_connect_log_for_test() -> Vec<String> {
         capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
-            let _ = crate::proxy::http::proxy_connect_for_test().await;
+            let _ = crate::proxy::http::proxy_http_live_vpn_connect_for_test().await;
+        })
+    }
+
+    pub fn capture_http_direct_request_log_for_test() -> Vec<String> {
+        capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
+            let _ = crate::proxy::http::proxy_http_direct_forward_for_test().await;
+        })
+    }
+
+    pub fn capture_http_direct_connect_log_for_test() -> Vec<String> {
+        capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
+            let _ = crate::proxy::http::proxy_connect_direct_for_test().await;
         })
     }
 
@@ -200,7 +218,13 @@ mod tests {
 
     pub fn capture_socks5_request_log_for_test() -> Vec<String> {
         capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
-            let _ = crate::proxy::socks5::proxy_socks5_for_test().await;
+            let _ = crate::proxy::socks5::proxy_socks5_live_vpn_connect_for_test().await;
+        })
+    }
+
+    pub fn capture_socks5_direct_request_log_for_test() -> Vec<String> {
+        capture_async_lines(parse_mode("stdout").unwrap(), LoggingLevel::Info, async {
+            let _ = crate::proxy::socks5::proxy_socks5_direct_connect_for_test().await;
         })
     }
 

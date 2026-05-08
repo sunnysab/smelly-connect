@@ -1,4 +1,5 @@
 use std::io;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::net::TcpStream;
@@ -15,6 +16,67 @@ pub enum UpstreamConnectError {
 pub enum LiveRouteBackend {
     Vpn,
     Direct,
+}
+
+pub fn live_route_label(route_backend: LiveRouteBackend) -> &'static str {
+    match route_backend {
+        LiveRouteBackend::Vpn => "vpn",
+        LiveRouteBackend::Direct => "direct",
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum LiveRoutePlan {
+    Vpn,
+    Direct(SocketAddr),
+}
+
+impl LiveRoutePlan {
+    pub const fn backend(self) -> LiveRouteBackend {
+        match self {
+            Self::Vpn => LiveRouteBackend::Vpn,
+            Self::Direct(_) => LiveRouteBackend::Direct,
+        }
+    }
+}
+
+pub fn log_request_accepted(
+    request_id: Option<u64>,
+    protocol: &'static str,
+    target: &str,
+    route_backend: LiveRouteBackend,
+    account_name: &str,
+) {
+    match (request_id, route_backend) {
+        (Some(request_id), LiveRouteBackend::Vpn) => tracing::info!(
+            request_id,
+            protocol = tracing::field::display(protocol),
+            target = %target,
+            route = %live_route_label(route_backend),
+            account = %account_name,
+            "request accepted"
+        ),
+        (Some(request_id), LiveRouteBackend::Direct) => tracing::info!(
+            request_id,
+            protocol = tracing::field::display(protocol),
+            target = %target,
+            route = %live_route_label(route_backend),
+            "request accepted"
+        ),
+        (None, LiveRouteBackend::Vpn) => tracing::info!(
+            protocol = tracing::field::display(protocol),
+            target = %target,
+            route = %live_route_label(route_backend),
+            account = %account_name,
+            "request accepted"
+        ),
+        (None, LiveRouteBackend::Direct) => tracing::info!(
+            protocol = tracing::field::display(protocol),
+            target = %target,
+            route = %live_route_label(route_backend),
+            "request accepted"
+        ),
+    }
 }
 
 pub const LISTENER_ACCEPT_RETRY_BACKOFF: Duration = Duration::from_millis(100);
@@ -68,15 +130,11 @@ where
     }
 }
 
-pub async fn connect_live_upstream_with_timeout(
-    timeout: Duration,
+pub async fn plan_live_upstream_connect(
     session: &smelly_connect::Session,
     host: &str,
     port: u16,
-) -> Result<
-    (smelly_connect::transport::VpnStream, LiveRouteBackend),
-    (UpstreamConnectError, LiveRouteBackend),
-> {
+) -> Result<LiveRoutePlan, (UpstreamConnectError, LiveRouteBackend)> {
     let route = match session.plan_tcp_connect((host, port)).await {
         Ok(route) => route,
         Err(smelly_connect::Error::RouteDecision(
@@ -94,24 +152,52 @@ pub async fn connect_live_upstream_with_timeout(
     };
 
     match route {
-        smelly_connect::session::RoutePlan::VpnResolved(_) => {
+        smelly_connect::session::RoutePlan::VpnResolved(_) => Ok(LiveRoutePlan::Vpn),
+        smelly_connect::session::RoutePlan::Direct(addr) => Ok(LiveRoutePlan::Direct(addr)),
+    }
+}
+
+pub async fn connect_planned_live_upstream_with_timeout(
+    timeout: Duration,
+    session: &smelly_connect::Session,
+    host: &str,
+    port: u16,
+    route_plan: LiveRoutePlan,
+) -> Result<
+    (smelly_connect::transport::VpnStream, LiveRouteBackend),
+    (UpstreamConnectError, LiveRouteBackend),
+> {
+    let route_backend = route_plan.backend();
+    match route_plan {
+        LiveRoutePlan::Vpn => {
             connect_session_with_timeout(timeout, session.connect_tcp((host, port)))
                 .await
-                .map(|upstream| (upstream, LiveRouteBackend::Vpn))
-                .map_err(|err| (err, LiveRouteBackend::Vpn))
+                .map(|upstream| (upstream, route_backend))
+                .map_err(|err| (err, route_backend))
         }
-        smelly_connect::session::RoutePlan::Direct(addr) => {
-            connect_with_timeout(timeout, TcpStream::connect(addr))
-                .await
-                .map(|stream| {
-                    (
-                        smelly_connect::transport::VpnStream::new(stream),
-                        LiveRouteBackend::Direct,
-                    )
-                })
-                .map_err(|err| (err, LiveRouteBackend::Direct))
-        }
+        LiveRoutePlan::Direct(addr) => connect_with_timeout(timeout, TcpStream::connect(addr))
+            .await
+            .map(|stream| {
+                (
+                    smelly_connect::transport::VpnStream::new(stream),
+                    route_backend,
+                )
+            })
+            .map_err(|err| (err, route_backend)),
     }
+}
+
+pub async fn connect_live_upstream_with_timeout(
+    timeout: Duration,
+    session: &smelly_connect::Session,
+    host: &str,
+    port: u16,
+) -> Result<
+    (smelly_connect::transport::VpnStream, LiveRouteBackend),
+    (UpstreamConnectError, LiveRouteBackend),
+> {
+    let route_plan = plan_live_upstream_connect(session, host, port).await?;
+    connect_planned_live_upstream_with_timeout(timeout, session, host, port, route_plan).await
 }
 
 pub async fn connect_session_with_timeout<Fut>(

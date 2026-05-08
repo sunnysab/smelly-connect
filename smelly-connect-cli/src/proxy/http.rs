@@ -30,7 +30,8 @@ use smelly_connect::proxy::http::{
 use super::common::connect_with_timeout;
 use super::common::{
     LISTENER_ACCEPT_RETRY_BACKOFF, ListenerAcceptRetryLogState, LiveRouteBackend,
-    UpstreamConnectError, connect_live_upstream_with_timeout, should_retry_listener_accept,
+    UpstreamConnectError, connect_planned_live_upstream_with_timeout, log_request_accepted,
+    plan_live_upstream_connect, should_retry_listener_accept,
 };
 
 type ProxyBody = BoxBody<Bytes, io::Error>;
@@ -287,6 +288,12 @@ pub use tests::proxy_http_direct_forward_for_test;
 pub use tests::proxy_connect_direct_for_test;
 
 #[cfg(feature = "test-utils")]
+pub use tests::proxy_http_live_vpn_connect_for_test;
+
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_http_live_vpn_forward_for_test;
+
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_direct_failure_does_not_open_for_test;
 
 #[cfg(feature = "test-utils")]
@@ -533,27 +540,42 @@ async fn handle_live_request(
             Ok(target) => target,
             Err(_) => return empty_response(StatusCode::BAD_REQUEST),
         };
-        tracing::info!(
-            request_id,
-            protocol = tracing::field::display("connect"),
-            target = %target,
-            account = %account_name,
-            "request accepted"
+        let route_plan = match plan_live_upstream_connect(&session, &host, port).await {
+            Ok(route_plan) => route_plan,
+            Err((err, route_backend)) => {
+                if !matches!(err, UpstreamConnectError::RouteRejected) {
+                    stats.record_connect_failure();
+                }
+                if matches!(route_backend, LiveRouteBackend::Vpn) {
+                    handle_live_session_failure(&pool, &account_name, &session, &err).await;
+                }
+                return gateway_error_response(&err);
+            }
+        };
+        let route_backend = route_plan.backend();
+        log_request_accepted(
+            Some(request_id),
+            "connect",
+            &target,
+            route_backend,
+            &account_name,
         );
         let on_upgrade = upgrade::on(request);
         let connect_started = Instant::now();
         log_upstream_connect_start(
             request_id,
             "connect",
-            &account_name,
+            route_backend,
+            route_account(route_backend, &account_name),
             &target,
             connect_timeout,
         );
-        let (upstream, _route_backend) = match connect_live_upstream_with_timeout(
+        let (upstream, _route_backend) = match connect_planned_live_upstream_with_timeout(
             connect_timeout,
             &session,
             &host,
             port,
+            route_plan,
         )
         .await
         {
@@ -612,22 +634,65 @@ async fn handle_live_request(
         Ok(target) => target,
         Err(_) => return empty_response(StatusCode::BAD_REQUEST),
     };
-    tracing::info!(
-        request_id,
-        protocol = tracing::field::display("http"),
-        target = %target,
-        account = %account_name,
-        "request accepted"
-    );
 
     let wants_keep_alive = client_requests_keep_alive(&request);
     let upstream = take_cached_upstream(&upstream_cache, &host, port).await;
     let upstream = match upstream {
-        Some(upstream) => Ok((upstream.stream, upstream.metadata, true)),
+        Some(upstream) => {
+            let CachedUpstream {
+                stream,
+                metadata,
+                host: _,
+                port: _,
+            } = upstream;
+            log_request_accepted(
+                Some(request_id),
+                "http",
+                &target,
+                metadata.route_backend,
+                &metadata.account_name,
+            );
+            Ok((stream, metadata, true))
+        }
         None => {
+            let route_plan = match plan_live_upstream_connect(&session, &host, port).await {
+                Ok(route_plan) => route_plan,
+                Err((err, route_backend)) => {
+                    if !matches!(err, UpstreamConnectError::RouteRejected) {
+                        stats.record_connect_failure();
+                    }
+                    if matches!(route_backend, LiveRouteBackend::Vpn) {
+                        handle_live_session_failure(&pool, &account_name, &session, &err).await;
+                    }
+                    return gateway_error_response(&err);
+                }
+            };
+            let route_backend = route_plan.backend();
+            log_request_accepted(
+                Some(request_id),
+                "http",
+                &target,
+                route_backend,
+                &account_name,
+            );
             let connect_started = Instant::now();
-            log_upstream_connect_start(request_id, "http", &account_name, &target, connect_timeout);
-            match connect_live_upstream_with_timeout(connect_timeout, &session, &host, port).await {
+            log_upstream_connect_start(
+                request_id,
+                "http",
+                route_backend,
+                route_account(route_backend, &account_name),
+                &target,
+                connect_timeout,
+            );
+            match connect_planned_live_upstream_with_timeout(
+                connect_timeout,
+                &session,
+                &host,
+                port,
+                route_plan,
+            )
+            .await
+            {
                 Ok((upstream, route_backend)) => {
                     log_upstream_connect_success(request_id, "http", &target, connect_started);
                     Ok((
@@ -796,21 +861,37 @@ fn log_no_ready_session(request_id: u64, protocol: &'static str) {
     );
 }
 
+fn route_account(route_backend: LiveRouteBackend, account: &str) -> Option<&str> {
+    matches!(route_backend, LiveRouteBackend::Vpn).then_some(account)
+}
+
 fn log_upstream_connect_start(
     request_id: u64,
     protocol: &'static str,
-    account: &str,
+    route_backend: LiveRouteBackend,
+    account: Option<&str>,
     target: &str,
     timeout: Duration,
 ) {
-    tracing::info!(
-        request_id,
-        protocol = tracing::field::display(protocol),
-        account,
-        target,
-        timeout_ms = timeout.as_millis().try_into().unwrap_or(u64::MAX),
-        "http upstream connect start"
-    );
+    match account {
+        Some(account) => tracing::info!(
+            request_id,
+            protocol = tracing::field::display(protocol),
+            route = %super::common::live_route_label(route_backend),
+            account = %account,
+            target = %target,
+            timeout_ms = timeout.as_millis().try_into().unwrap_or(u64::MAX),
+            "http upstream connect start"
+        ),
+        None => tracing::info!(
+            request_id,
+            protocol = tracing::field::display(protocol),
+            route = %super::common::live_route_label(route_backend),
+            target = %target,
+            timeout_ms = timeout.as_millis().try_into().unwrap_or(u64::MAX),
+            "http upstream connect start"
+        ),
+    }
 }
 
 fn log_upstream_connect_success(
@@ -2434,6 +2515,43 @@ mod tests {
         Ok(HttpBodyTestResult { body })
     }
 
+    pub async fn proxy_http_live_vpn_forward_for_test() -> Result<HttpBodyTestResult, String> {
+        let upstream = spawn_http_upstream().await;
+        let session = smelly_connect::test_support::session::session_with_domain_match(
+            "vpn.test",
+            std::net::Ipv4Addr::LOCALHOST,
+        );
+        let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+        let addr = spawn_single_live_client_proxy(pool, DEFAULT_CONNECT_TIMEOUT).await?;
+
+        let mut client = TcpStream::connect(addr)
+            .await
+            .map_err(|err| err.to_string())?;
+        client
+            .write_all(
+                format!(
+                    "GET http://vpn.test:{}/health HTTP/1.1\r\nHost: vpn.test:{}\r\nConnection: close\r\n\r\n",
+                    upstream.port(),
+                    upstream.port()
+                )
+                .as_bytes(),
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .map_err(|err| err.to_string())?;
+        let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+        let body = response
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
+        Ok(HttpBodyTestResult { body })
+    }
+
     pub async fn proxy_connect_direct_for_test() -> Result<ConnectProxyTestResult, String> {
         let upstream = spawn_echo_upstream().await;
         let session =
@@ -2448,6 +2566,55 @@ mod tests {
             .write_all(
                 format!(
                     "CONNECT example.test:{} HTTP/1.1\r\nHost: example.test:{}\r\nConnection: close\r\n\r\n",
+                    upstream.port(),
+                    upstream.port()
+                )
+                .as_bytes(),
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut header = [0_u8; 128];
+        let n = client
+            .read(&mut header)
+            .await
+            .map_err(|err| err.to_string())?;
+        let header = String::from_utf8_lossy(&header[..n]);
+        if !header.starts_with("HTTP/1.1 200") {
+            return Err(format!("unexpected connect response: {header}"));
+        }
+
+        client
+            .write_all(b"ping")
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut echoed = [0_u8; 4];
+        client
+            .read_exact(&mut echoed)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(ConnectProxyTestResult {
+            account_name: "acct-01".to_string(),
+            echoed_bytes: echoed.to_vec(),
+        })
+    }
+
+    pub async fn proxy_http_live_vpn_connect_for_test() -> Result<ConnectProxyTestResult, String> {
+        let upstream = spawn_echo_upstream().await;
+        let session = smelly_connect::test_support::session::session_with_domain_match(
+            "vpn.test",
+            std::net::Ipv4Addr::LOCALHOST,
+        );
+        let pool = SessionPool::from_live_sessions_for_test(vec![("acct-01", session)]).await;
+        let addr = spawn_single_live_client_proxy(pool, DEFAULT_CONNECT_TIMEOUT).await?;
+
+        let mut client = TcpStream::connect(addr)
+            .await
+            .map_err(|err| err.to_string())?;
+        client
+            .write_all(
+                format!(
+                    "CONNECT vpn.test:{} HTTP/1.1\r\nHost: vpn.test:{}\r\nConnection: close\r\n\r\n",
                     upstream.port(),
                     upstream.port()
                 )
@@ -3280,19 +3447,20 @@ mod tests {
                 Ok(target) => target,
                 Err(_) => return empty_response(StatusCode::BAD_REQUEST),
             };
-            tracing::info!(
-                request_id,
-                protocol = tracing::field::display("connect"),
-                target = %target,
-                account = %account_name,
-                "request accepted"
+            log_request_accepted(
+                Some(request_id),
+                "connect",
+                &target,
+                LiveRouteBackend::Vpn,
+                &account_name,
             );
             let on_upgrade = upgrade::on(request);
             let connect_started = Instant::now();
             log_upstream_connect_start(
                 request_id,
                 "connect",
-                &account_name,
+                LiveRouteBackend::Vpn,
+                Some(&account_name),
                 &target,
                 connect_timeout,
             );
@@ -3355,12 +3523,12 @@ mod tests {
             Ok(target) => target,
             Err(_) => return empty_response(StatusCode::BAD_REQUEST),
         };
-        tracing::info!(
-            request_id,
-            protocol = tracing::field::display("http"),
-            target = %target,
-            account = %account_name,
-            "request accepted"
+        log_request_accepted(
+            Some(request_id),
+            "http",
+            &target,
+            LiveRouteBackend::Vpn,
+            &account_name,
         );
 
         let wants_keep_alive = client_requests_keep_alive(&request);
@@ -3372,7 +3540,8 @@ mod tests {
                 log_upstream_connect_start(
                     request_id,
                     "http",
-                    &account_name,
+                    LiveRouteBackend::Vpn,
+                    Some(&account_name),
                     &target,
                     connect_timeout,
                 );
