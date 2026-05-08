@@ -22,4 +22,6 @@ smoltcp = { version = "0.13", default-features = false, features = ["std", "asyn
 tracing = "0.1"
 
 [dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = "0.26"
 trybuild = "1"

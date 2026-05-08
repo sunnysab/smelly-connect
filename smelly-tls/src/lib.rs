@@ -1,5 +1,7 @@
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
+#[cfg(feature = "tokio")]
+use std::sync::OnceLock;
 
 #[cfg(feature = "tokio")]
 use der::{Decode, Encode};
@@ -8,6 +10,12 @@ use md5::Md5;
 use rc4::{KeyInit as Rc4KeyInit, Rc4, StreamCipher};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
+#[cfg(feature = "tokio")]
+use rustls::RootCertStore;
+#[cfg(feature = "tokio")]
+use rustls::client::{verify_server_cert_signed_by_trust_anchor, verify_server_name};
+#[cfg(feature = "tokio")]
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use sha1::Sha1;
 #[cfg(feature = "tokio")]
 use x509_cert::Certificate;
@@ -21,6 +29,14 @@ pub const EASYCONNECT_CLIENT_RANDOM: [u8; 32] = [0x41; 32];
 pub const EASYCONNECT_SESSION_ID: [u8; 32] =
     *b"L3IP\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 pub type Tls10KeyBlockParts = ([u8; 20], [u8; 20], [u8; 16], [u8; 16]);
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ServerCertPolicy {
+    #[default]
+    Verify,
+    VerifyWithCustomRoots(Vec<Vec<u8>>),
+    InsecureSkipVerify,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientHelloConfig {
@@ -78,6 +94,95 @@ pub fn easyconnect_client_hello(cipher_suite: u16) -> ClientHelloConfig {
         .with_compression_methods(vec![1, 0])
 }
 
+#[cfg(feature = "tokio")]
+fn default_server_name_for_addr(addr: SocketAddr) -> String {
+    addr.ip().to_string()
+}
+
+#[cfg(feature = "tokio")]
+fn clone_io_error(err: &io::Error) -> io::Error {
+    io::Error::new(err.kind(), err.to_string())
+}
+
+#[cfg(feature = "tokio")]
+fn default_root_store() -> io::Result<RootCertStore> {
+    static ROOTS: OnceLock<io::Result<RootCertStore>> = OnceLock::new();
+    match ROOTS.get_or_init(|| {
+        let mut roots = RootCertStore::empty();
+        let native = rustls_native_certs::load_native_certs();
+        let native_certs = native.certs;
+        let _ = roots.add_parsable_certificates(native_certs);
+        if roots.is_empty() {
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
+        if roots.is_empty() {
+            return Err(io::Error::other("no trusted root certificates available"));
+        }
+        Ok(roots)
+    }) {
+        Ok(roots) => Ok(roots.clone()),
+        Err(err) => Err(clone_io_error(err)),
+    }
+}
+
+#[cfg(feature = "tokio")]
+fn root_store_for_policy(policy: &ServerCertPolicy) -> io::Result<Option<RootCertStore>> {
+    match policy {
+        ServerCertPolicy::Verify => default_root_store().map(Some),
+        ServerCertPolicy::VerifyWithCustomRoots(custom_roots) => {
+            let mut roots = RootCertStore::empty();
+            let (added, _) = roots
+                .add_parsable_certificates(custom_roots.iter().cloned().map(CertificateDer::from));
+            if added == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "custom root store is empty or invalid",
+                ));
+            }
+            Ok(Some(roots))
+        }
+        ServerCertPolicy::InsecureSkipVerify => Ok(None),
+    }
+}
+
+#[cfg(feature = "tokio")]
+fn verify_server_certificate_chain(
+    certificate_chain: &[Vec<u8>],
+    server_name: &str,
+    policy: &ServerCertPolicy,
+) -> io::Result<()> {
+    let Some(roots) = root_store_for_policy(policy)? else {
+        return Ok(());
+    };
+
+    let leaf = certificate_chain
+        .first()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing server certificate"))?;
+    let leaf = CertificateDer::from(leaf.clone());
+    let intermediates = certificate_chain[1..]
+        .iter()
+        .cloned()
+        .map(CertificateDer::from)
+        .collect::<Vec<_>>();
+    let parsed = rustls::server::ParsedCertificate::try_from(&leaf)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    let server_name = ServerName::try_from(server_name.to_owned())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid server name"))?;
+    let supported_algs = rustls::crypto::ring::default_provider()
+        .signature_verification_algorithms
+        .all;
+    verify_server_cert_signed_by_trust_anchor(
+        &parsed,
+        &roots,
+        &intermediates,
+        UnixTime::now(),
+        supported_algs,
+    )
+    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    verify_server_name(&parsed, &server_name)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
+}
+
 pub fn build_client_hello_record(config: &ClientHelloConfig) -> Vec<u8> {
     let mut body = Vec::with_capacity(128);
     body.extend_from_slice(&TLS11.to_be_bytes());
@@ -129,6 +234,7 @@ pub async fn connect_hello_probe(addr: SocketAddr, config: &ClientHelloConfig) -
 }
 
 #[cfg(feature = "tokio")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerHelloResult {
     pub server_session_id: [u8; 32],
     pub derived_token: [u8; 48],
@@ -180,21 +286,33 @@ pub async fn connect_and_read_server_hello(
     config: &ClientHelloConfig,
     twfid: &str,
 ) -> io::Result<ServerHelloResult> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    connect_and_read_server_hello_for_server(
+        addr,
+        config,
+        &default_server_name_for_addr(addr),
+        twfid,
+        &ServerCertPolicy::Verify,
+    )
+    .await
+}
+
+#[cfg(feature = "tokio")]
+pub async fn connect_and_read_server_hello_for_server(
+    addr: SocketAddr,
+    config: &ClientHelloConfig,
+    server_name: &str,
+    twfid: &str,
+    policy: &ServerCertPolicy,
+) -> io::Result<ServerHelloResult> {
+    use tokio::io::AsyncWriteExt;
 
     let mut stream = tokio::net::TcpStream::connect(addr).await?;
     let hello = build_client_hello_record(config);
     stream.write_all(&hello).await?;
 
-    let mut header = [0_u8; 5];
-    stream.read_exact(&mut header).await?;
-    let len = u16::from_be_bytes([header[3], header[4]]) as usize;
-    let mut body = vec![0_u8; len];
-    stream.read_exact(&mut body).await?;
-    let record = [header.to_vec(), body].concat();
-
-    let server_session_id = parse_server_hello_session_id(&record)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid server hello"))?;
+    let (_flight_record, server_flight) = read_server_flight(&mut stream).await?;
+    verify_server_certificate_chain(&server_flight.certificate_chain, server_name, policy)?;
+    let server_session_id = server_flight.server_hello.session_id;
     let derived_token = derive_easyconnect_token(&server_session_id, twfid)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid token shape"))?;
 
@@ -206,10 +324,32 @@ pub async fn connect_and_read_server_hello(
 
 #[cfg(feature = "tokio")]
 pub async fn bootstrap_easyconnect_token(addr: SocketAddr, twfid: &str) -> io::Result<[u8; 48]> {
+    bootstrap_easyconnect_token_for_server(
+        addr,
+        &default_server_name_for_addr(addr),
+        twfid,
+        &ServerCertPolicy::Verify,
+    )
+    .await
+}
+
+#[cfg(feature = "tokio")]
+pub async fn bootstrap_easyconnect_token_for_server(
+    addr: SocketAddr,
+    server_name: &str,
+    twfid: &str,
+    policy: &ServerCertPolicy,
+) -> io::Result<[u8; 48]> {
     let mut last_err = None;
     for cipher_suite in easyconnect_cipher_suite_attempts(None) {
-        match connect_and_read_server_hello(addr, &easyconnect_client_hello(cipher_suite), twfid)
-            .await
+        match connect_and_read_server_hello_for_server(
+            addr,
+            &easyconnect_client_hello(cipher_suite),
+            server_name,
+            twfid,
+            policy,
+        )
+        .await
         {
             Ok(result) => return Ok(result.derived_token),
             Err(err) => last_err = Some(err),
@@ -250,6 +390,22 @@ pub async fn connect_tunnel(
     addr: SocketAddr,
     config: &ClientHelloConfig,
 ) -> io::Result<TunnelConnection> {
+    connect_tunnel_for_server(
+        addr,
+        config,
+        &default_server_name_for_addr(addr),
+        &ServerCertPolicy::Verify,
+    )
+    .await
+}
+
+#[cfg(feature = "tokio")]
+pub async fn connect_tunnel_for_server(
+    addr: SocketAddr,
+    config: &ClientHelloConfig,
+    server_name: &str,
+    policy: &ServerCertPolicy,
+) -> io::Result<TunnelConnection> {
     use tokio::io::AsyncWriteExt;
 
     let mut stream = tokio::net::TcpStream::connect(addr).await?;
@@ -268,6 +424,7 @@ pub async fn connect_tunnel(
             ),
         )
     })?;
+    verify_server_certificate_chain(&server_flight.certificate_chain, server_name, policy)?;
     let public_key_der = server_public_key_der(cert)?;
 
     let premaster = build_premaster_secret([0x33; 46]);
@@ -344,8 +501,24 @@ pub async fn connect_easyconnect_tunnel(
     addr: SocketAddr,
     cipher_suite: u16,
 ) -> io::Result<TunnelConnection> {
+    connect_easyconnect_tunnel_for_server(
+        addr,
+        &default_server_name_for_addr(addr),
+        cipher_suite,
+        &ServerCertPolicy::Verify,
+    )
+    .await
+}
+
+#[cfg(feature = "tokio")]
+pub async fn connect_easyconnect_tunnel_for_server(
+    addr: SocketAddr,
+    server_name: &str,
+    cipher_suite: u16,
+    policy: &ServerCertPolicy,
+) -> io::Result<TunnelConnection> {
     let hello = easyconnect_client_hello(cipher_suite);
-    connect_tunnel(addr, &hello).await
+    connect_tunnel_for_server(addr, &hello, server_name, policy).await
 }
 
 #[cfg(feature = "tokio")]

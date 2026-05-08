@@ -1,4 +1,5 @@
 #[path = "../../test-support/legacy_tls.rs"]
+#[allow(dead_code)]
 mod legacy_tls;
 
 use smelly_tls::{
@@ -15,6 +16,11 @@ const CLIENT_SESSION_ID: [u8; 32] = [
 ];
 const SERVER_RANDOM: [u8; 32] = [0x22; 32];
 const SERVER_SESSION_ID: [u8; 32] = *b"fedcba9876543210fedcba9876543210";
+
+#[cfg(feature = "tokio")]
+fn test_policy() -> smelly_tls::ServerCertPolicy {
+    smelly_tls::ServerCertPolicy::VerifyWithCustomRoots(vec![legacy_tls::root_certificate_der()])
+}
 
 #[test]
 fn client_and_server_finished_roundtrip() {
@@ -212,13 +218,13 @@ async fn async_minimal_handshake_completes_against_mock_server() {
     });
 
     let config = ClientHelloConfig::new(CLIENT_RANDOM, CLIENT_SESSION_ID);
-    let result = smelly_tls::complete_minimal_handshake(addr, &config)
+    let conn = smelly_tls::connect_tunnel_for_server(addr, &config, "localhost", &test_policy())
         .await
         .unwrap();
     server.await.unwrap();
 
-    assert_eq!(result.server_hello.session_id, SERVER_SESSION_ID);
-    assert_eq!(result.master_secret.len(), 48);
+    assert_eq!(conn.server_hello.session_id, SERVER_SESSION_ID);
+    assert_eq!(conn.master_secret.len(), 48);
 }
 
 #[cfg(feature = "tokio")]
@@ -316,7 +322,10 @@ async fn async_established_connection_exchanges_application_data() {
     });
 
     let config = ClientHelloConfig::new(CLIENT_RANDOM, CLIENT_SESSION_ID);
-    let mut conn = smelly_tls::connect_tunnel(addr, &config).await.unwrap();
+    let mut conn =
+        smelly_tls::connect_tunnel_for_server(addr, &config, "localhost", &test_policy())
+            .await
+            .unwrap();
     conn.send_application_data(b"ping").await.unwrap();
     let response = conn.read_application_data().await.unwrap();
     assert_eq!(response, b"pong");

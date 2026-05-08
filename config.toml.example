@@ -2,6 +2,9 @@
 
 [vpn]
 server = "vpn1.sit.edu.cn"
+# Explicitly bypass server certificate validation for both control-plane HTTPS
+# and legacy TLS bootstrap/tunnel flows. Defaults to false.
+insecure_skip_verify = false
 # Explicitly disable all session/pool ICMP probing when false.
 enable_icmp_keepalive = true
 # Optional session-level keepalive target used by the CLI pool/service layer.

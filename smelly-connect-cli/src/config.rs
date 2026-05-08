@@ -28,6 +28,8 @@ pub struct VpnConfig {
     #[serde(default = "default_enable_icmp_keepalive")]
     pub enable_icmp_keepalive: bool,
     pub default_keepalive_host: Option<String>,
+    #[serde(default)]
+    pub insecure_skip_verify: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -238,6 +240,14 @@ impl LoggingLevel {
 }
 
 impl AppConfig {
+    pub fn server_cert_policy(&self) -> smelly_connect::ServerCertPolicy {
+        if self.vpn.insecure_skip_verify {
+            smelly_connect::ServerCertPolicy::InsecureSkipVerify
+        } else {
+            smelly_connect::ServerCertPolicy::Verify
+        }
+    }
+
     pub fn icmp_keepalive_target(&self) -> Option<&str> {
         if !self.vpn.enable_icmp_keepalive {
             return None;

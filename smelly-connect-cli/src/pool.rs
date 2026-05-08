@@ -202,6 +202,7 @@ pub struct SessionPool {
     allow_all_routes: bool,
     keepalive_target: Option<String>,
     server: Option<String>,
+    server_cert_policy: smelly_connect::ServerCertPolicy,
     allow_request_triggered_probe: bool,
     min_pool_size: usize,
 }
@@ -400,6 +401,7 @@ impl SessionPool {
             allow_all_routes: self.allow_all_routes,
             keepalive_target: self.keepalive_target.clone(),
             server: self.server.clone(),
+            server_cert_policy: self.server_cert_policy.clone(),
             allow_request_triggered_probe: self.allow_request_triggered_probe,
             min_pool_size: self.min_pool_size,
         }
@@ -491,6 +493,7 @@ impl SessionPool {
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
+            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
             allow_request_triggered_probe: true,
             min_pool_size: 0,
         }
@@ -536,6 +539,7 @@ impl SessionPool {
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
+            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
             allow_request_triggered_probe: true,
             min_pool_size: 0,
         }
@@ -593,6 +597,7 @@ impl SessionPool {
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
+            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
             allow_request_triggered_probe: true,
             min_pool_size: 0,
         }
@@ -653,6 +658,7 @@ impl SessionPool {
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
+            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
             allow_request_triggered_probe: true,
             min_pool_size: 0,
         }
@@ -721,6 +727,7 @@ impl SessionPool {
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
+            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
             allow_request_triggered_probe: true,
             min_pool_size: 0,
         };
@@ -804,6 +811,7 @@ impl SessionPool {
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
+            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
             allow_request_triggered_probe: true,
             min_pool_size: 0,
         }
@@ -850,6 +858,7 @@ impl SessionPool {
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
+            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
             allow_request_triggered_probe: true,
             min_pool_size: 0,
         }
@@ -893,6 +902,7 @@ impl SessionPool {
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
+            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
             allow_request_triggered_probe: true,
             min_pool_size: 0,
         }
@@ -947,6 +957,7 @@ impl SessionPool {
             allow_all_routes: cfg.routing.allow_all,
             keepalive_target,
             server: Some(cfg.vpn.server.clone()),
+            server_cert_policy: cfg.server_cert_policy(),
             allow_request_triggered_probe: cfg.pool.allow_request_triggered_probe,
             min_pool_size: cfg.pool.min_pool_size,
         };
@@ -1439,6 +1450,7 @@ impl SessionPool {
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
+            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
             allow_request_triggered_probe: true,
             min_pool_size: 0,
         }
@@ -1480,6 +1492,7 @@ impl SessionPool {
             allow_all_routes: false,
             keepalive_target: None,
             server: None,
+            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
             allow_request_triggered_probe: true,
             min_pool_size: 0,
         }
@@ -1925,6 +1938,7 @@ impl SessionPool {
                 route_policy: self.route_policy,
                 allow_all_routes: self.allow_all_routes,
                 _keepalive_target: self.keepalive_target.as_deref(),
+                server_cert_policy: self.server_cert_policy.clone(),
                 #[cfg(any(test, debug_assertions))]
                 test_connect_hook,
             },
@@ -2238,6 +2252,7 @@ impl SessionPool {
                 route_policy: self.route_policy,
                 allow_all_routes: self.allow_all_routes,
                 _keepalive_target: self.keepalive_target.as_deref(),
+                server_cert_policy: self.server_cert_policy.clone(),
                 #[cfg(any(test, debug_assertions))]
                 test_connect_hook: current_test_connect_hook(),
             },
@@ -2274,6 +2289,7 @@ struct ConnectAccountContext<'a> {
     route_policy: RoutePolicy,
     allow_all_routes: bool,
     _keepalive_target: Option<&'a str>,
+    server_cert_policy: smelly_connect::ServerCertPolicy,
     #[cfg(any(test, debug_assertions))]
     test_connect_hook: Option<TestConnectHook>,
 }
@@ -2298,6 +2314,7 @@ async fn connect_account(
 
     let client = EasyConnectClient::builder(server.to_string())
         .credentials(account.username.clone(), account.password.clone())
+        .with_server_cert_policy(ctx.server_cert_policy)
         .with_captcha_handler(CaptchaHandler::from_async(|_, _| async move {
             Err(CaptchaError::new(
                 "captcha callback not configured for smelly-connect-cli",

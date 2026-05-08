@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use smelly_tls::ServerCertPolicy;
+
 use crate::auth::CaptchaHandler;
 use crate::error::Error;
 use crate::resolver::SessionResolver;
@@ -26,6 +28,7 @@ pub struct EasyConnectConfig {
     pub(crate) captcha_handler: Option<CaptchaHandler>,
     pub(crate) session_factory: Option<Arc<SessionFactory>>,
     pub(crate) session_bootstrap: Option<Arc<SessionBootstrap>>,
+    pub(crate) server_cert_policy: ServerCertPolicy,
     icmp_keepalive: Option<IcmpKeepAliveConfig>,
 }
 
@@ -43,6 +46,7 @@ impl EasyConnectConfig {
             captcha_handler: None,
             session_factory: None,
             session_bootstrap: None,
+            server_cert_policy: ServerCertPolicy::Verify,
             icmp_keepalive: None,
         }
     }
@@ -54,6 +58,20 @@ impl EasyConnectConfig {
 
     pub fn with_captcha_handler(mut self, captcha_handler: CaptchaHandler) -> Self {
         self.captcha_handler = Some(captcha_handler);
+        self
+    }
+
+    pub fn with_server_cert_policy(mut self, server_cert_policy: ServerCertPolicy) -> Self {
+        self.server_cert_policy = server_cert_policy;
+        self
+    }
+
+    pub fn with_insecure_skip_verify(mut self, insecure_skip_verify: bool) -> Self {
+        self.server_cert_policy = if insecure_skip_verify {
+            ServerCertPolicy::InsecureSkipVerify
+        } else {
+            ServerCertPolicy::Verify
+        };
         self
     }
 
@@ -103,6 +121,10 @@ impl EasyConnectConfig {
             .unwrap_or_else(|| format!("https://{}", self.server))
     }
 
+    pub(crate) fn server_cert_policy(&self) -> &ServerCertPolicy {
+        &self.server_cert_policy
+    }
+
     async fn default_bootstrap(
         self,
         state: ControlPlaneState,
@@ -110,25 +132,33 @@ impl EasyConnectConfig {
         let server_addr = crate::auth::control::resolve_server_addr_async(&self.server).await?;
 
         // TLS-based protocol: token derivation → IP request → data tunnels
-        let token =
-            crate::auth::control::request_token_async(&self.server, &state.authorized_twfid)
-                .await?;
-        let (client_ip, request_ip_tunnel) = crate::auth::control::request_ip_via_tunnel_with_conn(
-            server_addr,
-            &token,
-            state.legacy_cipher_hint.as_deref(),
+        let token = crate::auth::control::request_token_async_with_policy(
+            &self.server,
+            &state.authorized_twfid,
+            self.server_cert_policy.clone(),
         )
         .await?;
+        let (client_ip, request_ip_tunnel) =
+            crate::auth::control::request_ip_via_tunnel_with_conn_for_server(
+                &self.server,
+                server_addr,
+                &token,
+                state.legacy_cipher_hint.as_deref(),
+                self.server_cert_policy.clone(),
+            )
+            .await?;
         tracing::info!(%client_ip, "IP assigned via EasyConnect legacy tunnel");
         // IMPORTANT: request_ip_tunnel MUST stay alive — the server requires
         // this connection to remain open for the data tunnels to work.
         // (zju-connect: "Request IP conn CAN NOT be closed, otherwise tx/rx
         // handshake will fail")
-        let device = crate::auth::control::spawn_legacy_packet_device(
+        let device = crate::auth::control::spawn_legacy_packet_device_for_server_with_policy(
+            &self.server,
             server_addr,
             &token,
             client_ip,
             state.legacy_cipher_hint.as_deref(),
+            self.server_cert_policy.clone(),
         )
         .await?;
 

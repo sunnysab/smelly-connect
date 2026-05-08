@@ -29,4 +29,5 @@ pub use runtime::control_plane::{AuthenticatedSessionSeed, run_control_plane};
 pub use runtime::tasks::keepalive::KeepaliveHandle;
 pub use session::EasyConnectSession as Session;
 pub use session::LocalRouteOverrides;
+pub use smelly_tls::ServerCertPolicy;
 pub use target::TargetAddr;

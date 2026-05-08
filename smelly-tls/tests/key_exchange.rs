@@ -1,4 +1,5 @@
 #[path = "../../test-support/legacy_tls.rs"]
+#[allow(dead_code)]
 mod legacy_tls;
 
 #[test]

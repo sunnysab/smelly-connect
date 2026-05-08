@@ -10,6 +10,7 @@ fn parses_sample_config() {
         toml::from_str(include_str!("fixtures/config.sample.toml")).unwrap();
     assert_eq!(cfg.accounts.len(), 2);
     assert_eq!(cfg.pool.min_pool_size, 2);
+    assert!(!cfg.vpn.insecure_skip_verify);
     assert!(cfg.vpn.enable_icmp_keepalive);
     assert_eq!(
         cfg.session_connect_timeout(),
@@ -32,6 +33,42 @@ fn parses_sample_config() {
     assert_eq!(
         cfg.routing.default_action,
         smelly_connect_cli::config::RoutingDefaultAction::Direct
+    );
+}
+
+#[test]
+fn parses_explicit_insecure_skip_verify_flag() {
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+        insecure_skip_verify = true
+
+        [pool]
+        min_pool_size = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+    )
+    .unwrap();
+
+    assert!(cfg.vpn.insecure_skip_verify);
+    assert_eq!(
+        cfg.server_cert_policy(),
+        smelly_connect::ServerCertPolicy::InsecureSkipVerify
     );
 }
 

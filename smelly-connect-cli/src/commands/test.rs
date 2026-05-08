@@ -186,6 +186,7 @@ pub async fn run_legacy_probe_with_config_typed(
         account.username.clone(),
         account.password.clone(),
     )
+    .with_server_cert_policy(config.server_cert_policy())
     .with_captcha_handler(smelly_connect::CaptchaHandler::from_async(
         |_, _| async move {
             Err(smelly_connect::CaptchaError::new(
@@ -197,9 +198,10 @@ pub async fn run_legacy_probe_with_config_typed(
     let state = smelly_connect::run_control_plane(&cfg)
         .await
         .map_err(|err| CliError::Command(format!("{err:?}")))?;
-    let token = smelly_connect::auth::control::request_token_async(
+    let token = smelly_connect::auth::control::request_token_async_with_policy(
         &config.vpn.server,
         &state.authorized_twfid,
+        config.server_cert_policy(),
     )
     .await
     .map_err(|err| CliError::Command(format!("{err:?}")))?;
@@ -216,17 +218,24 @@ pub async fn run_legacy_probe_with_config_typed(
     lines.push(format!("legacy_cipher_hint={hint:?}"));
 
     let preconnect_request_ip = run_probe_step(timeout, async {
-        smelly_connect::auth::control::request_ip_via_tunnel(addr, &token, hint).await
+        smelly_connect::auth::control::request_ip_for_server_with_policy(
+            &config.vpn.server,
+            &token,
+            hint,
+            config.server_cert_policy(),
+        )
+        .await
     })
     .await;
     lines.push(format!("preconnect_request_ip: {preconnect_request_ip}"));
 
     let preconnect_recv = run_probe_step(timeout, async {
-        smelly_connect::auth::control::open_recv_tunnel(
-            addr,
+        smelly_connect::auth::control::open_recv_tunnel_for_server_with_policy(
+            &config.vpn.server,
             &token,
             "10.0.0.8".parse().unwrap(),
             hint,
+            config.server_cert_policy(),
         )
         .await
         .map(|_| "ok".to_string())
@@ -235,11 +244,12 @@ pub async fn run_legacy_probe_with_config_typed(
     lines.push(format!("preconnect_open_recv: {preconnect_recv}"));
 
     let preconnect_send = run_probe_step(timeout, async {
-        smelly_connect::auth::control::open_send_tunnel(
-            addr,
+        smelly_connect::auth::control::open_send_tunnel_for_server_with_policy(
+            &config.vpn.server,
             &token,
             "10.0.0.8".parse().unwrap(),
             hint,
+            config.server_cert_policy(),
         )
         .await
         .map(|_| "ok".to_string())
@@ -248,13 +258,22 @@ pub async fn run_legacy_probe_with_config_typed(
     lines.push(format!("preconnect_open_send: {preconnect_send}"));
 
     let preconnect_hold_request_ip_and_open_recv = run_probe_step(timeout, async {
-        let (ip, _conn) = smelly_connect::auth::control::request_ip_via_tunnel_with_conn_debug(
-            addr, &token, hint,
+        let ip = smelly_connect::auth::control::request_ip_for_server_with_policy(
+            &config.vpn.server,
+            &token,
+            hint,
+            config.server_cert_policy(),
         )
         .await?;
-        smelly_connect::auth::control::open_recv_tunnel(addr, &token, ip, hint)
-            .await
-            .map(|_| format!("ok ip={ip}"))
+        smelly_connect::auth::control::open_recv_tunnel_for_server_with_policy(
+            &config.vpn.server,
+            &token,
+            ip,
+            hint,
+            config.server_cert_policy(),
+        )
+        .await
+        .map(|_| format!("ok ip={ip}"))
     })
     .await;
     lines.push(format!(

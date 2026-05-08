@@ -11,7 +11,7 @@ use super::client::build_reqwest_client;
 use super::types::ControlPlaneState;
 
 pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlaneState, Error> {
-    let client = build_reqwest_client()?;
+    let client = build_reqwest_client(config.server_cert_policy())?;
     let base_url = config.control_base_url();
 
     let login_auth_body = client

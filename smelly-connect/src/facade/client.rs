@@ -2,6 +2,7 @@ use crate::auth::CaptchaHandler;
 use crate::config::EasyConnectConfig;
 use crate::error::{ControlPlaneError, Error};
 use crate::facade::session::Session;
+use smelly_tls::ServerCertPolicy;
 
 pub struct EasyConnectClient {
     config: EasyConnectConfig,
@@ -13,6 +14,7 @@ pub struct EasyConnectClientBuilder {
     password: Option<String>,
     base_url: Option<String>,
     captcha_handler: Option<CaptchaHandler>,
+    server_cert_policy: ServerCertPolicy,
 }
 
 impl EasyConnectClient {
@@ -23,6 +25,7 @@ impl EasyConnectClient {
             password: None,
             base_url: None,
             captcha_handler: None,
+            server_cert_policy: ServerCertPolicy::Verify,
         }
     }
 
@@ -48,6 +51,20 @@ impl EasyConnectClientBuilder {
         self
     }
 
+    pub fn with_server_cert_policy(mut self, server_cert_policy: ServerCertPolicy) -> Self {
+        self.server_cert_policy = server_cert_policy;
+        self
+    }
+
+    pub fn with_insecure_skip_verify(mut self, insecure_skip_verify: bool) -> Self {
+        self.server_cert_policy = if insecure_skip_verify {
+            ServerCertPolicy::InsecureSkipVerify
+        } else {
+            ServerCertPolicy::Verify
+        };
+        self
+    }
+
     pub fn build(self) -> Result<EasyConnectClient, Error> {
         let username = self.username.ok_or_else(|| {
             Error::ControlPlane(ControlPlaneError::AuthFlowFailed(
@@ -60,7 +77,8 @@ impl EasyConnectClientBuilder {
             ))
         })?;
 
-        let mut config = EasyConnectConfig::new(self.server, username, password);
+        let mut config = EasyConnectConfig::new(self.server, username, password)
+            .with_server_cert_policy(self.server_cert_policy);
         if let Some(base_url) = self.base_url {
             config = config.with_base_url(base_url);
         }

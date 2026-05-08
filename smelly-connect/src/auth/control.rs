@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 
-use smelly_tls::TunnelConnection;
+use smelly_tls::{ServerCertPolicy, TunnelConnection};
 use tracing::debug;
 
 use crate::config::EasyConnectConfig;
@@ -19,6 +19,14 @@ pub(crate) async fn run_control_plane(
 /// Legacy: Derive token from TLS ServerHello SessionID.
 /// Used when sslctx is not available (old protocol path).
 pub fn request_token(server: &str, twfid: &str) -> Result<crate::protocol::DerivedToken, Error> {
+    request_token_with_policy(server, twfid, ServerCertPolicy::Verify)
+}
+
+pub fn request_token_with_policy(
+    server: &str,
+    twfid: &str,
+    server_cert_policy: ServerCertPolicy,
+) -> Result<crate::protocol::DerivedToken, Error> {
     let addr = resolve_server_addr(server)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -26,15 +34,34 @@ pub fn request_token(server: &str, twfid: &str) -> Result<crate::protocol::Deriv
         .map_err(|err| {
             Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
         })?;
-    runtime.block_on(request_token_for_addr(addr, twfid))
+    runtime.block_on(request_token_for_addr(
+        addr,
+        &configured_server_identity(server),
+        twfid,
+        &server_cert_policy,
+    ))
 }
 
 pub async fn request_token_async(
     server: &str,
     twfid: &str,
 ) -> Result<crate::protocol::DerivedToken, Error> {
+    request_token_async_with_policy(server, twfid, ServerCertPolicy::Verify).await
+}
+
+pub async fn request_token_async_with_policy(
+    server: &str,
+    twfid: &str,
+    server_cert_policy: ServerCertPolicy,
+) -> Result<crate::protocol::DerivedToken, Error> {
     let addr = resolve_server_addr_async(server).await?;
-    request_token_for_addr(addr, twfid).await
+    request_token_for_addr(
+        addr,
+        &configured_server_identity(server),
+        twfid,
+        &server_cert_policy,
+    )
+    .await
 }
 
 pub async fn request_ip_via_tunnel(
@@ -42,7 +69,32 @@ pub async fn request_ip_via_tunnel(
     token: &crate::protocol::DerivedToken,
     legacy_cipher_hint: Option<&str>,
 ) -> Result<Ipv4Addr, Error> {
-    let (ip, _conn) = request_ip_via_tunnel_with_conn(addr, token, legacy_cipher_hint).await?;
+    let (ip, _conn) = request_ip_via_tunnel_with_conn_for_identity(
+        addr,
+        &addr.ip().to_string(),
+        token,
+        legacy_cipher_hint,
+        &ServerCertPolicy::Verify,
+    )
+    .await?;
+    Ok(ip)
+}
+
+pub async fn request_ip_for_server_with_policy(
+    server: &str,
+    token: &crate::protocol::DerivedToken,
+    legacy_cipher_hint: Option<&str>,
+    server_cert_policy: ServerCertPolicy,
+) -> Result<Ipv4Addr, Error> {
+    let addr = resolve_server_addr_async(server).await?;
+    let (ip, _conn) = request_ip_via_tunnel_with_conn_for_server(
+        server,
+        addr,
+        token,
+        legacy_cipher_hint,
+        server_cert_policy,
+    )
+    .await?;
     Ok(ip)
 }
 
@@ -51,7 +103,14 @@ pub async fn request_ip_via_tunnel_with_conn_debug(
     token: &crate::protocol::DerivedToken,
     legacy_cipher_hint: Option<&str>,
 ) -> Result<(Ipv4Addr, TunnelConnection), Error> {
-    request_ip_via_tunnel_with_conn(addr, token, legacy_cipher_hint).await
+    request_ip_via_tunnel_with_conn_for_identity(
+        addr,
+        &addr.ip().to_string(),
+        token,
+        legacy_cipher_hint,
+        &ServerCertPolicy::Verify,
+    )
+    .await
 }
 
 pub(crate) async fn request_ip_via_tunnel_with_conn(
@@ -59,20 +118,31 @@ pub(crate) async fn request_ip_via_tunnel_with_conn(
     token: &crate::protocol::DerivedToken,
     legacy_cipher_hint: Option<&str>,
 ) -> Result<(Ipv4Addr, TunnelConnection), Error> {
-    let request_ip = crate::protocol::build_request_ip_message(token);
-    let mut conn = connect_legacy_tunnel(addr, legacy_cipher_hint).await?;
-    conn.send_application_data(&request_ip)
-        .await
-        .map_err(|err| {
-            Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
-        })?;
-    let reply = conn.read_application_data().await.map_err(|err| {
-        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
-    })?;
-    let ip = crate::protocol::parse_assigned_ip_reply(&reply).map_err(|err| {
-        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!("{err:?}")))
-    })?;
-    Ok((ip, conn))
+    request_ip_via_tunnel_with_conn_for_identity(
+        addr,
+        &addr.ip().to_string(),
+        token,
+        legacy_cipher_hint,
+        &ServerCertPolicy::Verify,
+    )
+    .await
+}
+
+pub(crate) async fn request_ip_via_tunnel_with_conn_for_server(
+    server: &str,
+    addr: SocketAddr,
+    token: &crate::protocol::DerivedToken,
+    legacy_cipher_hint: Option<&str>,
+    server_cert_policy: ServerCertPolicy,
+) -> Result<(Ipv4Addr, TunnelConnection), Error> {
+    request_ip_via_tunnel_with_conn_for_identity(
+        addr,
+        &configured_server_identity(server),
+        token,
+        legacy_cipher_hint,
+        &server_cert_policy,
+    )
+    .await
 }
 
 pub async fn request_ip_for_server(
@@ -93,9 +163,30 @@ pub async fn open_recv_tunnel(
 ) -> Result<TunnelConnection, Error> {
     open_stream_tunnel(
         addr,
+        &addr.ip().to_string(),
         crate::protocol::build_recv_handshake(token, client_ip),
         0x01,
         legacy_cipher_hint,
+        &ServerCertPolicy::Verify,
+    )
+    .await
+}
+
+pub async fn open_recv_tunnel_for_server_with_policy(
+    server: &str,
+    token: &crate::protocol::DerivedToken,
+    client_ip: Ipv4Addr,
+    legacy_cipher_hint: Option<&str>,
+    server_cert_policy: ServerCertPolicy,
+) -> Result<TunnelConnection, Error> {
+    let addr = resolve_server_addr_async(server).await?;
+    open_stream_tunnel(
+        addr,
+        &configured_server_identity(server),
+        crate::protocol::build_recv_handshake(token, client_ip),
+        0x01,
+        legacy_cipher_hint,
+        &server_cert_policy,
     )
     .await
 }
@@ -108,9 +199,30 @@ pub async fn open_send_tunnel(
 ) -> Result<TunnelConnection, Error> {
     open_stream_tunnel(
         addr,
+        &addr.ip().to_string(),
         crate::protocol::build_send_handshake(token, client_ip),
         0x02,
         legacy_cipher_hint,
+        &ServerCertPolicy::Verify,
+    )
+    .await
+}
+
+pub async fn open_send_tunnel_for_server_with_policy(
+    server: &str,
+    token: &crate::protocol::DerivedToken,
+    client_ip: Ipv4Addr,
+    legacy_cipher_hint: Option<&str>,
+    server_cert_policy: ServerCertPolicy,
+) -> Result<TunnelConnection, Error> {
+    let addr = resolve_server_addr_async(server).await?;
+    open_stream_tunnel(
+        addr,
+        &configured_server_identity(server),
+        crate::protocol::build_send_handshake(token, client_ip),
+        0x02,
+        legacy_cipher_hint,
+        &server_cert_policy,
     )
     .await
 }
@@ -124,6 +236,36 @@ pub async fn spawn_legacy_packet_device(
     let recv = open_recv_tunnel(addr, token, client_ip, legacy_cipher_hint).await?;
     let send = open_send_tunnel(addr, token, client_ip, legacy_cipher_hint).await?;
 
+    packet_device_from_tunnels(recv, send)
+}
+
+pub async fn spawn_legacy_packet_device_for_server_with_policy(
+    server: &str,
+    addr: SocketAddr,
+    token: &crate::protocol::DerivedToken,
+    client_ip: Ipv4Addr,
+    legacy_cipher_hint: Option<&str>,
+    server_cert_policy: ServerCertPolicy,
+) -> Result<PacketDevice, Error> {
+    let server_identity = configured_server_identity(server);
+    let recv = open_stream_tunnel(
+        addr,
+        &server_identity,
+        crate::protocol::build_recv_handshake(token, client_ip),
+        0x01,
+        legacy_cipher_hint,
+        &server_cert_policy,
+    )
+    .await?;
+    let send = open_stream_tunnel(
+        addr,
+        &server_identity,
+        crate::protocol::build_send_handshake(token, client_ip),
+        0x02,
+        legacy_cipher_hint,
+        &server_cert_policy,
+    )
+    .await?;
     packet_device_from_tunnels(recv, send)
 }
 
@@ -226,11 +368,14 @@ pub(crate) async fn resolve_server_addr_async(server: &str) -> Result<SocketAddr
 /// Legacy: Open a TLS tunnel with a handshake message and validate reply type.
 async fn open_stream_tunnel(
     addr: SocketAddr,
+    server_name: &str,
     handshake: Vec<u8>,
     expected_reply_type: u8,
     legacy_cipher_hint: Option<&str>,
+    server_cert_policy: &ServerCertPolicy,
 ) -> Result<TunnelConnection, Error> {
-    let mut conn = connect_legacy_tunnel(addr, legacy_cipher_hint).await?;
+    let mut conn =
+        connect_legacy_tunnel(addr, server_name, legacy_cipher_hint, server_cert_policy).await?;
     conn.send_application_data(&handshake)
         .await
         .map_err(|err| {
@@ -252,11 +397,20 @@ async fn open_stream_tunnel(
 
 async fn connect_legacy_tunnel(
     addr: SocketAddr,
+    server_name: &str,
     legacy_cipher_hint: Option<&str>,
+    server_cert_policy: &ServerCertPolicy,
 ) -> Result<TunnelConnection, Error> {
     let mut last_err = None;
     for cipher_suite in crate::kernel::tunnel::cipher_suite_attempts(legacy_cipher_hint) {
-        match smelly_tls::connect_easyconnect_tunnel(addr, cipher_suite).await {
+        match smelly_tls::connect_easyconnect_tunnel_for_server(
+            addr,
+            server_name,
+            cipher_suite,
+            server_cert_policy,
+        )
+        .await
+        {
             Ok(conn) => return Ok(conn),
             Err(err) => last_err = Some(err.to_string()),
         }
@@ -271,12 +425,59 @@ async fn connect_legacy_tunnel(
 
 async fn request_token_for_addr(
     addr: SocketAddr,
+    server_name: &str,
     twfid: &str,
+    server_cert_policy: &ServerCertPolicy,
 ) -> Result<crate::protocol::DerivedToken, Error> {
-    let derived = smelly_tls::bootstrap_easyconnect_token(addr, twfid)
+    let derived = smelly_tls::bootstrap_easyconnect_token_for_server(
+        addr,
+        server_name,
+        twfid,
+        server_cert_policy,
+    )
+    .await
+    .map_err(|err| {
+        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
+    })?;
+    Ok(crate::protocol::DerivedToken(derived))
+}
+
+async fn request_ip_via_tunnel_with_conn_for_identity(
+    addr: SocketAddr,
+    server_name: &str,
+    token: &crate::protocol::DerivedToken,
+    legacy_cipher_hint: Option<&str>,
+    server_cert_policy: &ServerCertPolicy,
+) -> Result<(Ipv4Addr, TunnelConnection), Error> {
+    let request_ip = crate::protocol::build_request_ip_message(token);
+    let mut conn =
+        connect_legacy_tunnel(addr, server_name, legacy_cipher_hint, server_cert_policy).await?;
+    conn.send_application_data(&request_ip)
         .await
         .map_err(|err| {
             Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
         })?;
-    Ok(crate::protocol::DerivedToken(derived))
+    let reply = conn.read_application_data().await.map_err(|err| {
+        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
+    })?;
+    let ip = crate::protocol::parse_assigned_ip_reply(&reply).map_err(|err| {
+        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!("{err:?}")))
+    })?;
+    Ok((ip, conn))
+}
+
+fn configured_server_identity(server: &str) -> String {
+    if let Some(rest) = server.strip_prefix('[')
+        && let Some((host, _)) = rest.split_once(']')
+    {
+        return host.to_string();
+    }
+    if let Some((host, port)) = server.rsplit_once(':')
+        && !host.contains(':')
+        && !port.is_empty()
+        && port.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return host.to_string();
+    }
+    server.to_string()
 }

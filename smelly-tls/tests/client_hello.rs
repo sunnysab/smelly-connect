@@ -1,3 +1,7 @@
+#[path = "../../test-support/legacy_tls.rs"]
+#[allow(dead_code)]
+mod legacy_tls;
+
 use std::io::Read;
 use std::net::TcpListener;
 use std::thread;
@@ -5,6 +9,11 @@ use std::thread;
 use smelly_tls::{ClientHelloConfig, build_client_hello_record, connect_probe};
 
 const EXPECTED_SESSION_ID: [u8; 32] = smelly_tls::EASYCONNECT_SESSION_ID;
+
+#[cfg(feature = "tokio")]
+fn test_policy() -> smelly_tls::ServerCertPolicy {
+    smelly_tls::ServerCertPolicy::VerifyWithCustomRoots(vec![legacy_tls::root_certificate_der()])
+}
 
 #[test]
 fn client_hello_record_matches_easyconnect_shape() {
@@ -111,6 +120,7 @@ async fn async_read_server_hello_extracts_session_id_and_derives_token() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server_session_id = *b"0123456789abcdef0123456789abcdef";
+    let cert_der = legacy_tls::server_certificate_der();
 
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -123,16 +133,27 @@ async fn async_read_server_hello_extracts_session_id_and_derives_token() {
         tokio::io::AsyncReadExt::read_exact(&mut stream, &mut body)
             .await
             .unwrap();
-        let server_hello = build_server_hello_record(server_session_id);
-        tokio::io::AsyncWriteExt::write_all(&mut stream, &server_hello)
+        let server_flight = legacy_tls::build_server_flight_record(
+            [0x22; 32],
+            server_session_id,
+            &cert_der,
+            smelly_tls::TLS_RSA_WITH_RC4_128_SHA,
+        );
+        tokio::io::AsyncWriteExt::write_all(&mut stream, &server_flight)
             .await
             .unwrap();
     });
 
     let config = ClientHelloConfig::new([0x44; 32], EXPECTED_SESSION_ID);
-    let result = smelly_tls::connect_and_read_server_hello(addr, &config, "abcdefghijklmnop")
-        .await
-        .unwrap();
+    let result = smelly_tls::connect_and_read_server_hello_for_server(
+        addr,
+        &config,
+        "localhost",
+        "abcdefghijklmnop",
+        &test_policy(),
+    )
+    .await
+    .unwrap();
 
     server.await.unwrap();
     assert_eq!(result.server_session_id, server_session_id);
@@ -140,6 +161,113 @@ async fn async_read_server_hello_extracts_session_id_and_derives_token() {
         std::str::from_utf8(&result.derived_token).unwrap(),
         "3031323334353637383961626364656\0abcdefghijklmnop"
     );
+}
+
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_read_server_hello_rejects_untrusted_chain_by_default() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cert_der = legacy_tls::server_certificate_der();
+
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut header = [0_u8; 5];
+        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut header)
+            .await
+            .unwrap();
+        let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        let mut body = vec![0_u8; len];
+        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut body)
+            .await
+            .unwrap();
+        let server_flight = legacy_tls::build_server_flight_record(
+            [0x22; 32],
+            *b"0123456789abcdef0123456789abcdef",
+            &cert_der,
+            smelly_tls::TLS_RSA_WITH_RC4_128_SHA,
+        );
+        tokio::io::AsyncWriteExt::write_all(&mut stream, &server_flight)
+            .await
+            .unwrap();
+    });
+
+    let config = ClientHelloConfig::new([0x44; 32], EXPECTED_SESSION_ID);
+    let err = smelly_tls::connect_and_read_server_hello_for_server(
+        addr,
+        &config,
+        "localhost",
+        "abcdefghijklmnop",
+        &smelly_tls::ServerCertPolicy::Verify,
+    )
+    .await
+    .unwrap_err();
+
+    server.await.unwrap();
+    assert!(err.to_string().contains("UnknownIssuer"));
+}
+
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_read_server_hello_rejects_wrong_host_but_insecure_mode_bypasses_it() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cert_der = legacy_tls::server_certificate_der();
+
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = [0_u8; 5];
+            tokio::io::AsyncReadExt::read_exact(&mut stream, &mut header)
+                .await
+                .unwrap();
+            let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+            let mut body = vec![0_u8; len];
+            tokio::io::AsyncReadExt::read_exact(&mut stream, &mut body)
+                .await
+                .unwrap();
+            let server_flight = legacy_tls::build_server_flight_record(
+                [0x22; 32],
+                *b"0123456789abcdef0123456789abcdef",
+                &cert_der,
+                smelly_tls::TLS_RSA_WITH_RC4_128_SHA,
+            );
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &server_flight)
+                .await
+                .unwrap();
+        }
+    });
+
+    let config = ClientHelloConfig::new([0x44; 32], EXPECTED_SESSION_ID);
+    let err = smelly_tls::connect_and_read_server_hello_for_server(
+        addr,
+        &config,
+        "vpn.example.com",
+        "abcdefghijklmnop",
+        &test_policy(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("certificate not valid for name")
+            || err.to_string().contains("NotValidForName")
+    );
+
+    let insecure = smelly_tls::connect_and_read_server_hello_for_server(
+        addr,
+        &config,
+        "vpn.example.com",
+        "abcdefghijklmnop",
+        &smelly_tls::ServerCertPolicy::InsecureSkipVerify,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::str::from_utf8(&insecure.derived_token).unwrap(),
+        "3031323334353637383961626364656\0abcdefghijklmnop"
+    );
+
+    server.await.unwrap();
 }
 
 #[cfg(feature = "tokio")]
@@ -290,31 +418,6 @@ fn parse_client_hello(record: &[u8]) -> Option<ParsedClientHello> {
         compression_methods,
         extension_ids,
     })
-}
-
-#[cfg(feature = "tokio")]
-fn build_server_hello_record(session_id: [u8; 32]) -> Vec<u8> {
-    let mut body = Vec::new();
-    body.extend_from_slice(&0x0302_u16.to_be_bytes());
-    body.extend_from_slice(&[0x55; 32]);
-    body.push(session_id.len() as u8);
-    body.extend_from_slice(&session_id);
-    body.extend_from_slice(&0x0005_u16.to_be_bytes());
-    body.push(0);
-    body.extend_from_slice(&0_u16.to_be_bytes());
-
-    let mut handshake = Vec::new();
-    handshake.push(2);
-    let body_len = body.len() as u32;
-    handshake.extend_from_slice(&body_len.to_be_bytes()[1..4]);
-    handshake.extend_from_slice(&body);
-
-    let mut record = Vec::new();
-    record.push(22);
-    record.extend_from_slice(&0x0302_u16.to_be_bytes());
-    record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
-    record.extend_from_slice(&handshake);
-    record
 }
 
 #[cfg(feature = "tokio")]

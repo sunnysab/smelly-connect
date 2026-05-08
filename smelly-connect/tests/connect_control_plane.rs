@@ -1,5 +1,16 @@
 #[path = "../../test-support/legacy_tls.rs"]
+#[allow(dead_code)]
 mod legacy_tls;
+
+fn test_server(addr: std::net::SocketAddr) -> String {
+    format!("127.0.0.1:{}", addr.port())
+}
+
+fn test_server_cert_policy() -> smelly_connect::ServerCertPolicy {
+    smelly_connect::ServerCertPolicy::VerifyWithCustomRoots(
+        vec![legacy_tls::root_certificate_der()],
+    )
+}
 
 #[cfg(feature = "test-utils")]
 #[tokio::test]
@@ -27,6 +38,7 @@ fn token_request_derives_token_from_tls_session_id() {
     let addr = listener.local_addr().unwrap();
     let server_random = [0x22; 32];
     let server_session_id = *b"0123456789abcdef0123456789abcdef";
+    let cert_der = legacy_tls::server_certificate_der();
 
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
@@ -36,17 +48,22 @@ fn token_request_derives_token_from_tls_session_id() {
         let len = u16::from_be_bytes([header[3], header[4]]) as usize;
         let mut body = vec![0_u8; len];
         std::io::Read::read_exact(stream.get_mut(), &mut body).unwrap();
-        let record = legacy_tls::build_server_hello_record(
+        let record = legacy_tls::build_server_flight_record(
             server_random,
             server_session_id,
+            &cert_der,
             smelly_tls::TLS_RSA_WITH_RC4_128_SHA,
         );
         std::io::Write::write_all(&mut stream, &record).unwrap();
         std::io::Write::flush(&mut stream).unwrap();
     });
 
-    let token = smelly_connect::auth::control::request_token(&addr.to_string(), "abcdefghijklmnop")
-        .unwrap();
+    let token = smelly_connect::auth::control::request_token_with_policy(
+        &test_server(addr),
+        "abcdefghijklmnop",
+        test_server_cert_policy(),
+    )
+    .unwrap();
     assert_eq!(
         std::str::from_utf8(token.as_bytes()).unwrap(),
         "3031323334353637383961626364656\0abcdefghijklmnop"
@@ -66,6 +83,7 @@ async fn async_token_request_does_not_block_current_thread_runtime() {
     let addr = listener.local_addr().unwrap();
     let server_random = [0x22; 32];
     let server_session_id = *b"fedcba9876543210fedcba9876543210";
+    let cert_der = legacy_tls::server_certificate_der();
 
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
@@ -76,9 +94,10 @@ async fn async_token_request_does_not_block_current_thread_runtime() {
         let len = u16::from_be_bytes([header[3], header[4]]) as usize;
         let mut body = vec![0_u8; len];
         std::io::Read::read_exact(stream.get_mut(), &mut body).unwrap();
-        let record = legacy_tls::build_server_hello_record(
+        let record = legacy_tls::build_server_flight_record(
             server_random,
             server_session_id,
+            &cert_der,
             smelly_tls::TLS_RSA_WITH_RC4_128_SHA,
         );
         std::io::Write::write_all(&mut stream, &record).unwrap();
@@ -96,10 +115,13 @@ async fn async_token_request_does_not_block_current_thread_runtime() {
         }
     });
 
-    let token =
-        smelly_connect::auth::control::request_token_async(&addr.to_string(), "abcdefghijklmnop")
-            .await
-            .unwrap();
+    let token = smelly_connect::auth::control::request_token_async_with_policy(
+        &test_server(addr),
+        "abcdefghijklmnop",
+        test_server_cert_policy(),
+    )
+    .await
+    .unwrap();
 
     running.store(false, Ordering::SeqCst);
     ticker.await.unwrap();
@@ -118,6 +140,7 @@ async fn token_request_falls_back_to_aes_when_rc4_bootstrap_fails() {
     let addr = listener.local_addr().unwrap();
     let server_random = [0x22; 32];
     let server_session_id = *b"fedcba9876543210fedcba9876543210";
+    let cert_der = legacy_tls::server_certificate_der();
 
     let server = tokio::spawn(async move {
         for attempt in 0..2 {
@@ -138,9 +161,10 @@ async fn token_request_falls_back_to_aes_when_rc4_bootstrap_fails() {
             }
 
             assert_eq!(offered, smelly_tls::TLS_RSA_WITH_AES_128_CBC_SHA);
-            let record = legacy_tls::build_server_hello_record(
+            let record = legacy_tls::build_server_flight_record(
                 server_random,
                 server_session_id,
+                &cert_der,
                 smelly_tls::TLS_RSA_WITH_AES_128_CBC_SHA,
             );
             tokio::io::AsyncWriteExt::write_all(&mut stream, &record)
@@ -149,10 +173,13 @@ async fn token_request_falls_back_to_aes_when_rc4_bootstrap_fails() {
         }
     });
 
-    let token =
-        smelly_connect::auth::control::request_token_async(&addr.to_string(), "abcdefghijklmnop")
-            .await
-            .unwrap();
+    let token = smelly_connect::auth::control::request_token_async_with_policy(
+        &test_server(addr),
+        "abcdefghijklmnop",
+        test_server_cert_policy(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         std::str::from_utf8(token.as_bytes()).unwrap(),
         "6665646362613938373635343332313\0abcdefghijklmnop"
@@ -267,9 +294,14 @@ async fn request_ip_uses_smelly_tls_data_plane() {
             .unwrap();
     });
 
-    let ip = smelly_connect::auth::control::request_ip_via_tunnel(addr, &token, Some("RC4-SHA"))
-        .await
-        .unwrap();
+    let ip = smelly_connect::auth::control::request_ip_for_server_with_policy(
+        &test_server(addr),
+        &token,
+        Some("RC4-SHA"),
+        test_server_cert_policy(),
+    )
+    .await
+    .unwrap();
     assert_eq!(ip.to_string(), "10.0.0.8");
     server.await.unwrap();
 
@@ -400,9 +432,14 @@ async fn request_ip_falls_back_to_rc4_when_hint_path_fails() {
         }
     });
 
-    let ip = smelly_connect::auth::control::request_ip_via_tunnel(addr, &token, Some("AES128-SHA"))
-        .await
-        .unwrap();
+    let ip = smelly_connect::auth::control::request_ip_for_server_with_policy(
+        &test_server(addr),
+        &token,
+        Some("AES128-SHA"),
+        test_server_cert_policy(),
+    )
+    .await
+    .unwrap();
     assert_eq!(ip.to_string(), "10.0.0.8");
     server.await.unwrap();
 
@@ -528,19 +565,29 @@ async fn open_send_and_recv_tunnels_complete_handshakes() {
         }
     });
 
-    let mut recv_tunnel =
-        smelly_connect::auth::control::open_recv_tunnel(addr, &token, client_ip, Some("RC4-SHA"))
-            .await
-            .unwrap();
+    let mut recv_tunnel = smelly_connect::auth::control::open_recv_tunnel_for_server_with_policy(
+        &test_server(addr),
+        &token,
+        client_ip,
+        Some("RC4-SHA"),
+        test_server_cert_policy(),
+    )
+    .await
+    .unwrap();
 
     recv_tunnel.send_application_data(b"x").await.unwrap();
     let recv_echo = recv_tunnel.read_application_data().await.unwrap();
     assert_eq!(recv_echo, b"x");
 
-    let mut send_tunnel =
-        smelly_connect::auth::control::open_send_tunnel(addr, &token, client_ip, Some("RC4-SHA"))
-            .await
-            .unwrap();
+    let mut send_tunnel = smelly_connect::auth::control::open_send_tunnel_for_server_with_policy(
+        &test_server(addr),
+        &token,
+        client_ip,
+        Some("RC4-SHA"),
+        test_server_cert_policy(),
+    )
+    .await
+    .unwrap();
     send_tunnel.send_application_data(b"y").await.unwrap();
     let send_echo = send_tunnel.read_application_data().await.unwrap();
     assert_eq!(send_echo, b"y");
@@ -680,11 +727,13 @@ async fn spawn_legacy_packet_device_bridges_packets_between_stack_and_tunnels() 
         }
     });
 
-    let device = smelly_connect::auth::control::spawn_legacy_packet_device(
+    let device = smelly_connect::auth::control::spawn_legacy_packet_device_for_server_with_policy(
+        &test_server(addr),
         addr,
         &token,
         client_ip,
         Some("RC4-SHA"),
+        test_server_cert_policy(),
     )
     .await
     .unwrap();
