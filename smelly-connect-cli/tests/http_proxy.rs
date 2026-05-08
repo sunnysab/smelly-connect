@@ -44,6 +44,47 @@ async fn http_proxy_reuses_upstream_connection_for_sequential_requests() {
 }
 
 #[tokio::test]
+async fn http_cached_vpn_upstream_reuse_failure_marks_live_session_open() {
+    let result =
+        smelly_connect_cli::proxy::http::proxy_http_cached_vpn_reuse_failure_recovers_live_session_for_test()
+            .await
+            .unwrap();
+    assert_eq!(result.status_code, 502);
+    assert!(
+        result.state_summary.contains("Open"),
+        "state_summary={}, selectable_after_failure={}",
+        result.state_summary,
+        result.selectable_after_failure
+    );
+    assert!(
+        !result.selectable_after_failure,
+        "state_summary={}, selectable_after_failure={}",
+        result.state_summary, result.selectable_after_failure
+    );
+    assert_eq!(result.recovered_account, "acct-01");
+}
+
+#[tokio::test]
+async fn http_cached_vpn_keep_alive_reuse_failure_marks_live_session_open() {
+    let result = smelly_connect_cli::proxy::http::proxy_http_cached_vpn_reuse_failure_recovers_live_session_with_keep_alive_request_for_test()
+        .await
+        .unwrap();
+    assert_eq!(result.status_code, 502);
+    assert!(
+        result.state_summary.contains("Open"),
+        "state_summary={}, selectable_after_failure={}",
+        result.state_summary,
+        result.selectable_after_failure
+    );
+    assert!(
+        !result.selectable_after_failure,
+        "state_summary={}, selectable_after_failure={}",
+        result.state_summary, result.selectable_after_failure
+    );
+    assert_eq!(result.recovered_account, "acct-01");
+}
+
+#[tokio::test]
 async fn http_proxy_streams_split_request_body_to_upstream() {
     let result = smelly_connect_cli::proxy::http::proxy_http_streams_request_body_for_test()
         .await

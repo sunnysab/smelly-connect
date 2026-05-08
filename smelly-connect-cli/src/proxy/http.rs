@@ -242,6 +242,12 @@ pub use tests::proxy_http_body_completes_for_keep_alive_upstream_for_test;
 pub use tests::proxy_http_reuses_upstream_connection_for_test;
 
 #[cfg(feature = "test-utils")]
+pub use tests::proxy_http_cached_vpn_reuse_failure_recovers_live_session_for_test;
+
+#[cfg(feature = "test-utils")]
+pub use tests::proxy_http_cached_vpn_reuse_failure_recovers_live_session_with_keep_alive_request_for_test;
+
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_streams_request_body_for_test;
 
 #[cfg(feature = "test-utils")]
@@ -469,7 +475,7 @@ async fn handle_live_client(
     connect_timeout: Duration,
 ) -> Result<(), String> {
     let upstream_cache = Arc::new(tokio::sync::Mutex::new(
-        None::<CachedUpstream<smelly_connect::transport::VpnStream>>,
+        None::<CachedUpstream<smelly_connect::transport::VpnStream, CachedLiveUpstreamMetadata>>,
     ));
     let io = TokioIo::new(client);
     hyper_server_http1::Builder::new()
@@ -499,7 +505,11 @@ async fn handle_live_request(
     stats: RuntimeStats,
     connect_timeout: Duration,
     upstream_cache: Arc<
-        tokio::sync::Mutex<Option<CachedUpstream<smelly_connect::transport::VpnStream>>>,
+        tokio::sync::Mutex<
+            Option<
+                CachedUpstream<smelly_connect::transport::VpnStream, CachedLiveUpstreamMetadata>,
+            >,
+        >,
     >,
 ) -> Response<ProxyBody> {
     let request_id = next_request_id();
@@ -607,14 +617,22 @@ async fn handle_live_request(
     let wants_keep_alive = client_requests_keep_alive(&request);
     let upstream = take_cached_upstream(&upstream_cache, &host, port).await;
     let upstream = match upstream {
-        Some(upstream) => Ok((upstream, LiveRouteBackend::Direct)),
+        Some(upstream) => Ok((upstream.stream, upstream.metadata, true)),
         None => {
             let connect_started = Instant::now();
             log_upstream_connect_start(request_id, "http", &account_name, &target, connect_timeout);
             match connect_live_upstream_with_timeout(connect_timeout, &session, &host, port).await {
                 Ok((upstream, route_backend)) => {
                     log_upstream_connect_success(request_id, "http", &target, connect_started);
-                    Ok((upstream, route_backend))
+                    Ok((
+                        upstream,
+                        CachedLiveUpstreamMetadata {
+                            route_backend,
+                            account_name: account_name.clone(),
+                            session: session.clone(),
+                        },
+                        false,
+                    ))
                 }
                 Err((err, route_backend)) => {
                     log_upstream_connect_failure(
@@ -629,8 +647,8 @@ async fn handle_live_request(
             }
         }
     };
-    let upstream = match upstream {
-        Ok((upstream, _route_backend)) => upstream,
+    let (upstream, cache_metadata, reused_cached_upstream) = match upstream {
+        Ok(upstream) => upstream,
         Err((err, route_backend)) => {
             if !matches!(err, UpstreamConnectError::RouteRejected) {
                 stats.record_connect_failure();
@@ -644,21 +662,45 @@ async fn handle_live_request(
     stats.record_connect_success();
     let connection = stats.open_connection(ProxyProtocol::Http);
     if wants_keep_alive {
-        let (response, reusable) =
+        let (response, reusable, reuse_error) =
             forward_request_with_reuse(request, uri, upstream, Some(connection)).await;
+        if let Some(err) = reuse_error {
+            handle_cached_live_upstream_failure(&pool, &stats, &cache_metadata, &err).await;
+        }
         if let Some(reusable) = reusable {
-            store_cached_upstream(&upstream_cache, host, port, reusable).await;
+            store_cached_upstream(
+                &upstream_cache,
+                CachedUpstream {
+                    host,
+                    port,
+                    stream: reusable,
+                    metadata: cache_metadata,
+                },
+            )
+            .await;
         }
         response
     } else {
-        forward_request(request, uri, upstream, Some(connection)).await
+        let (response, forward_error) =
+            forward_request(request, uri, upstream, Some(connection)).await;
+        if reused_cached_upstream && let Some(err) = forward_error {
+            handle_cached_live_upstream_failure(&pool, &stats, &cache_metadata, &err).await;
+        }
+        response
     }
 }
 
-struct CachedUpstream<S> {
+struct CachedUpstream<S, M = ()> {
     host: String,
     port: u16,
     stream: S,
+    metadata: M,
+}
+
+struct CachedLiveUpstreamMetadata {
+    route_backend: LiveRouteBackend,
+    account_name: String,
+    session: smelly_connect::Session,
 }
 
 fn empty_response(status: StatusCode) -> Response<ProxyBody> {
@@ -691,6 +733,24 @@ async fn handle_live_session_failure(
             account_name,
             session,
             format!("{err:?}"),
+        )
+        .await;
+    }
+}
+
+async fn handle_cached_live_upstream_failure(
+    pool: &SessionPool,
+    stats: &RuntimeStats,
+    cache_metadata: &CachedLiveUpstreamMetadata,
+    err: &UpstreamConnectError,
+) {
+    stats.record_connect_failure();
+    if matches!(cache_metadata.route_backend, LiveRouteBackend::Vpn) {
+        handle_live_session_failure(
+            pool,
+            &cache_metadata.account_name,
+            &cache_metadata.session,
+            err,
         )
         .await;
     }
@@ -826,7 +886,7 @@ async fn forward_request(
     uri: Uri,
     mut upstream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
     connection: Option<ConnectionGuard>,
-) -> Response<ProxyBody> {
+) -> (Response<ProxyBody>, Option<UpstreamConnectError>) {
     let (parts, mut body) = request.into_parts();
     let mut upstream_request = format!(
         "{} {} {}\r\n",
@@ -852,7 +912,10 @@ async fn forward_request(
     );
 
     if upstream.write_all(&upstream_request).await.is_err() {
-        return empty_response(StatusCode::BAD_GATEWAY);
+        return (
+            empty_response(StatusCode::BAD_GATEWAY),
+            Some(UpstreamConnectError::Failed),
+        );
     }
 
     let chunked_request = forwarded_headers
@@ -866,7 +929,7 @@ async fn forward_request(
 
     while let Some(frame) = body.frame().await {
         let Ok(frame) = frame else {
-            return empty_response(StatusCode::BAD_GATEWAY);
+            return (empty_response(StatusCode::BAD_GATEWAY), None);
         };
         if let Some(data) = frame.data_ref() {
             if chunked_request {
@@ -875,12 +938,18 @@ async fn forward_request(
                     || upstream.write_all(data).await.is_err()
                     || upstream.write_all(b"\r\n").await.is_err()
                 {
-                    return empty_response(StatusCode::BAD_GATEWAY);
+                    return (
+                        empty_response(StatusCode::BAD_GATEWAY),
+                        Some(UpstreamConnectError::Failed),
+                    );
                 }
                 record_client_to_upstream(connection.as_ref(), prefix.len() + data.len() + 2);
             } else {
                 if upstream.write_all(data).await.is_err() {
-                    return empty_response(StatusCode::BAD_GATEWAY);
+                    return (
+                        empty_response(StatusCode::BAD_GATEWAY),
+                        Some(UpstreamConnectError::Failed),
+                    );
                 }
                 record_client_to_upstream(connection.as_ref(), data.len());
             }
@@ -888,14 +957,20 @@ async fn forward_request(
     }
     if chunked_request {
         if upstream.write_all(b"0\r\n\r\n").await.is_err() {
-            return empty_response(StatusCode::BAD_GATEWAY);
+            return (
+                empty_response(StatusCode::BAD_GATEWAY),
+                Some(UpstreamConnectError::Failed),
+            );
         }
         record_client_to_upstream(connection.as_ref(), 5);
     }
 
     match read_upstream_response(upstream, connection).await {
-        Ok(response) => response,
-        Err(_) => empty_response(StatusCode::BAD_GATEWAY),
+        Ok(response) => (response, None),
+        Err(_) => (
+            empty_response(StatusCode::BAD_GATEWAY),
+            Some(UpstreamConnectError::Failed),
+        ),
     }
 }
 
@@ -904,7 +979,7 @@ async fn forward_request_with_reuse<S>(
     uri: Uri,
     mut upstream: S,
     connection: Option<ConnectionGuard>,
-) -> (Response<ProxyBody>, Option<S>)
+) -> (Response<ProxyBody>, Option<S>, Option<UpstreamConnectError>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -932,24 +1007,36 @@ where
     );
 
     if upstream.write_all(&upstream_request).await.is_err() {
-        return (empty_response(StatusCode::BAD_GATEWAY), None);
+        return (
+            empty_response(StatusCode::BAD_GATEWAY),
+            None,
+            Some(UpstreamConnectError::Failed),
+        );
     }
 
     while let Some(frame) = body.frame().await {
         let Ok(frame) = frame else {
-            return (empty_response(StatusCode::BAD_GATEWAY), None);
+            return (empty_response(StatusCode::BAD_GATEWAY), None, None);
         };
         if let Some(data) = frame.data_ref() {
             if upstream.write_all(data).await.is_err() {
-                return (empty_response(StatusCode::BAD_GATEWAY), None);
+                return (
+                    empty_response(StatusCode::BAD_GATEWAY),
+                    None,
+                    Some(UpstreamConnectError::Failed),
+                );
             }
             record_client_to_upstream(connection.as_ref(), data.len());
         }
     }
 
     match read_reusable_upstream_response(upstream, connection).await {
-        Ok(ok) => ok,
-        Err(_) => (empty_response(StatusCode::BAD_GATEWAY), None),
+        Ok((response, reusable)) => (response, reusable, None),
+        Err(_) => (
+            empty_response(StatusCode::BAD_GATEWAY),
+            None,
+            Some(UpstreamConnectError::Failed),
+        ),
     }
 }
 
@@ -986,28 +1073,26 @@ fn client_requests_keep_alive(request: &Request<Incoming>) -> bool {
         })
 }
 
-async fn take_cached_upstream<S>(
-    cache: &tokio::sync::Mutex<Option<CachedUpstream<S>>>,
+async fn take_cached_upstream<S, M>(
+    cache: &tokio::sync::Mutex<Option<CachedUpstream<S, M>>>,
     host: &str,
     port: u16,
-) -> Option<S> {
+) -> Option<CachedUpstream<S, M>> {
     let mut cache = cache.lock().await;
     let cached = cache.take()?;
     if cached.host == host && cached.port == port {
-        Some(cached.stream)
+        Some(cached)
     } else {
         None
     }
 }
 
-async fn store_cached_upstream<S>(
-    cache: &tokio::sync::Mutex<Option<CachedUpstream<S>>>,
-    host: String,
-    port: u16,
-    stream: S,
+async fn store_cached_upstream<S, M>(
+    cache: &tokio::sync::Mutex<Option<CachedUpstream<S, M>>>,
+    cached: CachedUpstream<S, M>,
 ) {
     let mut cache = cache.lock().await;
-    *cache = Some(CachedUpstream { host, port, stream });
+    *cache = Some(cached);
 }
 
 fn estimate_request_size(
@@ -1188,10 +1273,10 @@ fn parse_upstream_response_head(header_bytes: &[u8]) -> Result<ParsedResponseHea
     let forwarded_headers = forwarded_headers
         .into_iter()
         .filter(|(name, _)| {
-            !name.as_str().eq_ignore_ascii_case("connection")
-                && !name.as_str().eq_ignore_ascii_case("keep-alive")
-                && !(matches!(body_kind, ResponseBodyKind::Chunked)
-                    && name.as_str().eq_ignore_ascii_case("transfer-encoding"))
+            !(name.as_str().eq_ignore_ascii_case("connection")
+                || name.as_str().eq_ignore_ascii_case("keep-alive")
+                || (matches!(body_kind, ResponseBodyKind::Chunked)
+                    && name.as_str().eq_ignore_ascii_case("transfer-encoding")))
         })
         .collect();
 
@@ -1745,6 +1830,79 @@ mod tests {
         Ok(ReusedUpstreamTestResult {
             body,
             upstream_accepts: accepts.load(std::sync::atomic::Ordering::SeqCst),
+        })
+    }
+
+    pub async fn proxy_http_cached_vpn_reuse_failure_recovers_live_session_for_test()
+    -> Result<LiveFailureRecoveryTestResult, String> {
+        proxy_http_cached_vpn_reuse_failure_recovers_live_session_with_second_request_connection_for_test(
+            "close",
+        )
+        .await
+    }
+
+    pub async fn proxy_http_cached_vpn_reuse_failure_recovers_live_session_with_keep_alive_request_for_test()
+    -> Result<LiveFailureRecoveryTestResult, String> {
+        proxy_http_cached_vpn_reuse_failure_recovers_live_session_with_second_request_connection_for_test(
+            "keep-alive",
+        )
+        .await
+    }
+
+    async fn proxy_http_cached_vpn_reuse_failure_recovers_live_session_with_second_request_connection_for_test(
+        second_request_connection: &str,
+    ) -> Result<LiveFailureRecoveryTestResult, String> {
+        let upstream = spawn_keep_alive_http_upstream_then_close().await;
+        let transport = smelly_connect::transport::TransportStack::new(move |_| async move {
+            let stream = TcpStream::connect(upstream).await?;
+            Ok(smelly_connect::transport::VpnStream::new(stream))
+        })
+        .with_icmp_pinger(|_| async {
+            Err(io::Error::other("forced cached upstream probe failure"))
+        });
+        let session =
+            smelly_connect::test_support::session::session_with_runtime_resources_and_transport(
+                "libdb.zju.edu.cn",
+                std::net::Ipv4Addr::new(10, 0, 0, 8),
+                transport,
+            );
+        let pool = SessionPool::from_live_sessions_with_keepalive_target_for_test(
+            vec![("acct-01", session)],
+            "10.0.0.1",
+        )
+        .await;
+        let addr = spawn_single_live_client_proxy(pool.clone(), DEFAULT_CONNECT_TIMEOUT).await?;
+
+        let mut client = TcpStream::connect(addr)
+            .await
+            .map_err(|err| err.to_string())?;
+        client
+            .write_all(
+                b"GET http://libdb.zju.edu.cn/first HTTP/1.1\r\nHost: libdb.zju.edu.cn\r\nConnection: keep-alive\r\n\r\n",
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        let first_status = read_http_response_status_and_consume(&mut client).await?;
+        if first_status != 200 {
+            return Err(format!("unexpected first status code: {first_status}"));
+        }
+        client
+            .write_all(
+                format!(
+                    "GET http://libdb.zju.edu.cn/second HTTP/1.1\r\nHost: libdb.zju.edu.cn\r\nConnection: {second_request_connection}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        let second_status = read_http_response_status_to_end(&mut client).await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        Ok(LiveFailureRecoveryTestResult {
+            status_code: second_status,
+            state_summary: pool.state_summary_for_test().await,
+            selectable_after_failure: pool.has_selectable_nodes_for_test().await,
+            recovered_account: "acct-01".to_string(),
         })
     }
 
@@ -3072,7 +3230,7 @@ mod tests {
         let wants_keep_alive = client_requests_keep_alive(&request);
         let upstream = take_cached_upstream(&upstream_cache, &host, port).await;
         let upstream = match upstream {
-            Some(upstream) => Ok(upstream),
+            Some(upstream) => Ok(upstream.stream),
             None => {
                 let connect_started = Instant::now();
                 log_upstream_connect_start(
@@ -3116,14 +3274,25 @@ mod tests {
         };
         let connection = stats.map(|stats| stats.open_connection(ProxyProtocol::Http));
         if wants_keep_alive {
-            let (response, reusable) =
+            let (response, reusable, _reuse_error) =
                 forward_request_with_reuse(request, uri, upstream, connection).await;
             if let Some(reusable) = reusable {
-                store_cached_upstream(&upstream_cache, host, port, reusable).await;
+                store_cached_upstream(
+                    &upstream_cache,
+                    CachedUpstream {
+                        host,
+                        port,
+                        stream: reusable,
+                        metadata: (),
+                    },
+                )
+                .await;
             }
             response
         } else {
-            forward_request(request, uri, upstream, connection).await
+            let (response, _forward_error) =
+                forward_request(request, uri, upstream, connection).await;
+            response
         }
     }
 
@@ -3160,6 +3329,34 @@ mod tests {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        addr
+    }
+
+    async fn spawn_keep_alive_http_upstream_then_close() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    return;
+                }
+                request.extend_from_slice(&chunk[..n]);
+                if find_header_end(&request).is_some() {
+                    break;
+                }
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                )
+                .await
+                .unwrap();
+            let _ = socket.shutdown().await;
         });
         addr
     }
@@ -3209,6 +3406,47 @@ mod tests {
             return Err("response body shorter than content-length".to_string());
         }
         Ok(&rest[..content_length])
+    }
+
+    async fn read_http_response_status_and_consume(stream: &mut TcpStream) -> Result<u16, String> {
+        let mut buffer = Vec::new();
+        let header_end = read_headers(stream, &mut buffer)
+            .await
+            .map_err(|err| err.to_string())?;
+        let head = parse_upstream_response_head(&buffer[..header_end])?;
+        let initial_body_len = buffer.len().saturating_sub(header_end);
+        let ResponseBodyKind::ContentLength(length) = head.body_kind else {
+            return Err("expected content-length response for keep-alive test".to_string());
+        };
+        let mut remaining = length.saturating_sub(initial_body_len);
+        let mut chunk = [0_u8; 1024];
+        while remaining > 0 {
+            let limit = remaining.min(chunk.len());
+            let n = stream
+                .read(&mut chunk[..limit])
+                .await
+                .map_err(|err| err.to_string())?;
+            if n == 0 {
+                return Err("response body closed early".to_string());
+            }
+            remaining -= n;
+        }
+        Ok(head.status_code)
+    }
+
+    async fn read_http_response_status_to_end(stream: &mut TcpStream) -> Result<u16, String> {
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .map_err(|err| err.to_string())?;
+        let response = String::from_utf8(response).map_err(|err| err.to_string())?;
+        let status_line = response.lines().next().unwrap_or_default().to_string();
+        status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+            .ok_or_else(|| format!("invalid status line: {status_line}"))
     }
 
     async fn spawn_request_body_echo_upstream() -> SocketAddr {
