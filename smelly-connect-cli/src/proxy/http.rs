@@ -272,6 +272,9 @@ pub use tests::proxy_http_streams_response_body_for_test;
 pub use tests::proxy_http_head_response_for_test;
 
 #[cfg(feature = "test-utils")]
+pub use tests::proxy_http_reuses_upstream_connection_after_head_response_for_test;
+
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_rejects_oversized_response_headers_for_test;
 
 #[cfg(feature = "test-utils")]
@@ -888,6 +891,7 @@ async fn forward_request(
     connection: Option<ConnectionGuard>,
 ) -> (Response<ProxyBody>, Option<UpstreamConnectError>) {
     let (parts, mut body) = request.into_parts();
+    let request_allows_response_body = parts.method != Method::HEAD;
     let mut upstream_request = format!(
         "{} {} {}\r\n",
         parts.method,
@@ -965,7 +969,7 @@ async fn forward_request(
         record_client_to_upstream(connection.as_ref(), 5);
     }
 
-    match read_upstream_response(upstream, connection).await {
+    match read_upstream_response(upstream, connection, request_allows_response_body).await {
         Ok(response) => (response, None),
         Err(_) => (
             empty_response(StatusCode::BAD_GATEWAY),
@@ -984,6 +988,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (parts, mut body) = request.into_parts();
+    let request_allows_response_body = parts.method != Method::HEAD;
     let mut upstream_request = format!(
         "{} {} {}\r\n",
         parts.method,
@@ -1030,7 +1035,8 @@ where
         }
     }
 
-    match read_reusable_upstream_response(upstream, connection).await {
+    match read_reusable_upstream_response(upstream, connection, request_allows_response_body).await
+    {
         Ok((response, reusable)) => (response, reusable, None),
         Err(_) => (
             empty_response(StatusCode::BAD_GATEWAY),
@@ -1120,13 +1126,14 @@ fn estimate_request_size(
 async fn read_upstream_response(
     mut upstream: impl AsyncRead + Unpin + Send + 'static,
     connection: Option<ConnectionGuard>,
+    request_allows_response_body: bool,
 ) -> Result<Response<ProxyBody>, String> {
     let mut buffer = Vec::with_capacity(1024);
     let header_end = read_headers(&mut upstream, &mut buffer)
         .await
         .map_err(|err| err.to_string())?;
     let header_bytes = &buffer[..header_end];
-    let head = parse_upstream_response_head(header_bytes)?;
+    let head = parse_upstream_response_head(header_bytes, request_allows_response_body)?;
     let initial_body = buffer[header_end..].to_vec();
     let mut builder = Response::builder().status(head.status_code);
     for (name, value) in head.forwarded_headers {
@@ -1140,6 +1147,7 @@ async fn read_upstream_response(
 async fn read_reusable_upstream_response<S>(
     mut upstream: S,
     connection: Option<ConnectionGuard>,
+    request_allows_response_body: bool,
 ) -> Result<(Response<ProxyBody>, Option<S>), String>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1149,7 +1157,7 @@ where
         .await
         .map_err(|err| err.to_string())?;
     let header_bytes = &buffer[..header_end];
-    let head = parse_upstream_response_head(header_bytes)?;
+    let head = parse_upstream_response_head(header_bytes, request_allows_response_body)?;
     let initial_body = buffer[header_end..].to_vec();
 
     if !head.can_reuse {
@@ -1231,7 +1239,10 @@ fn trim_ascii_http_whitespace(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
-fn parse_upstream_response_head(header_bytes: &[u8]) -> Result<ParsedResponseHead, String> {
+fn parse_upstream_response_head(
+    header_bytes: &[u8],
+    request_allows_response_body: bool,
+) -> Result<ParsedResponseHead, String> {
     let mut lines = header_bytes
         .split(|byte| *byte == b'\n')
         .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
@@ -1264,7 +1275,7 @@ fn parse_upstream_response_head(header_bytes: &[u8]) -> Result<ParsedResponseHea
     }
 
     let header_lines: Vec<&str> = ascii_header_lines.iter().map(String::as_str).collect();
-    let body_kind = response_body_kind(status_code, &header_lines);
+    let body_kind = response_body_kind(status_code, &header_lines, request_allows_response_body);
     let can_reuse = response_allows_reuse(&header_lines)
         && matches!(
             body_kind,
@@ -1508,8 +1519,16 @@ fn full_body(body: Vec<u8>, connection: Option<ConnectionGuard>) -> ProxyBody {
     .boxed()
 }
 
-fn response_body_kind(status_code: u16, header_lines: &[&str]) -> ResponseBodyKind {
-    if (100..200).contains(&status_code) || status_code == 204 || status_code == 304 {
+fn response_body_kind(
+    status_code: u16,
+    header_lines: &[&str],
+    request_allows_response_body: bool,
+) -> ResponseBodyKind {
+    if !request_allows_response_body
+        || (100..200).contains(&status_code)
+        || status_code == 204
+        || status_code == 304
+    {
         ResponseBodyKind::None
     } else if has_chunked_transfer_encoding(header_lines) {
         ResponseBodyKind::Chunked
@@ -1827,6 +1846,51 @@ mod tests {
             .map_err(|err| err.to_string())?;
         let response = String::from_utf8(response).map_err(|err| err.to_string())?;
         let body = extract_first_response_body(&response)?.to_string();
+        Ok(ReusedUpstreamTestResult {
+            body,
+            upstream_accepts: accepts.load(std::sync::atomic::Ordering::SeqCst),
+        })
+    }
+
+    pub async fn proxy_http_reuses_upstream_connection_after_head_response_for_test()
+    -> Result<ReusedUpstreamTestResult, String> {
+        let (upstream, accepts) = spawn_reusable_keep_alive_head_http_upstream().await;
+        let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
+        let addr = spawn_test_proxy(pool, move |_account_name, _host, _port| async move {
+            TcpStream::connect(upstream).await
+        })
+        .await?;
+
+        let mut client = TcpStream::connect(addr)
+            .await
+            .map_err(|err| err.to_string())?;
+        client
+            .write_all(
+                b"HEAD http://intranet.zju.edu.cn/health HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: keep-alive\r\n\r\n",
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        let first_status = tokio::time::timeout(
+            Duration::from_millis(200),
+            read_http_head_response_status(&mut client),
+        )
+        .await
+        .map_err(|_| "proxy did not complete keep-alive HEAD response in time".to_string())??;
+        if first_status != 200 {
+            return Err(format!("unexpected HEAD status code: {first_status}"));
+        }
+
+        client
+            .write_all(
+                b"GET http://intranet.zju.edu.cn/second HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        let (second_status, body) = read_http_response_status_and_body(&mut client).await?;
+        if second_status != 200 {
+            return Err(format!("unexpected second status code: {second_status}"));
+        }
+
         Ok(ReusedUpstreamTestResult {
             body,
             upstream_accepts: accepts.load(std::sync::atomic::Ordering::SeqCst),
@@ -3384,6 +3448,56 @@ mod tests {
         (addr, accepts)
     }
 
+    async fn spawn_reusable_keep_alive_head_http_upstream()
+    -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepts_task = Arc::clone(&accepts);
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            accepts_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+            let mut chunk = [0_u8; 1024];
+            let mut first_request = Vec::new();
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    return;
+                }
+                first_request.extend_from_slice(&chunk[..n]);
+                if find_header_end(&first_request).is_some() {
+                    break;
+                }
+            }
+
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .await
+                .unwrap();
+
+            let mut second_request = Vec::new();
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    return;
+                }
+                second_request.extend_from_slice(&chunk[..n]);
+                if find_header_end(&second_request).is_some() {
+                    break;
+                }
+            }
+
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+        (addr, accepts)
+    }
+
     fn extract_first_response_body(response: &str) -> Result<&str, String> {
         let (headers, rest) = response
             .split_once("\r\n\r\n")
@@ -3409,15 +3523,38 @@ mod tests {
     }
 
     async fn read_http_response_status_and_consume(stream: &mut TcpStream) -> Result<u16, String> {
+        let (status_code, _body) = read_http_response_status_and_body(stream).await?;
+        Ok(status_code)
+    }
+
+    async fn read_http_head_response_status(stream: &mut TcpStream) -> Result<u16, String> {
         let mut buffer = Vec::new();
         let header_end = read_headers(stream, &mut buffer)
             .await
             .map_err(|err| err.to_string())?;
-        let head = parse_upstream_response_head(&buffer[..header_end])?;
+        let head = parse_upstream_response_head(&buffer[..header_end], false)?;
+        if !matches!(head.body_kind, ResponseBodyKind::None) {
+            return Err("expected HEAD response without body".to_string());
+        }
+        if buffer.len() != header_end {
+            return Err("unexpected body bytes after HEAD response headers".to_string());
+        }
+        Ok(head.status_code)
+    }
+
+    async fn read_http_response_status_and_body(
+        stream: &mut TcpStream,
+    ) -> Result<(u16, String), String> {
+        let mut buffer = Vec::new();
+        let header_end = read_headers(stream, &mut buffer)
+            .await
+            .map_err(|err| err.to_string())?;
+        let head = parse_upstream_response_head(&buffer[..header_end], true)?;
         let initial_body_len = buffer.len().saturating_sub(header_end);
         let ResponseBodyKind::ContentLength(length) = head.body_kind else {
             return Err("expected content-length response for keep-alive test".to_string());
         };
+        let mut body = buffer[header_end..].to_vec();
         let mut remaining = length.saturating_sub(initial_body_len);
         let mut chunk = [0_u8; 1024];
         while remaining > 0 {
@@ -3429,9 +3566,12 @@ mod tests {
             if n == 0 {
                 return Err("response body closed early".to_string());
             }
+            body.extend_from_slice(&chunk[..n]);
             remaining -= n;
         }
-        Ok(head.status_code)
+        body.truncate(length);
+        let body = String::from_utf8(body).map_err(|err| err.to_string())?;
+        Ok((head.status_code, body))
     }
 
     async fn read_http_response_status_to_end(stream: &mut TcpStream) -> Result<u16, String> {

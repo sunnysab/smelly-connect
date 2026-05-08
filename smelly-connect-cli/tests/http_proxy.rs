@@ -44,6 +44,16 @@ async fn http_proxy_reuses_upstream_connection_for_sequential_requests() {
 }
 
 #[tokio::test]
+async fn http_proxy_reuses_upstream_connection_after_keep_alive_head_response() {
+    let result =
+        smelly_connect_cli::proxy::http::proxy_http_reuses_upstream_connection_after_head_response_for_test()
+            .await
+            .unwrap();
+    assert_eq!(result.body, "ok");
+    assert_eq!(result.upstream_accepts, 1);
+}
+
+#[tokio::test]
 async fn http_cached_vpn_upstream_reuse_failure_marks_live_session_open() {
     let result =
         smelly_connect_cli::proxy::http::proxy_http_cached_vpn_reuse_failure_recovers_live_session_for_test()
