@@ -196,6 +196,18 @@ async fn http_connect_failure_marks_runtime_status_recovering() {
 }
 
 #[tokio::test]
+async fn cached_http_upstream_reuse_does_not_clear_runtime_recovering_status() {
+    let (snapshot, upstream_accepts) = smelly_connect_cli::proxy::http::proxy_http_cached_reuse_success_preserves_runtime_status_for_test()
+        .await
+        .unwrap();
+    assert_eq!(upstream_accepts, 1);
+    assert_eq!(
+        snapshot.status,
+        smelly_connect_cli::pool::PoolHealthStatus::Recovering
+    );
+}
+
+#[tokio::test]
 async fn status_command_formats_large_byte_counters_with_human_units() {
     let output = smelly_connect_cli::commands::status::run_status_for_test(
         "127.0.0.1:19090",

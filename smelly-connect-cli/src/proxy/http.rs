@@ -302,6 +302,9 @@ pub use tests::proxy_http_runtime_stats_for_test;
 pub use tests::proxy_http_connect_failure_runtime_status_for_test;
 
 #[cfg(feature = "test-utils")]
+pub use tests::proxy_http_cached_reuse_success_preserves_runtime_status_for_test;
+
+#[cfg(feature = "test-utils")]
 pub use tests::proxy_http_connect_timeout_for_test;
 
 #[cfg(feature = "test-utils")]
@@ -662,7 +665,9 @@ async fn handle_live_request(
             return gateway_error_response(&err);
         }
     };
-    stats.record_connect_success();
+    if !reused_cached_upstream {
+        stats.record_connect_success();
+    }
     let connection = stats.open_connection(ProxyProtocol::Http);
     if wants_keep_alive {
         let (response, reusable, reuse_error) =
@@ -2569,6 +2574,65 @@ mod tests {
         Ok(stats.snapshot(pool.summary().await))
     }
 
+    pub async fn proxy_http_cached_reuse_success_preserves_runtime_status_for_test()
+    -> Result<(RuntimeSnapshot, usize), String> {
+        let (upstream, accepts) = spawn_reusable_keep_alive_http_upstream().await;
+        let transport = smelly_connect::transport::TransportStack::new(move |_| async move {
+            let stream = TcpStream::connect(upstream).await?;
+            Ok(smelly_connect::transport::VpnStream::new(stream))
+        });
+        let session =
+            smelly_connect::test_support::session::session_with_runtime_resources_and_transport(
+                "intranet.zju.edu.cn",
+                std::net::Ipv4Addr::new(10, 0, 0, 8),
+                transport,
+            );
+        let pool = SessionPool::from_live_sessions_with_keepalive_target_for_test(
+            vec![("acct-01", session)],
+            "10.0.0.1",
+        )
+        .await;
+        let stats = RuntimeStats::default();
+        let addr = spawn_single_live_client_proxy_with_stats(
+            pool.clone(),
+            stats.clone(),
+            DEFAULT_CONNECT_TIMEOUT,
+        )
+        .await?;
+
+        let mut client = TcpStream::connect(addr)
+            .await
+            .map_err(|err| err.to_string())?;
+        client
+            .write_all(
+                b"GET http://intranet.zju.edu.cn/first HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: keep-alive\r\n\r\n",
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        let first_status = read_http_response_status_and_consume(&mut client).await?;
+        if first_status != 200 {
+            return Err(format!("unexpected first status code: {first_status}"));
+        }
+
+        stats.record_connect_failure();
+
+        client
+            .write_all(
+                b"GET http://intranet.zju.edu.cn/second HTTP/1.1\r\nHost: intranet.zju.edu.cn\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        let second_status = read_http_response_status_to_end(&mut client).await?;
+        if second_status != 200 {
+            return Err(format!("unexpected second status code: {second_status}"));
+        }
+
+        Ok((
+            stats.snapshot(pool.summary().await),
+            accepts.load(std::sync::atomic::Ordering::SeqCst),
+        ))
+    }
+
     pub async fn proxy_http_connect_timeout_for_test() -> Result<TimeoutTestResult, String> {
         let pool = SessionPool::from_named_ready_accounts(["acct-01"]).await;
         let addr = spawn_test_proxy_with_timeout(
@@ -3103,6 +3167,15 @@ mod tests {
         pool: SessionPool,
         connect_timeout: Duration,
     ) -> Result<SocketAddr, String> {
+        spawn_single_live_client_proxy_with_stats(pool, RuntimeStats::default(), connect_timeout)
+            .await
+    }
+
+    async fn spawn_single_live_client_proxy_with_stats(
+        pool: SessionPool,
+        stats: RuntimeStats,
+        connect_timeout: Duration,
+    ) -> Result<SocketAddr, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|err| err.to_string())?;
@@ -3111,8 +3184,7 @@ mod tests {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
-            let _ =
-                handle_live_client(stream, pool, RuntimeStats::default(), connect_timeout).await;
+            let _ = handle_live_client(stream, pool, stats, connect_timeout).await;
         });
         Ok(addr)
     }
