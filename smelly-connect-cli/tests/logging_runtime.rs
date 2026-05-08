@@ -30,11 +30,7 @@ fn emitted_log_line_contains_timestamp_and_target() {
 #[test]
 fn pool_logs_prewarm_summary_and_ready_events() {
     let events = smelly_connect_cli::logging::capture_pool_events_for_test();
-    assert!(
-        events
-            .iter()
-            .any(|line| line.contains("pool startup"))
-    );
+    assert!(events.iter().any(|line| line.contains("pool startup")));
     assert!(
         events
             .iter()
