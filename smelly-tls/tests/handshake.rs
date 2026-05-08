@@ -1,10 +1,6 @@
-use openssl::asn1::Asn1Time;
-use openssl::bn::BigNum;
-use openssl::hash::MessageDigest;
-use openssl::nid::Nid;
-use openssl::pkey::PKey;
-use openssl::rsa::{Padding, Rsa};
-use openssl::x509::{X509, X509NameBuilder};
+#[path = "../../test-support/legacy_tls.rs"]
+mod legacy_tls;
+
 use smelly_tls::{
     ClientHelloConfig, build_change_cipher_spec_record, build_client_hello_record,
     build_client_key_exchange, build_finished_handshake, build_premaster_secret,
@@ -24,9 +20,15 @@ const SERVER_SESSION_ID: [u8; 32] = *b"fedcba9876543210fedcba9876543210";
 fn client_and_server_finished_roundtrip() {
     let client_hello =
         build_client_hello_record(&ClientHelloConfig::new(CLIENT_RANDOM, CLIENT_SESSION_ID));
-    let (cert_der, public_key_der, private_key) = server_materials();
-    let server_flight_record =
-        build_server_flight_record(SERVER_RANDOM, SERVER_SESSION_ID, &cert_der);
+    let cert_der = legacy_tls::server_certificate_der();
+    let public_key_der = legacy_tls::server_public_key_der();
+    let private_key = legacy_tls::server_private_key();
+    let server_flight_record = legacy_tls::build_server_flight_record(
+        SERVER_RANDOM,
+        SERVER_SESSION_ID,
+        &cert_der,
+        smelly_tls::TLS_RSA_WITH_RC4_128_SHA,
+    );
     let server_flight = parse_server_flight(&server_flight_record).unwrap();
 
     let premaster = build_premaster_secret([0x33; 46]);
@@ -94,7 +96,8 @@ fn client_and_server_finished_roundtrip() {
 async fn async_minimal_handshake_completes_against_mock_server() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let (cert_der, _public_key_der, private_key) = server_materials();
+    let cert_der = legacy_tls::server_certificate_der();
+    let private_key = legacy_tls::server_private_key();
 
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -110,8 +113,12 @@ async fn async_minimal_handshake_completes_against_mock_server() {
             .unwrap();
         let client_hello_record = [header.to_vec(), body].concat();
 
-        let server_flight_record =
-            build_server_flight_record(SERVER_RANDOM, SERVER_SESSION_ID, &cert_der);
+        let server_flight_record = legacy_tls::build_server_flight_record(
+            SERVER_RANDOM,
+            SERVER_SESSION_ID,
+            &cert_der,
+            smelly_tls::TLS_RSA_WITH_RC4_128_SHA,
+        );
         tokio::io::AsyncWriteExt::write_all(&mut stream, &server_flight_record)
             .await
             .unwrap();
@@ -219,15 +226,20 @@ async fn async_minimal_handshake_completes_against_mock_server() {
 async fn async_established_connection_exchanges_application_data() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let (cert_der, _public_key_der, private_key) = server_materials();
+    let cert_der = legacy_tls::server_certificate_der();
+    let private_key = legacy_tls::server_private_key();
 
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
 
         let client_hello_record = read_record(&mut stream).await;
         let client_hello = smelly_tls::parse_client_hello(&client_hello_record).unwrap();
-        let server_flight_record =
-            build_server_flight_record(SERVER_RANDOM, SERVER_SESSION_ID, &cert_der);
+        let server_flight_record = legacy_tls::build_server_flight_record(
+            SERVER_RANDOM,
+            SERVER_SESSION_ID,
+            &cert_der,
+            smelly_tls::TLS_RSA_WITH_RC4_128_SHA,
+        );
         tokio::io::AsyncWriteExt::write_all(&mut stream, &server_flight_record)
             .await
             .unwrap();
@@ -311,105 +323,9 @@ async fn async_established_connection_exchanges_application_data() {
     server.await.unwrap();
 }
 
-fn server_materials() -> (Vec<u8>, Vec<u8>, Rsa<openssl::pkey::Private>) {
-    let rsa = Rsa::generate(2048).unwrap();
-    let key = PKey::from_rsa(rsa.clone()).unwrap();
-
-    let mut name = X509NameBuilder::new().unwrap();
-    name.append_entry_by_nid(Nid::COMMONNAME, "localhost")
-        .unwrap();
-    let name = name.build();
-
-    let mut builder = X509::builder().unwrap();
-    builder.set_version(2).unwrap();
-    let mut serial = BigNum::new().unwrap();
-    serial
-        .pseudo_rand(64, openssl::bn::MsbOption::MAYBE_ZERO, false)
-        .unwrap();
-    let serial = serial.to_asn1_integer().unwrap();
-    builder.set_serial_number(&serial).unwrap();
-    builder.set_subject_name(&name).unwrap();
-    builder.set_issuer_name(&name).unwrap();
-    builder.set_pubkey(&key).unwrap();
-    builder
-        .set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
-        .unwrap();
-    builder
-        .set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
-        .unwrap();
-    builder.sign(&key, MessageDigest::sha256()).unwrap();
-
-    let cert = builder.build();
-    (
-        cert.to_der().unwrap(),
-        key.public_key_to_der().unwrap(),
-        rsa,
-    )
-}
-
-fn build_server_flight_record(
-    server_random: [u8; 32],
-    session_id: [u8; 32],
-    cert_der: &[u8],
-) -> Vec<u8> {
-    let server_hello = build_server_hello_handshake(server_random, session_id);
-    let certificate = build_certificate_handshake(cert_der);
-    let server_hello_done = vec![14, 0, 0, 0];
-    let payload = [server_hello, certificate, server_hello_done].concat();
-    handshake_record(payload)
-}
-
-fn build_server_hello_handshake(server_random: [u8; 32], session_id: [u8; 32]) -> Vec<u8> {
-    let mut body = Vec::new();
-    body.extend_from_slice(&0x0302_u16.to_be_bytes());
-    body.extend_from_slice(&server_random);
-    body.push(session_id.len() as u8);
-    body.extend_from_slice(&session_id);
-    body.extend_from_slice(&0x0005_u16.to_be_bytes());
-    body.push(0);
-    body.extend_from_slice(&0_u16.to_be_bytes());
-
-    let mut handshake = Vec::new();
-    handshake.push(2);
-    let body_len = body.len() as u32;
-    handshake.extend_from_slice(&body_len.to_be_bytes()[1..4]);
-    handshake.extend_from_slice(&body);
-    handshake
-}
-
-fn build_certificate_handshake(cert_der: &[u8]) -> Vec<u8> {
-    let mut cert_list = Vec::new();
-    let len = cert_der.len() as u32;
-    cert_list.extend_from_slice(&len.to_be_bytes()[1..4]);
-    cert_list.extend_from_slice(cert_der);
-
-    let mut body = Vec::new();
-    let cert_list_len = cert_list.len() as u32;
-    body.extend_from_slice(&cert_list_len.to_be_bytes()[1..4]);
-    body.extend_from_slice(&cert_list);
-
-    let mut handshake = Vec::new();
-    handshake.push(11);
-    let body_len = body.len() as u32;
-    handshake.extend_from_slice(&body_len.to_be_bytes()[1..4]);
-    handshake.extend_from_slice(&body);
-    handshake
-}
-
-fn decrypt_client_key_exchange(
-    handshake: &[u8],
-    private_key: &Rsa<openssl::pkey::Private>,
-) -> [u8; 48] {
+fn decrypt_client_key_exchange(handshake: &[u8], private_key: &rsa::RsaPrivateKey) -> [u8; 48] {
     assert_eq!(handshake[0], 16);
-    let encrypted_len = u16::from_be_bytes([handshake[4], handshake[5]]) as usize;
-    let encrypted = &handshake[6..6 + encrypted_len];
-    let mut decrypted = vec![0_u8; private_key.size() as usize];
-    let len = private_key
-        .private_decrypt(encrypted, &mut decrypted, Padding::PKCS1)
-        .unwrap();
-    let mut out = [0_u8; 48];
-    out.copy_from_slice(&decrypted[..len]);
-    out
+    legacy_tls::decrypt_client_key_exchange(handshake, private_key)
 }
 
 fn handshake_record(payload: Vec<u8>) -> Vec<u8> {

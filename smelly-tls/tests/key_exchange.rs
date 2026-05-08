@@ -1,5 +1,5 @@
-use openssl::pkey::PKey;
-use openssl::rsa::{Padding, Rsa};
+#[path = "../../test-support/legacy_tls.rs"]
+mod legacy_tls;
 
 #[test]
 fn premaster_secret_starts_with_tls11_version() {
@@ -11,7 +11,8 @@ fn premaster_secret_starts_with_tls11_version() {
 
 #[test]
 fn client_key_exchange_encrypts_premaster_for_server_cert() {
-    let (public_key_der, key) = server_public_key_der();
+    let public_key_der = legacy_tls::server_public_key_der();
+    let key = legacy_tls::server_private_key();
     let premaster = smelly_tls::build_premaster_secret([0x55; 46]);
     let handshake = smelly_tls::build_client_key_exchange(&public_key_der, &premaster).unwrap();
 
@@ -23,16 +24,8 @@ fn client_key_exchange_encrypts_premaster_for_server_cert() {
     assert_eq!(encrypted_len + 6, handshake.len());
 
     let encrypted = &handshake[6..];
-    let mut decrypted = vec![0_u8; key.size() as usize];
-    let len = key
-        .private_decrypt(encrypted, &mut decrypted, Padding::PKCS1)
+    let decrypted = key
+        .decrypt(rsa::pkcs1v15::Pkcs1v15Encrypt, encrypted)
         .unwrap();
-    decrypted.truncate(len);
     assert_eq!(decrypted, premaster);
-}
-
-fn server_public_key_der() -> (Vec<u8>, Rsa<openssl::pkey::Private>) {
-    let rsa = Rsa::generate(2048).unwrap();
-    let key = PKey::from_rsa(rsa.clone()).unwrap();
-    (key.public_key_to_der().unwrap(), rsa)
 }

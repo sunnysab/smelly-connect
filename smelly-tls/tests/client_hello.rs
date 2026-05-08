@@ -4,10 +4,7 @@ use std::thread;
 
 use smelly_tls::{ClientHelloConfig, build_client_hello_record, connect_probe};
 
-const EXPECTED_SESSION_ID: [u8; 32] = [
-    b'L', b'3', b'I', b'P', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0,
-];
+const EXPECTED_SESSION_ID: [u8; 32] = smelly_tls::EASYCONNECT_SESSION_ID;
 
 #[test]
 fn client_hello_record_matches_easyconnect_shape() {
@@ -20,6 +17,17 @@ fn client_hello_record_matches_easyconnect_shape() {
     assert_eq!(parsed.cipher_suites, vec![0x0005, 0x00ff]);
     assert_eq!(parsed.compression_methods, vec![0]);
     assert_eq!(parsed.extension_ids, vec![0x000f]);
+}
+
+#[test]
+fn easyconnect_client_hello_sets_expected_legacy_defaults() {
+    let config = smelly_tls::easyconnect_client_hello(smelly_tls::TLS_RSA_WITH_RC4_128_SHA);
+    let record = build_client_hello_record(&config);
+    let parsed = parse_client_hello(&record).unwrap();
+
+    assert_eq!(parsed.session_id, EXPECTED_SESSION_ID);
+    assert_eq!(parsed.cipher_suites, vec![0x0005, 0x00ff]);
+    assert_eq!(parsed.compression_methods, vec![1, 0]);
 }
 
 #[test]

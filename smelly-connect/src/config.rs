@@ -119,7 +119,7 @@ impl EasyConnectConfig {
             state.legacy_cipher_hint.as_deref(),
         )
         .await?;
-        tracing::info!(%client_ip, "IP assigned via legacy TLS tunnel");
+        tracing::info!(%client_ip, "IP assigned via EasyConnect legacy tunnel");
         // IMPORTANT: request_ip_tunnel MUST stay alive — the server requires
         // this connection to remain open for the data tunnels to work.
         // (zju-connect: "Request IP conn CAN NOT be closed, otherwise tx/rx

@@ -162,7 +162,11 @@ pub(crate) fn packet_device_from_tunnels(
 fn log_packet(direction: &str, packet: &[u8]) {
     let description =
         describe_ipv4_packet(packet).unwrap_or_else(|| format!("len={} non-ipv4", packet.len()));
-    debug!(direction, packet = %description, "legacy tunnel packet");
+    debug!(
+        direction,
+        packet = %description,
+        "EasyConnect legacy tunnel packet"
+    );
 }
 
 fn describe_ipv4_packet(packet: &[u8]) -> Option<String> {
