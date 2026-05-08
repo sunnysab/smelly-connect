@@ -4,8 +4,6 @@ WORKDIR /build
 RUN apk add --no-cache \
     build-base \
     musl-dev \
-    openssl-dev \
-    openssl-libs-static \
     pkgconfig
 
 COPY Cargo.toml Cargo.lock ./
@@ -19,7 +17,6 @@ RUN set -eux; \
         *-unknown-linux-musl) ;; \
         *) echo "expected a musl host target, got: $rust_target" >&2; exit 1 ;; \
     esac; \
-    export OPENSSL_STATIC=1 PKG_CONFIG_ALL_STATIC=1; \
     cargo build -p smelly-connect-cli --release --features management-api --target "$rust_target"; \
     install -Dm755 "target/$rust_target/release/smelly-connect-cli" /out/smelly-connect-cli
 

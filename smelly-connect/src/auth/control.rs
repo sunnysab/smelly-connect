@@ -1,8 +1,6 @@
-use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 
-use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
-use smelly_tls::{ClientHelloConfig, TunnelConnection};
+use smelly_tls::TunnelConnection;
 use tracing::debug;
 
 use crate::config::EasyConnectConfig;
@@ -21,58 +19,22 @@ pub(crate) async fn run_control_plane(
 /// Legacy: Derive token from TLS ServerHello SessionID.
 /// Used when sslctx is not available (old protocol path).
 pub fn request_token(server: &str, twfid: &str) -> Result<crate::protocol::DerivedToken, Error> {
-    let mut builder = SslConnector::builder(SslMethod::tls_client()).map_err(|err| {
-        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
-    })?;
-    builder.set_verify(SslVerifyMode::NONE);
-    let connector = builder.build();
-
-    let tcp_target = if server.contains(':') {
-        server.to_string()
-    } else {
-        format!("{server}:443")
-    };
-    let tcp = std::net::TcpStream::connect(&tcp_target).map_err(|err| {
-        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
-    })?;
-    let domain = server.split(':').next().unwrap_or(server);
-    let mut stream = connector.connect(domain, tcp).map_err(|err| {
-        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
-    })?;
-
-    let request = format!(
-        "GET /por/conf.csp HTTP/1.1\r\nHost: {server}\r\nCookie: TWFID={twfid}\r\n\r\nGET /por/rclist.csp HTTP/1.1\r\nHost: {server}\r\nCookie: TWFID={twfid}\r\n\r\n"
-    );
-    stream.write_all(request.as_bytes()).map_err(|err| {
-        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
-    })?;
-    let mut probe = [0_u8; 8];
-    let _ = stream.read(&mut probe).map_err(|err| {
-        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
-    })?;
-    let session = stream.ssl().session().ok_or_else(|| {
-        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(
-            "missing SSL session".to_string(),
-        ))
-    })?;
-    crate::protocol::derive_token(&hex::encode(session.id()), twfid).map_err(|err| {
-        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!("{err:?}")))
-    })
+    let addr = resolve_server_addr(server)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .map_err(|err| {
+            Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
+        })?;
+    runtime.block_on(request_token_for_addr(addr, twfid))
 }
 
 pub async fn request_token_async(
     server: &str,
     twfid: &str,
 ) -> Result<crate::protocol::DerivedToken, Error> {
-    let server = server.to_string();
-    let twfid = twfid.to_string();
-    tokio::task::spawn_blocking(move || request_token(&server, &twfid))
-        .await
-        .map_err(|err| {
-            Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(format!(
-                "token task join failed: {err}"
-            )))
-        })?
+    let addr = resolve_server_addr_async(server).await?;
+    request_token_for_addr(addr, twfid).await
 }
 
 pub async fn request_ip_via_tunnel(
@@ -290,14 +252,7 @@ async fn connect_legacy_tunnel(
 ) -> Result<TunnelConnection, Error> {
     let mut last_err = None;
     for cipher_suite in crate::kernel::tunnel::cipher_suite_attempts(legacy_cipher_hint) {
-        let hello = ClientHelloConfig::new(
-            [0x41; 32],
-            *b"L3IP\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
-        )
-        .with_cipher_suite(cipher_suite)
-        .with_compression_methods(vec![1, 0]);
-
-        match smelly_tls::connect_tunnel(addr, &hello).await {
+        match smelly_tls::connect_easyconnect_tunnel(addr, cipher_suite).await {
             Ok(conn) => return Ok(conn),
             Err(err) => last_err = Some(err.to_string()),
         }
@@ -308,4 +263,16 @@ async fn connect_legacy_tunnel(
             last_err.unwrap_or_else(|| "legacy tunnel failed".to_string()),
         ),
     ))
+}
+
+async fn request_token_for_addr(
+    addr: SocketAddr,
+    twfid: &str,
+) -> Result<crate::protocol::DerivedToken, Error> {
+    let derived = smelly_tls::bootstrap_easyconnect_token(addr, twfid)
+        .await
+        .map_err(|err| {
+            Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
+        })?;
+    Ok(crate::protocol::DerivedToken(derived))
 }

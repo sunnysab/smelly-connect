@@ -17,6 +17,9 @@ pub const TLS_RSA_WITH_RC4_128_SHA: u16 = 0x0005;
 pub const TLS_RSA_WITH_AES_128_CBC_SHA: u16 = 0x002f;
 pub const TLS_EMPTY_RENEGOTIATION_INFO_SCSV: u16 = 0x00ff;
 pub const HEARTBEAT_EXTENSION: u16 = 0x000f;
+pub const EASYCONNECT_CLIENT_RANDOM: [u8; 32] = [0x41; 32];
+pub const EASYCONNECT_SESSION_ID: [u8; 32] =
+    *b"L3IP\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 pub type Tls10KeyBlockParts = ([u8; 20], [u8; 20], [u8; 16], [u8; 16]);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +57,25 @@ pub fn legacy_cipher_suite_from_hint(hint: &str) -> Option<u16> {
         "AES128-SHA" | "TLS_RSA_WITH_AES_128_CBC_SHA" => Some(TLS_RSA_WITH_AES_128_CBC_SHA),
         _ => None,
     }
+}
+
+pub fn easyconnect_cipher_suite_attempts(preferred: Option<u16>) -> Vec<u16> {
+    let mut attempts = Vec::new();
+    if let Some(cipher_suite) = preferred {
+        attempts.push(cipher_suite);
+    }
+    for cipher_suite in [TLS_RSA_WITH_RC4_128_SHA, TLS_RSA_WITH_AES_128_CBC_SHA] {
+        if !attempts.contains(&cipher_suite) {
+            attempts.push(cipher_suite);
+        }
+    }
+    attempts
+}
+
+pub fn easyconnect_client_hello(cipher_suite: u16) -> ClientHelloConfig {
+    ClientHelloConfig::new(EASYCONNECT_CLIENT_RANDOM, EASYCONNECT_SESSION_ID)
+        .with_cipher_suite(cipher_suite)
+        .with_compression_methods(vec![1, 0])
 }
 
 pub fn build_client_hello_record(config: &ClientHelloConfig) -> Vec<u8> {
@@ -183,6 +205,20 @@ pub async fn connect_and_read_server_hello(
 }
 
 #[cfg(feature = "tokio")]
+pub async fn bootstrap_easyconnect_token(addr: SocketAddr, twfid: &str) -> io::Result<[u8; 48]> {
+    let mut last_err = None;
+    for cipher_suite in easyconnect_cipher_suite_attempts(None) {
+        match connect_and_read_server_hello(addr, &easyconnect_client_hello(cipher_suite), twfid)
+            .await
+        {
+            Ok(result) => return Ok(result.derived_token),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| io::Error::other("legacy token bootstrap failed")))
+}
+
+#[cfg(feature = "tokio")]
 pub async fn connect_and_read_server_flight(
     addr: SocketAddr,
     config: &ClientHelloConfig,
@@ -301,6 +337,15 @@ pub async fn connect_tunnel(
         server_hello: server_flight.server_hello,
         master_secret,
     })
+}
+
+#[cfg(feature = "tokio")]
+pub async fn connect_easyconnect_tunnel(
+    addr: SocketAddr,
+    cipher_suite: u16,
+) -> io::Result<TunnelConnection> {
+    let hello = easyconnect_client_hello(cipher_suite);
+    connect_tunnel(addr, &hello).await
 }
 
 #[cfg(feature = "tokio")]

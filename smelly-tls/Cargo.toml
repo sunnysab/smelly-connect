@@ -26,6 +26,3 @@ x509-cert = "0.2"
 [features]
 default = []
 tokio = ["dep:tokio"]
-
-[dev-dependencies]
-openssl = "0.10"

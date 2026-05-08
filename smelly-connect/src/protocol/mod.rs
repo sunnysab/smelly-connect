@@ -1,5 +1,4 @@
 pub mod control;
-pub mod legacy_tls;
 pub mod tls;
 
 pub use crate::kernel::tunnel::parse_assigned_ip_reply;
