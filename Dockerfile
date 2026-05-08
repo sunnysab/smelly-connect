@@ -6,7 +6,6 @@ RUN apk add --no-cache \
     musl-dev \
     openssl-dev \
     openssl-libs-static \
-    perl \
     pkgconfig
 
 COPY Cargo.toml Cargo.lock ./
