@@ -1,8 +1,11 @@
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
 #[cfg(feature = "tokio")]
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
+#[cfg(feature = "tokio")]
+use der::asn1::Ia5String;
 #[cfg(feature = "tokio")]
 use der::{Decode, Encode};
 use hmac::{Hmac, Mac};
@@ -19,6 +22,10 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use sha1::Sha1;
 #[cfg(feature = "tokio")]
 use x509_cert::Certificate;
+#[cfg(feature = "tokio")]
+use x509_cert::ext::pkix::AuthorityInfoAccessSyntax;
+#[cfg(feature = "tokio")]
+use x509_cert::ext::pkix::name::GeneralName;
 
 pub const TLS11: u16 = 0x0302;
 pub const TLS_RSA_WITH_RC4_128_SHA: u16 = 0x0005;
@@ -105,20 +112,47 @@ fn clone_io_error(err: &io::Error) -> io::Error {
 }
 
 #[cfg(feature = "tokio")]
+fn root_store_from_der_certs<'a>(
+    certs: impl IntoIterator<Item = CertificateDer<'a>>,
+) -> RootCertStore {
+    let mut roots = RootCertStore::empty();
+    let _ = roots.add_parsable_certificates(certs);
+    roots
+}
+
+#[cfg(feature = "tokio")]
+fn mozilla_root_store() -> RootCertStore {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    roots
+}
+
+#[cfg(feature = "tokio")]
+fn merge_root_store(roots: &mut RootCertStore, extra_roots: &RootCertStore) {
+    roots.extend(extra_roots.roots.iter().cloned());
+}
+
+#[cfg(feature = "tokio")]
+fn build_root_store_with_supplemental_native_roots<'a>(
+    mut roots: RootCertStore,
+    native_certs: impl IntoIterator<Item = CertificateDer<'a>>,
+) -> io::Result<RootCertStore> {
+    let native_roots = root_store_from_der_certs(native_certs);
+    merge_root_store(&mut roots, &native_roots);
+    if roots.is_empty() {
+        return Err(io::Error::other("no trusted root certificates available"));
+    }
+    Ok(roots)
+}
+
+#[cfg(feature = "tokio")]
 fn default_root_store() -> io::Result<RootCertStore> {
     static ROOTS: OnceLock<io::Result<RootCertStore>> = OnceLock::new();
     match ROOTS.get_or_init(|| {
-        let mut roots = RootCertStore::empty();
-        let native = rustls_native_certs::load_native_certs();
-        let native_certs = native.certs;
-        let _ = roots.add_parsable_certificates(native_certs);
-        if roots.is_empty() {
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        }
-        if roots.is_empty() {
-            return Err(io::Error::other("no trusted root certificates available"));
-        }
-        Ok(roots)
+        build_root_store_with_supplemental_native_roots(
+            mozilla_root_store(),
+            rustls_native_certs::load_native_certs().certs,
+        )
     }) {
         Ok(roots) => Ok(roots.clone()),
         Err(err) => Err(clone_io_error(err)),
@@ -146,15 +180,34 @@ fn root_store_for_policy(policy: &ServerCertPolicy) -> io::Result<Option<RootCer
 }
 
 #[cfg(feature = "tokio")]
-fn verify_server_certificate_chain(
+async fn verify_server_certificate_chain(
     certificate_chain: &[Vec<u8>],
     server_name: &str,
     policy: &ServerCertPolicy,
 ) -> io::Result<()> {
-    let Some(roots) = root_store_for_policy(policy)? else {
+    let roots = root_store_for_policy(policy)?;
+    match verify_server_certificate_chain_with_roots(certificate_chain, server_name, roots.as_ref())
+    {
+        Ok(()) => Ok(()),
+        Err(err) if err.to_string().contains("UnknownIssuer") => {
+            let augmented =
+                augment_certificate_chain_via_aia(certificate_chain, server_name, roots.as_ref())
+                    .await?;
+            verify_server_certificate_chain_with_roots(&augmented, server_name, roots.as_ref())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(feature = "tokio")]
+fn verify_server_certificate_chain_with_roots(
+    certificate_chain: &[Vec<u8>],
+    server_name: &str,
+    roots: Option<&RootCertStore>,
+) -> io::Result<()> {
+    let Some(roots) = roots else {
         return Ok(());
     };
-
     let leaf = certificate_chain
         .first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing server certificate"))?;
@@ -173,7 +226,7 @@ fn verify_server_certificate_chain(
         .all;
     verify_server_cert_signed_by_trust_anchor(
         &parsed,
-        &roots,
+        roots,
         &intermediates,
         UnixTime::now(),
         supported_algs,
@@ -181,6 +234,158 @@ fn verify_server_certificate_chain(
     .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
     verify_server_name(&parsed, &server_name)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
+}
+
+#[cfg(feature = "tokio")]
+async fn augment_certificate_chain_via_aia(
+    certificate_chain: &[Vec<u8>],
+    server_name: &str,
+    roots: Option<&RootCertStore>,
+) -> io::Result<Vec<Vec<u8>>> {
+    if let Some(cached) = cached_augmented_chain(certificate_chain) {
+        return Ok(cached);
+    }
+
+    let mut augmented = certificate_chain.to_vec();
+    let mut seen_urls = HashSet::new();
+    let mut seen_certs = HashSet::new();
+    for cert in &augmented {
+        seen_certs.insert(hex::encode(cert));
+    }
+
+    for _ in 0..4 {
+        let mut fetched_any = false;
+        let snapshot = augmented.clone();
+        for cert_der in snapshot {
+            for url in ca_issuer_urls(&cert_der)? {
+                if !seen_urls.insert(url.clone()) {
+                    continue;
+                }
+                let issuer_der = fetch_issuer_certificate(&url).await?;
+                let fingerprint = hex::encode(&issuer_der);
+                if seen_certs.insert(fingerprint) {
+                    augmented.push(issuer_der);
+                    fetched_any = true;
+                    match verify_server_certificate_chain_with_roots(&augmented, server_name, roots)
+                    {
+                        Ok(()) => {
+                            cache_augmented_chain(certificate_chain, &augmented);
+                            return Ok(augmented);
+                        }
+                        Err(err) if err.to_string().contains("UnknownIssuer") => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+            }
+        }
+        if !fetched_any {
+            break;
+        }
+    }
+
+    Ok(augmented)
+}
+
+#[cfg(feature = "tokio")]
+fn chain_cache() -> &'static Mutex<HashMap<String, Vec<Vec<u8>>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Vec<Vec<u8>>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(feature = "tokio")]
+fn cached_augmented_chain(certificate_chain: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
+    let leaf = certificate_chain.first()?;
+    let key = hex::encode(leaf);
+    chain_cache().lock().ok()?.get(&key).cloned()
+}
+
+#[cfg(feature = "tokio")]
+fn cache_augmented_chain(original_chain: &[Vec<u8>], augmented_chain: &[Vec<u8>]) {
+    let Some(leaf) = original_chain.first() else {
+        return;
+    };
+    let key = hex::encode(leaf);
+    if let Ok(mut cache) = chain_cache().lock() {
+        cache.insert(key, augmented_chain.to_vec());
+    }
+}
+
+#[cfg(feature = "tokio")]
+fn ca_issuer_urls(cert_der: &[u8]) -> io::Result<Vec<String>> {
+    let cert = Certificate::from_der(cert_der)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    let Some(extensions) = cert.tbs_certificate.extensions.as_ref() else {
+        return Ok(Vec::new());
+    };
+
+    let mut urls = Vec::new();
+    for ext in extensions {
+        let Ok(access) = AuthorityInfoAccessSyntax::from_der(ext.extn_value.as_bytes()) else {
+            continue;
+        };
+        for description in access.0 {
+            if description.access_method.to_string() != "1.3.6.1.5.5.7.48.2" {
+                continue;
+            }
+            if let GeneralName::UniformResourceIdentifier(uri) = description.access_location {
+                urls.push(ia5_string_to_owned(&uri));
+            }
+        }
+    }
+    Ok(urls)
+}
+
+#[cfg(feature = "tokio")]
+fn ia5_string_to_owned(uri: &Ia5String) -> String {
+    uri.as_str().to_owned()
+}
+
+#[cfg(feature = "tokio")]
+async fn fetch_issuer_certificate(url: &str) -> io::Result<Vec<u8>> {
+    if let Some(cached) = cached_issuer_certificate(url) {
+        return Ok(cached);
+    }
+
+    let response = issuer_http_client().get(url).send().await.map_err(|err| {
+        io::Error::other(format!("failed to fetch issuer certificate {url}: {err}"))
+    })?;
+    let response = response.error_for_status().map_err(|err| {
+        io::Error::other(format!(
+            "issuer certificate request failed for {url}: {err}"
+        ))
+    })?;
+    let body = response.bytes().await.map_err(|err| {
+        io::Error::other(format!(
+            "failed to read issuer certificate response {url}: {err}"
+        ))
+    })?;
+    let cert = body.to_vec();
+    cache_issuer_certificate(url, &cert);
+    Ok(cert)
+}
+
+#[cfg(feature = "tokio")]
+fn issuer_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
+#[cfg(feature = "tokio")]
+fn issuer_cert_cache() -> &'static Mutex<HashMap<String, Vec<u8>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(feature = "tokio")]
+fn cached_issuer_certificate(url: &str) -> Option<Vec<u8>> {
+    issuer_cert_cache().lock().ok()?.get(url).cloned()
+}
+
+#[cfg(feature = "tokio")]
+fn cache_issuer_certificate(url: &str, cert: &[u8]) {
+    if let Ok(mut cache) = issuer_cert_cache().lock() {
+        cache.insert(url.to_string(), cert.to_vec());
+    }
 }
 
 pub fn build_client_hello_record(config: &ClientHelloConfig) -> Vec<u8> {
@@ -311,7 +516,7 @@ pub async fn connect_and_read_server_hello_for_server(
     stream.write_all(&hello).await?;
 
     let (_flight_record, server_flight) = read_server_flight(&mut stream).await?;
-    verify_server_certificate_chain(&server_flight.certificate_chain, server_name, policy)?;
+    verify_server_certificate_chain(&server_flight.certificate_chain, server_name, policy).await?;
     let server_session_id = server_flight.server_hello.session_id;
     let derived_token = derive_easyconnect_token(&server_session_id, twfid)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid token shape"))?;
@@ -424,7 +629,7 @@ pub async fn connect_tunnel_for_server(
             ),
         )
     })?;
-    verify_server_certificate_chain(&server_flight.certificate_chain, server_name, policy)?;
+    verify_server_certificate_chain(&server_flight.certificate_chain, server_name, policy).await?;
     let public_key_der = server_public_key_der(cert)?;
 
     let premaster = build_premaster_secret([0x33; 46]);
@@ -1272,4 +1477,59 @@ fn apply_rc4(key: &[u8; 16], payload: &mut [u8]) -> io::Result<()> {
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
     cipher.apply_keystream(payload);
     Ok(())
+}
+
+#[cfg(all(test, feature = "tokio"))]
+#[path = "../../test-support/legacy_tls.rs"]
+#[allow(dead_code)]
+mod legacy_tls;
+
+#[cfg(all(test, feature = "tokio"))]
+mod tests {
+    use rustls::pki_types::CertificateDer;
+
+    use super::{
+        build_root_store_with_supplemental_native_roots, root_store_from_der_certs,
+        verify_server_certificate_chain_with_roots,
+    };
+
+    #[test]
+    fn default_root_store_supplements_non_empty_incomplete_native_roots() {
+        let native_roots = root_store_from_der_certs(
+            [super::legacy_tls::alternate_root_certificate_der()]
+                .into_iter()
+                .map(CertificateDer::from),
+        );
+        assert!(!native_roots.is_empty());
+
+        let mozilla_roots = root_store_from_der_certs(
+            [super::legacy_tls::root_certificate_der()]
+                .into_iter()
+                .map(CertificateDer::from),
+        );
+        assert!(!mozilla_roots.is_empty());
+
+        let certificate_chain = vec![super::legacy_tls::server_certificate_der()];
+        let err = verify_server_certificate_chain_with_roots(
+            &certificate_chain,
+            "localhost",
+            Some(&native_roots),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("UnknownIssuer"));
+
+        let merged_roots = build_root_store_with_supplemental_native_roots(
+            mozilla_roots,
+            [super::legacy_tls::alternate_root_certificate_der()]
+                .into_iter()
+                .map(CertificateDer::from),
+        )
+        .unwrap();
+        verify_server_certificate_chain_with_roots(
+            &certificate_chain,
+            "localhost",
+            Some(&merged_roots),
+        )
+        .unwrap();
+    }
 }

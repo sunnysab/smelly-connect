@@ -2,8 +2,12 @@
 
 [vpn]
 server = "vpn1.sit.edu.cn"
+# Optional private/campus CA file for the VPN server certificate.
+# Accepts either a PEM bundle or a single DER certificate.
+# ca_cert = "/etc/smelly-connect/campus-root.pem"
 # Explicitly bypass server certificate validation for both control-plane HTTPS
 # and legacy TLS bootstrap/tunnel flows. Defaults to false.
+# When set to true, this overrides ca_cert and skips hostname/trust checks.
 insecure_skip_verify = false
 # Explicitly disable all session/pool ICMP probing when false.
 enable_icmp_keepalive = true

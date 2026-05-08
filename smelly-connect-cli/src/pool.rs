@@ -916,6 +916,9 @@ impl SessionPool {
         cfg: &AppConfig,
         startup_mode: PoolStartupMode,
     ) -> Result<Self, PoolError> {
+        let server_cert_policy = cfg
+            .server_cert_policy()
+            .map_err(|err| PoolError::new(err.to_string()))?;
         tracing::info!(
             accounts = cfg.accounts.len(),
             min_pool_size = cfg.pool.min_pool_size,
@@ -957,7 +960,7 @@ impl SessionPool {
             allow_all_routes: cfg.routing.allow_all,
             keepalive_target,
             server: Some(cfg.vpn.server.clone()),
-            server_cert_policy: cfg.server_cert_policy(),
+            server_cert_policy,
             allow_request_triggered_probe: cfg.pool.allow_request_triggered_probe,
             min_pool_size: cfg.pool.min_pool_size,
         };

@@ -19,6 +19,7 @@ hex = "0.4"
 md-5 = "0.10"
 rc4 = "0.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 rsa = "0.9"
 rustls-native-certs = "0.8"
 sha1 = "0.10"
@@ -28,4 +29,4 @@ x509-cert = "0.2"
 
 [features]
 default = []
-tokio = ["dep:tokio"]
+tokio = ["dep:tokio", "dep:reqwest"]

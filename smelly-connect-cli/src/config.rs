@@ -1,9 +1,11 @@
 use serde::Deserialize;
-#[cfg(any(test, debug_assertions))]
 use std::fs;
+use std::io::Cursor;
 use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
+use x509_cert::Certificate;
+use x509_cert::der::Decode;
 
 use crate::cli::ProxyCommand;
 use crate::error::CliError;
@@ -28,6 +30,8 @@ pub struct VpnConfig {
     #[serde(default = "default_enable_icmp_keepalive")]
     pub enable_icmp_keepalive: bool,
     pub default_keepalive_host: Option<String>,
+    #[serde(default)]
+    pub ca_cert: Option<String>,
     #[serde(default)]
     pub insecure_skip_verify: bool,
 }
@@ -240,11 +244,15 @@ impl LoggingLevel {
 }
 
 impl AppConfig {
-    pub fn server_cert_policy(&self) -> smelly_connect::ServerCertPolicy {
+    pub fn server_cert_policy(&self) -> Result<smelly_connect::ServerCertPolicy, CliError> {
         if self.vpn.insecure_skip_verify {
-            smelly_connect::ServerCertPolicy::InsecureSkipVerify
-        } else {
-            smelly_connect::ServerCertPolicy::Verify
+            return Ok(smelly_connect::ServerCertPolicy::InsecureSkipVerify);
+        }
+
+        match self.vpn.ca_cert.as_deref() {
+            Some(path) => load_custom_root_certificates(Path::new(path))
+                .map(smelly_connect::ServerCertPolicy::VerifyWithCustomRoots),
+            None => Ok(smelly_connect::ServerCertPolicy::Verify),
         }
     }
 
@@ -288,6 +296,50 @@ impl AppConfig {
 
 fn default_enable_icmp_keepalive() -> bool {
     true
+}
+
+fn load_custom_root_certificates(path: &Path) -> Result<Vec<Vec<u8>>, CliError> {
+    let pem_or_der = fs::read(path).map_err(|err| {
+        CliError::Config(format!(
+            "failed to read vpn.ca_cert {}: {err}",
+            path.display()
+        ))
+    })?;
+
+    if looks_like_pem_certificate_bundle(&pem_or_der) {
+        let certs = rustls_pemfile::certs(&mut Cursor::new(&pem_or_der))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| {
+                CliError::Config(format!(
+                    "failed to parse PEM certificates from vpn.ca_cert {}: {err}",
+                    path.display()
+                ))
+            })?;
+        if certs.is_empty() {
+            return Err(CliError::Config(format!(
+                "vpn.ca_cert {} did not contain any PEM certificates",
+                path.display()
+            )));
+        }
+        return Ok(certs.into_iter().map(|cert| cert.to_vec()).collect());
+    }
+
+    Certificate::from_der(&pem_or_der).map_err(|err| {
+        CliError::Config(format!(
+            "vpn.ca_cert {} is neither a PEM certificate bundle nor a valid DER certificate: {err}",
+            path.display()
+        ))
+    })?;
+    Ok(vec![pem_or_der])
+}
+
+fn looks_like_pem_certificate_bundle(contents: &[u8]) -> bool {
+    let trimmed = contents
+        .iter()
+        .copied()
+        .skip_while(|byte| byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    trimmed.starts_with(b"-----BEGIN CERTIFICATE-----")
 }
 
 pub fn load(path: impl AsRef<Path>) -> Result<AppConfig, String> {

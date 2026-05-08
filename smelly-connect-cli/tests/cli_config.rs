@@ -1,3 +1,67 @@
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const ROOT_CERTIFICATE_PEM: &str = concat!(
+    "-----BEGIN CERTIFICATE-----\n",
+    "MIIDLTCCAhWgAwIBAgIUZlZmjovNQHxGIfSIwlloLjclr3cwDQYJKoZIhvcNAQEL\n",
+    "BQAwHjEcMBoGA1UEAwwTU21lbGx5IFRlc3QgUm9vdCBDQTAeFw0yNjA1MDgwNTU2\n",
+    "MTVaFw0zNjA1MDUwNTU2MTVaMB4xHDAaBgNVBAMME1NtZWxseSBUZXN0IFJvb3Qg\n",
+    "Q0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCpW6sBPwlfP89XYzqp\n",
+    "d1K3a/LCR3CXqNhbYrambPwMWwS7Ycct84T/AdkiMtQ+F53VGaO5tU33pxrMxHq0\n",
+    "aSAdy5KTitFUaTce9sABBnf8DK5WJTmtSj5cwnjLqffiN1/uK2d97W+9QS7qSlwU\n",
+    "E1j97JoU6uoQBmOXPmiByOAqmPeZEF0u7rELAIrRS1Lo6htpGOh3zNu6j7Qmu2mH\n",
+    "ScgeSMIjKGr9Yx5KrcyrhkUtgZwRg5C02aNAGiDDpzK/adXwUuUGrWyZoRPHP3IQ\n",
+    "PcQ1QDTJf5o0AIETICI8COp1Sa8QLSm2spPC+ApH5vvIScnWHtblbzsLq7LIKPGY\n",
+    "41/XAgMBAAGjYzBhMB0GA1UdDgQWBBRZQ+ja7ZwlVmLOJmaDlyGVkBISTTAfBgNV\n",
+    "HSMEGDAWgBRZQ+ja7ZwlVmLOJmaDlyGVkBISTTAPBgNVHRMBAf8EBTADAQH/MA4G\n",
+    "A1UdDwEB/wQEAwIBBjANBgkqhkiG9w0BAQsFAAOCAQEAnBenddNNgc804TsAUrro\n",
+    "CHNrNvnH9BJ2evf1mI80KEUHntkpt4Lgi+YXTSfSxVpQ0Maho/7k2wrl5g+BHINy\n",
+    "0nLDaEgnreEcQ2YsHTlKiCXoE87atsHEtsZKiQIpszHkXRgvVjwyracnZHHuiIF8\n",
+    "OoJCKtWwzcTr6twbbgFvxZRrE5wTcodn4sqoVG2qWkKCZTVWUuF8F/N4csBpg+MO\n",
+    "9Ey/RSKYMf+gI8a/oexydSTefQx9aJFOqOYFoR5FmshV5lJuf6T4C45R/SHXC9K7\n",
+    "FcDjMBrd4LsN4jnpXJnYu9q+QplajcmyI2kvHnlYaxB2qgmeF1zwT0Ln0SfQGiCR\n",
+    "6w==\n",
+    "-----END CERTIFICATE-----\n",
+);
+
+struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    fn write(path_suffix: &str, contents: impl AsRef<[u8]>) -> Self {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "smelly-connect-cli-{path_suffix}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::write(&path, contents).unwrap();
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn root_certificate_der() -> Vec<u8> {
+    rustls_pemfile::certs(&mut Cursor::new(ROOT_CERTIFICATE_PEM.as_bytes()))
+        .next()
+        .expect("root PEM should contain one certificate")
+        .expect("root PEM should parse")
+        .to_vec()
+}
+
 #[test]
 fn defaults_to_config_toml_in_cwd() {
     let cli = smelly_connect_cli::cli::Cli::parse_from(["smelly-connect-cli", "proxy"]);
@@ -67,7 +131,131 @@ fn parses_explicit_insecure_skip_verify_flag() {
 
     assert!(cfg.vpn.insecure_skip_verify);
     assert_eq!(
-        cfg.server_cert_policy(),
+        cfg.server_cert_policy().unwrap(),
+        smelly_connect::ServerCertPolicy::InsecureSkipVerify
+    );
+}
+
+#[test]
+fn loads_custom_root_certificate_from_der_file() {
+    let der = TempFile::write("root.der", root_certificate_der());
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(&format!(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+        ca_cert = "{}"
+
+        [pool]
+        min_pool_size = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+        der.path().display()
+    ))
+    .unwrap();
+
+    assert_eq!(
+        cfg.server_cert_policy().unwrap(),
+        smelly_connect::ServerCertPolicy::VerifyWithCustomRoots(vec![root_certificate_der()])
+    );
+}
+
+#[test]
+fn loads_custom_root_certificates_from_pem_bundle() {
+    let pem = TempFile::write(
+        "root.pem",
+        format!("{ROOT_CERTIFICATE_PEM}{ROOT_CERTIFICATE_PEM}"),
+    );
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(&format!(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+        ca_cert = "{}"
+
+        [pool]
+        min_pool_size = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+        pem.path().display()
+    ))
+    .unwrap();
+
+    assert_eq!(
+        cfg.server_cert_policy().unwrap(),
+        smelly_connect::ServerCertPolicy::VerifyWithCustomRoots(vec![
+            root_certificate_der(),
+            root_certificate_der(),
+        ])
+    );
+}
+
+#[test]
+fn insecure_skip_verify_takes_precedence_over_custom_root_file() {
+    let missing_path = std::env::temp_dir().join(format!(
+        "smelly-connect-cli-missing-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let cfg: smelly_connect_cli::config::AppConfig = toml::from_str(&format!(
+        r#"
+        [vpn]
+        server = "vpn1.sit.edu.cn"
+        insecure_skip_verify = true
+        ca_cert = "{}"
+
+        [pool]
+        min_pool_size = 1
+        connect_timeout_secs = 20
+        healthcheck_interval_secs = 60
+
+        [[accounts]]
+        name = "acct-01"
+        username = "user1"
+        password = "pass1"
+
+        [proxy.http]
+        enabled = true
+        listen = "127.0.0.1:8080"
+
+        [proxy.socks5]
+        enabled = false
+        listen = "127.0.0.1:1080"
+        "#,
+        missing_path.display()
+    ))
+    .unwrap();
+
+    assert_eq!(
+        cfg.server_cert_policy().unwrap(),
         smelly_connect::ServerCertPolicy::InsecureSkipVerify
     );
 }

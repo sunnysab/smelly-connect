@@ -177,6 +177,7 @@ pub async fn run_legacy_probe_with_config_typed(
     config_path: impl AsRef<Path>,
 ) -> Result<String, CliError> {
     let config = crate::config::load_typed(config_path)?;
+    let server_cert_policy = config.server_cert_policy()?;
     let account = config
         .accounts
         .first()
@@ -186,7 +187,7 @@ pub async fn run_legacy_probe_with_config_typed(
         account.username.clone(),
         account.password.clone(),
     )
-    .with_server_cert_policy(config.server_cert_policy())
+    .with_server_cert_policy(server_cert_policy.clone())
     .with_captcha_handler(smelly_connect::CaptchaHandler::from_async(
         |_, _| async move {
             Err(smelly_connect::CaptchaError::new(
@@ -201,7 +202,7 @@ pub async fn run_legacy_probe_with_config_typed(
     let token = smelly_connect::auth::control::request_token_async_with_policy(
         &config.vpn.server,
         &state.authorized_twfid,
-        config.server_cert_policy(),
+        server_cert_policy.clone(),
     )
     .await
     .map_err(|err| CliError::Command(format!("{err:?}")))?;
@@ -222,7 +223,7 @@ pub async fn run_legacy_probe_with_config_typed(
             &config.vpn.server,
             &token,
             hint,
-            config.server_cert_policy(),
+            server_cert_policy.clone(),
         )
         .await
     })
@@ -235,7 +236,7 @@ pub async fn run_legacy_probe_with_config_typed(
             &token,
             "10.0.0.8".parse().unwrap(),
             hint,
-            config.server_cert_policy(),
+            server_cert_policy.clone(),
         )
         .await
         .map(|_| "ok".to_string())
@@ -249,7 +250,7 @@ pub async fn run_legacy_probe_with_config_typed(
             &token,
             "10.0.0.8".parse().unwrap(),
             hint,
-            config.server_cert_policy(),
+            server_cert_policy.clone(),
         )
         .await
         .map(|_| "ok".to_string())
@@ -262,7 +263,7 @@ pub async fn run_legacy_probe_with_config_typed(
             &config.vpn.server,
             &token,
             hint,
-            config.server_cert_policy(),
+            server_cert_policy.clone(),
         )
         .await?;
         smelly_connect::auth::control::open_recv_tunnel_for_server_with_policy(
@@ -270,7 +271,7 @@ pub async fn run_legacy_probe_with_config_typed(
             &token,
             ip,
             hint,
-            config.server_cert_policy(),
+            server_cert_policy.clone(),
         )
         .await
         .map(|_| format!("ok ip={ip}"))

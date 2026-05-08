@@ -33,3 +33,5 @@ http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+rustls-pemfile = "2"
+x509-cert = "0.2"
