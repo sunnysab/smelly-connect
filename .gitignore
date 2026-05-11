@@ -6,3 +6,4 @@
 /.agents/
 /.codex/
 /.trellis/
+.env
