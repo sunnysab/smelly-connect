@@ -7,10 +7,12 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(feature = "tokio")]
 use der::asn1::Ia5String;
 #[cfg(feature = "tokio")]
-use der::{Decode, Encode};
-use hmac::{Hmac, Mac};
+use der::Decode;
+#[cfg(feature = "tokio")]
+use der::Encode;
+use hmac::{Hmac, KeyInit, Mac};
 use md5::Md5;
-use rc4::{KeyInit as Rc4KeyInit, Rc4, StreamCipher};
+use rc4::{Rc4, StreamCipher};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
 #[cfg(feature = "tokio")]
@@ -314,12 +316,12 @@ fn cache_augmented_chain(original_chain: &[Vec<u8>], augmented_chain: &[Vec<u8>]
 fn ca_issuer_urls(cert_der: &[u8]) -> io::Result<Vec<String>> {
     let cert = Certificate::from_der(cert_der)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-    let Some(extensions) = cert.tbs_certificate.extensions.as_ref() else {
+    let Some(extensions) = cert.tbs_certificate().extensions() else {
         return Ok(Vec::new());
     };
 
     let mut urls = Vec::new();
-    for ext in extensions {
+    for ext in extensions.iter() {
         let Ok(access) = AuthorityInfoAccessSyntax::from_der(ext.extn_value.as_bytes()) else {
             continue;
         };
@@ -1167,8 +1169,8 @@ fn parse_certificate_body(body: &[u8]) -> Option<Vec<Vec<u8>>> {
 fn server_public_key_der(cert_der: &[u8]) -> io::Result<Vec<u8>> {
     let cert = Certificate::from_der(cert_der)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-    cert.tbs_certificate
-        .subject_public_key_info
+    cert.tbs_certificate()
+        .subject_public_key_info()
         .to_der()
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
 }
@@ -1311,13 +1313,13 @@ pub fn decrypt_rc4_sha1_record(
 pub struct Rc4Sha1Encryptor {
     sequence_number: u64,
     mac_key: [u8; 20],
-    cipher: Rc4<rc4::consts::U16>,
+    cipher: Rc4,
 }
 
 impl Rc4Sha1Encryptor {
     pub fn new(mac_key: [u8; 20], enc_key: [u8; 16]) -> Self {
         let cipher =
-            Rc4::<rc4::consts::U16>::new_from_slice(&enc_key).expect("RC4 cipher init failed");
+            Rc4::new_from_slice(&enc_key).expect("RC4 cipher init failed");
         Self {
             sequence_number: 0,
             mac_key,
@@ -1339,13 +1341,13 @@ impl Rc4Sha1Encryptor {
 pub struct Rc4Sha1Decryptor {
     sequence_number: u64,
     mac_key: [u8; 20],
-    cipher: Rc4<rc4::consts::U16>,
+    cipher: Rc4,
 }
 
 impl Rc4Sha1Decryptor {
     pub fn new(mac_key: [u8; 20], enc_key: [u8; 16]) -> Self {
         let cipher =
-            Rc4::<rc4::consts::U16>::new_from_slice(&enc_key).expect("RC4 cipher init failed");
+            Rc4::new_from_slice(&enc_key).expect("RC4 cipher init failed");
         Self {
             sequence_number: 0,
             mac_key,
@@ -1462,7 +1464,7 @@ fn tls10_record_mac(
     content_type: u8,
     plaintext: &[u8],
 ) -> io::Result<Vec<u8>> {
-    let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(mac_key)
+    let mut mac = <Hmac<Sha1> as KeyInit>::new_from_slice(mac_key)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
     mac.update(&sequence_number.to_be_bytes());
     mac.update(&[content_type]);
@@ -1473,7 +1475,7 @@ fn tls10_record_mac(
 }
 
 fn apply_rc4(key: &[u8; 16], payload: &mut [u8]) -> io::Result<()> {
-    let mut cipher = Rc4::<rc4::consts::U16>::new_from_slice(key)
+    let mut cipher = Rc4::new_from_slice(key)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
     cipher.apply_keystream(payload);
     Ok(())
