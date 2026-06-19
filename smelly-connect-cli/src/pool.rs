@@ -972,21 +972,20 @@ impl SessionPool {
             .nodes
             .iter_mut()
             .find(|node| node.account.name == account_name)
-        {
-            if matches!(
+            && matches!(
                 node.state,
                 AccountState::Ready(_) | AccountState::Suspect(_)
-            ) {
-                node.consecutive_failures = node.failure_threshold;
-                open_node(node, AccountFailure::transient(error.clone()));
-                tracing::warn!(
-                    account = %account_name,
-                    reason = %error,
-                    failure_threshold = node.failure_threshold,
-                    backoff_secs = node.current_backoff.as_secs(),
-                    "live session marked unhealthy after vpn probe failures"
-                );
-            }
+            )
+        {
+            node.consecutive_failures = node.failure_threshold;
+            open_node(node, AccountFailure::transient(error.clone()));
+            tracing::warn!(
+                account = %account_name,
+                reason = %error,
+                failure_threshold = node.failure_threshold,
+                backoff_secs = node.current_backoff.as_secs(),
+                "live session marked unhealthy after vpn probe failures"
+            );
         }
     }
 
@@ -1002,22 +1001,21 @@ impl SessionPool {
             .nodes
             .iter_mut()
             .find(|node| node.account.name == account_name)
-        {
-            if matches!(
+            && matches!(
                 node.state,
                 AccountState::Ready(_) | AccountState::Suspect(_)
-            ) {
-                node.reconnect_session = Some(session.clone());
-                node.consecutive_failures = node.failure_threshold;
-                open_node(node, AccountFailure::transient(error.clone()));
-                tracing::warn!(
-                    account = %account_name,
-                    reason = %error,
-                    failure_threshold = node.failure_threshold,
-                    backoff_secs = node.current_backoff.as_secs(),
-                    "live session retired and queued for reconnect"
-                );
-            }
+            )
+        {
+            node.reconnect_session = Some(session.clone());
+            node.consecutive_failures = node.failure_threshold;
+            open_node(node, AccountFailure::transient(error.clone()));
+            tracing::warn!(
+                account = %account_name,
+                reason = %error,
+                failure_threshold = node.failure_threshold,
+                backoff_secs = node.current_backoff.as_secs(),
+                "live session retired and queued for reconnect"
+            );
         }
     }
 
@@ -2058,11 +2056,11 @@ impl SessionPool {
         let now = Instant::now();
         for node in &mut state.nodes {
             match &node.state {
-                AccountState::Open(_) if node.open_until.map_or(false, |t| now >= t) => {
+                AccountState::Open(_) if node.open_until.is_some_and(|t| now >= t) => {
                     node.state = AccountState::HalfOpen(node.account.clone());
                     node.open_until = None;
                 }
-                AccountState::Connecting if node.open_until.map_or(false, |t| now >= t) => {
+                AccountState::Connecting if node.open_until.is_some_and(|t| now >= t) => {
                     tracing::warn!(
                         account = %node.account.name,
                         "connecting timed out, degrading to open"
