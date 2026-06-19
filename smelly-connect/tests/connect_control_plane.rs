@@ -29,8 +29,8 @@ async fn connect_runs_real_control_plane_flow_against_fake_server() {
     ));
 }
 
-#[test]
-fn token_request_derives_token_from_tls_session_id() {
+#[tokio::test]
+async fn token_request_derives_token_from_tls_session_id() {
     use std::net::TcpListener;
     use std::thread;
 
@@ -58,11 +58,12 @@ fn token_request_derives_token_from_tls_session_id() {
         std::io::Write::flush(&mut stream).unwrap();
     });
 
-    let token = smelly_connect::auth::control::request_token_with_policy(
+    let token = smelly_connect::auth::control::request_token_async_with_policy(
         &test_server(addr),
         "abcdefghijklmnop",
         test_server_cert_policy(),
     )
+    .await
     .unwrap();
     assert_eq!(
         std::str::from_utf8(token.as_bytes()).unwrap(),

@@ -16,32 +16,6 @@ pub(crate) async fn run_control_plane(
     crate::runtime::control_plane::run_control_plane(config).await
 }
 
-/// Legacy: Derive token from TLS ServerHello SessionID.
-/// Used when sslctx is not available (old protocol path).
-pub fn request_token(server: &str, twfid: &str) -> Result<crate::protocol::DerivedToken, Error> {
-    request_token_with_policy(server, twfid, ServerCertPolicy::Verify)
-}
-
-pub fn request_token_with_policy(
-    server: &str,
-    twfid: &str,
-    server_cert_policy: ServerCertPolicy,
-) -> Result<crate::protocol::DerivedToken, Error> {
-    let addr = resolve_server_addr(server)?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()
-        .map_err(|err| {
-            Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(err.to_string()))
-        })?;
-    runtime.block_on(request_token_for_addr(
-        addr,
-        &configured_server_identity(server),
-        twfid,
-        &server_cert_policy,
-    ))
-}
-
 pub async fn request_token_async(
     server: &str,
     twfid: &str,

@@ -1,4 +1,4 @@
-use smelly_connect::auth::control::{request_ip_for_server, request_token};
+use smelly_connect::auth::control::{request_ip_for_server, request_token_async};
 use smelly_connect::{CaptchaHandler, EasyConnectConfig, run_control_plane};
 
 #[tokio::main(flavor = "current_thread")]
@@ -16,7 +16,9 @@ async fn main() {
     );
 
     let state = run_control_plane(&config).await.expect("control plane");
-    let token = request_token(&format!("{server}:443"), &state.authorized_twfid).expect("token");
+    let token = request_token_async(&format!("{server}:443"), &state.authorized_twfid)
+        .await
+        .expect("token");
     let ip = request_ip_for_server(&server, &token, state.legacy_cipher_hint.as_deref())
         .await
         .expect("request ip");
