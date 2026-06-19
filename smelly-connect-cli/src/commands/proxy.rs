@@ -103,10 +103,17 @@ where
         let pool = pool.clone();
         let stats = stats.clone();
         let shutdown = shutdown_rx.clone();
-        tasks.spawn(async move {
-            crate::management::serve_management(listen_management, pool, stats, shutdown)
-                .await
-                .map_err(|err| format!("management listener failed: {err}"))
+        tokio::spawn(async move {
+            if let Err(err) = crate::management::serve_management(
+                listen_management,
+                pool,
+                stats,
+                shutdown,
+            )
+            .await
+            {
+                tracing::warn!(error = %err, "management listener failed, continuing without management API");
+            }
         });
     }
 
