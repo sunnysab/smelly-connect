@@ -18,6 +18,10 @@ use crate::transport::device::PacketDevice;
 use crate::transport::{TransportStack, VpnStream, VpnUdpSocket};
 use crate::{RouteProtocol, domain::route_match};
 
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
 mod inner;
 mod runtime;
 
@@ -267,7 +271,7 @@ impl EasyConnectSession {
                 warn!(
                     target_host = %host,
                     target_port = port,
-                    elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                    elapsed_ms = elapsed_ms(started),
                     error_kind = session_plan_error_kind(&err),
                     error = ?err,
                     "session tcp connect planning failed"
@@ -282,7 +286,7 @@ impl EasyConnectSession {
                     target_host = %host,
                     target_port = port,
                     resolved_addr = %addr,
-                    plan_elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                    plan_elapsed_ms = elapsed_ms(started),
                     "session tcp connect planned"
                 );
                 let _connect_permit = self.inner.runtime.acquire_connect_permit().await;
@@ -294,8 +298,8 @@ impl EasyConnectSession {
                             target_host = %host,
                             target_port = port,
                             resolved_addr = %addr,
-                            connect_elapsed_ms = transport_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                            total_elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                            connect_elapsed_ms = elapsed_ms(transport_started),
+                            total_elapsed_ms = elapsed_ms(started),
                             "session tcp connect established"
                         );
                         Ok(stream)
@@ -307,8 +311,8 @@ impl EasyConnectSession {
                             target_host = %host,
                             target_port = port,
                             resolved_addr = %addr,
-                            connect_elapsed_ms = transport_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                            total_elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                            connect_elapsed_ms = elapsed_ms(transport_started),
+                            total_elapsed_ms = elapsed_ms(started),
                             error_kind = session_transport_error_kind(&mapped),
                             error = ?mapped,
                             "session tcp connect failed"
@@ -323,7 +327,7 @@ impl EasyConnectSession {
                     target_host = %host,
                     target_port = port,
                     resolved_addr = %addr,
-                    plan_elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                    plan_elapsed_ms = elapsed_ms(started),
                     "session tcp connect planned"
                 );
                 let transport_started = std::time::Instant::now();
@@ -334,8 +338,8 @@ impl EasyConnectSession {
                             target_host = %host,
                             target_port = port,
                             resolved_addr = %addr,
-                            connect_elapsed_ms = transport_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                            total_elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                            connect_elapsed_ms = elapsed_ms(transport_started),
+                            total_elapsed_ms = elapsed_ms(started),
                             "session tcp connect established"
                         );
                         Ok(VpnStream::new(stream))
@@ -347,8 +351,8 @@ impl EasyConnectSession {
                             target_host = %host,
                             target_port = port,
                             resolved_addr = %addr,
-                            connect_elapsed_ms = transport_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                            total_elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                            connect_elapsed_ms = elapsed_ms(transport_started),
+                            total_elapsed_ms = elapsed_ms(started),
                             error_kind = session_transport_error_kind(&mapped),
                             error = ?mapped,
                             "session tcp connect failed"
