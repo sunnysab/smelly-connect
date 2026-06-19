@@ -22,7 +22,7 @@ Rust 实现的 EasyConnect VPN 客户端。
 - **smelly-connect-cli** — CLI 工具，支持前台 `proxy` 服务、`test` 诊断、`inspect` / `status` / `routes` 查询，可选管理 API。
 - **smelly-tls** — 面向 EasyConnect 旧协议的 TLS 1.1 客户端，用于数据面隧道握手与加解密。
 
-主库版本：`smelly-connect v0.2.0`
+主库版本：`smelly-connect v0.5.0`
 
 ## 快速开始
 
@@ -79,16 +79,17 @@ curl -x http://127.0.0.1:8080 https://jwxt.sit.edu.cn -I
 | `server` | string | **必填** | VPN 服务器地址（不带协议前缀） |
 | `enable_icmp_keepalive` | bool | `true` | ICMP keepalive 总开关 |
 | `default_keepalive_host` | string | — | keepalive 默认目标（如未设置则不启动 ICMP 探测） |
+| `ca_cert` | string | — | 自定义 CA 证书路径（PEM 或 DER 格式） |
+| `insecure_skip_verify` | bool | `false` | 跳过服务端证书验证 |
 
 ### `[pool]`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `prewarm` | u64 | `1` | 启动时预建联数 |
+| `min_pool_size` | u64 | `1` | 启动时预建联数 |
 | `connect_timeout_secs` | u64 | `20` | 回退超时（被下面两个细粒度超时覆盖） |
 | `session_connect_timeout_secs` | u64 | `connect_timeout_secs` | 单会话建联超时 |
 | `healthcheck_interval_secs` | u64 | `60` | 健康检查间隔 |
-| `selection` | string | `"round_robin"` | 节点选择策略（当前仅支持轮询） |
 | `failure_threshold` | u32 | `3` | 连续失败阈值，到达后节点摘除 |
 | `backoff_base_secs` | u64 | `30` | 摘除后首次恢复等待 |
 | `backoff_max_secs` | u64 | `600` | 摘除后最大恢复等待 |
@@ -181,7 +182,7 @@ protocol = "all"
 smelly-connect-cli proxy
 smelly-connect-cli proxy --listen-http 0.0.0.0:8080 --listen-socks5 0.0.0.0:1080
 smelly-connect-cli proxy --allow-all            # 所有目标强制走 VPN
-smelly-connect-cli proxy --prewarm 4            # 覆盖 pool.prewarm
+smelly-connect-cli proxy --min-pool-size 4      # 覆盖 pool.min_pool_size
 smelly-connect-cli proxy --keepalive-host jwxt.sit.edu.cn
 ```
 
@@ -300,7 +301,7 @@ ICMP keepalive 走 smoltcp 用户态栈 + EasyConnect 隧道，不依赖宿主�
 - `smelly-connect/src/kernel/` — EasyConnect 协议内核：控制面解析、隧道报文构造
 - `smelly-connect/src/transport/netstack.rs` — 基于 smoltcp 的用户态 TCP/IP 栈（actor 模型）
 - `smelly-connect/src/runtime/` — 控制面流程、数据面运行时、后台任务
-- `smelly-connect-cli/src/pool.rs` — 多账号连接池、健康检查、故障转移
+- `smelly-connect-cli/src/pool/` — 多账号连接池、健康检查、故障转移（state / snapshot / maintenance 子模块）
 
 ## 环境变量（示例程序专用）
 
