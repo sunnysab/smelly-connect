@@ -226,6 +226,12 @@ const DEFAULT_VPN_HEALTH_PROBE_ATTEMPTS: usize = 3;
 const DEFAULT_VPN_HEALTH_PROBE_DELAY: Duration = Duration::from_millis(200);
 const RECOVERY_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Additional margin added to pool.connect_timeout when awaiting a spawned maintenance
+/// recovery task. If the inner task does not complete within connect_timeout + margin,
+/// the JoinSet is aborted to unblock the maintenance loop. Any node left in Connecting
+/// state is reclaimed by refresh_time_based_states on the next cycle.
+const MAINTENANCE_TASK_TIMEOUT_MARGIN: Duration = Duration::from_secs(5);
+
 #[cfg(any(test, feature = "test-utils"))]
 type TestConnectFuture = Pin<Box<dyn Future<Output = Result<Session, PoolError>> + Send>>;
 
@@ -1115,18 +1121,17 @@ impl SessionPool {
             .iter_mut()
             .find(|node| node.account.name == account_name)
         {
-            node.live_probe_in_flight = false;
             if matches!(
                 node.state,
                 AccountState::Ready(_) | AccountState::Suspect(_)
             ) {
                 node.consecutive_failures = node.failure_threshold;
-                node.open_until = Some(Instant::now());
-                node.state = AccountState::Open(AccountFailure::transient(error.clone()));
+                open_node(node, AccountFailure::transient(error.clone()));
                 tracing::warn!(
                     account = %account_name,
                     reason = %error,
                     failure_threshold = node.failure_threshold,
+                    backoff_secs = node.current_backoff.as_secs(),
                     "live session marked unhealthy after vpn probe failures"
                 );
             }
@@ -1146,19 +1151,18 @@ impl SessionPool {
             .iter_mut()
             .find(|node| node.account.name == account_name)
         {
-            node.live_probe_in_flight = false;
             if matches!(
                 node.state,
                 AccountState::Ready(_) | AccountState::Suspect(_)
             ) {
                 node.reconnect_session = Some(session.clone());
                 node.consecutive_failures = node.failure_threshold;
-                node.open_until = Some(Instant::now());
-                node.state = AccountState::Open(AccountFailure::transient(error.clone()));
+                open_node(node, AccountFailure::transient(error.clone()));
                 tracing::warn!(
                     account = %account_name,
                     reason = %error,
                     failure_threshold = node.failure_threshold,
+                    backoff_secs = node.current_backoff.as_secs(),
                     "live session retired and queued for reconnect"
                 );
             }
@@ -1840,13 +1844,27 @@ impl SessionPool {
                 }
             }
 
-            match pending.join_next().await {
-                Some(Ok(Ok(()))) | Some(Ok(Err(_))) => {}
-                Some(Err(err)) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
-                Some(Err(err)) => {
-                    tracing::warn!(error = %err, "pool maintenance task did not complete cleanly");
+            let task_timeout = self.connect_timeout + MAINTENANCE_TASK_TIMEOUT_MARGIN;
+            match tokio::time::timeout(task_timeout, pending.join_next()).await {
+                Ok(Some(Ok(Ok(()))) | Some(Ok(Err(_)))) => {}
+                Ok(Some(Err(err))) if err.is_panic() => {
+                    std::panic::resume_unwind(err.into_panic());
                 }
-                None => break,
+                Ok(Some(Err(err))) => {
+                    tracing::warn!(
+                        error = %err,
+                        "pool maintenance task did not complete cleanly"
+                    );
+                }
+                Ok(None) => break,
+                Err(_elapsed) => {
+                    tracing::error!(
+                        timeout_secs = task_timeout.as_secs(),
+                        "pool maintenance task hung; aborting pending tasks"
+                    );
+                    pending.abort_all();
+                    break;
+                }
             }
         }
     }
@@ -1929,6 +1947,7 @@ impl SessionPool {
             let account = state.nodes[idx].account.clone();
             let name = state.nodes[idx].account.name.clone();
             state.nodes[idx].state = AccountState::Connecting;
+            state.nodes[idx].open_until = Some(Instant::now() + self.connect_timeout);
             (name, account, server)
         };
 
@@ -1993,7 +2012,7 @@ impl SessionPool {
         if state.nodes.iter().any(|node| {
             matches!(
                 node.state,
-                AccountState::Ready(_) | AccountState::Suspect(_) | AccountState::Connecting
+                AccountState::Ready(_) | AccountState::Suspect(_)
             )
         }) {
             return Ok(None);
@@ -2019,7 +2038,7 @@ impl SessionPool {
         let name = node.account.name.clone();
         let reconnect_session = node.reconnect_session.clone();
         node.state = AccountState::Connecting;
-        node.open_until = None;
+        node.open_until = Some(Instant::now() + self.connect_timeout);
         tracing::info!(account = %name, "request-triggered recovery probe scheduled");
         Ok(Some((name, account, reconnect_session)))
     }
@@ -2074,7 +2093,7 @@ impl SessionPool {
         let name = node.account.name.clone();
         let reconnect_session = node.reconnect_session.clone();
         node.state = AccountState::Connecting;
-        node.open_until = None;
+        node.open_until = Some(Instant::now() + self.connect_timeout);
         node.live_probe_in_flight = true;
         tracing::info!(account = %name, "maintenance recovery probe scheduled");
         Some((name, account, reconnect_session))
@@ -2186,11 +2205,20 @@ impl SessionPool {
         let mut state = self.inner.lock().await;
         let now = Instant::now();
         for node in &mut state.nodes {
-            if let (AccountState::Open(_), Some(open_until)) = (&node.state, node.open_until)
-                && now >= open_until
-            {
-                node.state = AccountState::HalfOpen(node.account.clone());
-                node.open_until = None;
+            match &node.state {
+                AccountState::Open(_) if node.open_until.map_or(false, |t| now >= t) => {
+                    node.state = AccountState::HalfOpen(node.account.clone());
+                    node.open_until = None;
+                }
+                AccountState::Connecting if node.open_until.map_or(false, |t| now >= t) => {
+                    tracing::warn!(
+                        account = %node.account.name,
+                        "connecting timed out, degrading to open"
+                    );
+                    node.live_probe_in_flight = false;
+                    open_node(node, AccountFailure::transient("connecting timed out"));
+                }
+                _ => {}
             }
         }
     }
