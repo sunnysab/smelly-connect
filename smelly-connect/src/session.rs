@@ -204,10 +204,13 @@ impl EasyConnectSession {
         if let Ok(ip) = host.parse::<Ipv4Addr>() {
             !self.matches_ip_resource(IpAddr::V4(ip), port, RouteProtocol::Tcp)
         } else {
-            !(
-                self.inner.resources.matches_domain(host, port, RouteProtocol::Tcp)
-                || self.local_route_overrides.matches_domain(host, port, RouteProtocol::Tcp)
-            )
+            !(self
+                .inner
+                .resources
+                .matches_domain(host, port, RouteProtocol::Tcp)
+                || self
+                    .local_route_overrides
+                    .matches_domain(host, port, RouteProtocol::Tcp))
         }
     }
 
