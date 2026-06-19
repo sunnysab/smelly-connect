@@ -5,8 +5,8 @@ use std::future::Future;
 use std::net::IpAddr;
 #[cfg(any(test, feature = "test-utils"))]
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use smelly_connect::domain::route_policy::RoutePolicy;
@@ -27,11 +27,11 @@ mod state;
 
 use maintenance::PoolMaintenance;
 use selection::next_selectable_index;
-use snapshot::{build_local_route_set_snapshot, build_route_set_snapshot};
 pub use snapshot::{
     AccountNodeSnapshot, AccountRoutesSnapshot, PoolHealthStatus, PoolSnapshot, PoolSummary,
     ProbeRaceResult, RoutesSnapshot,
 };
+use snapshot::{build_local_route_set_snapshot, build_route_set_snapshot};
 use state::disable_node;
 #[cfg(any(test, feature = "test-utils"))]
 use state::next_backoff;

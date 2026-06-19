@@ -5,11 +5,11 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "tokio")]
-use der::asn1::Ia5String;
-#[cfg(feature = "tokio")]
 use der::Decode;
 #[cfg(feature = "tokio")]
 use der::Encode;
+#[cfg(feature = "tokio")]
+use der::asn1::Ia5String;
 use hmac::{Hmac, KeyInit, Mac};
 use md5::Md5;
 use rc4::{Rc4, StreamCipher};
@@ -1318,8 +1318,7 @@ pub struct Rc4Sha1Encryptor {
 
 impl Rc4Sha1Encryptor {
     pub fn new(mac_key: [u8; 20], enc_key: [u8; 16]) -> Self {
-        let cipher =
-            Rc4::new_from_slice(&enc_key).expect("RC4 cipher init failed");
+        let cipher = Rc4::new_from_slice(&enc_key).expect("RC4 cipher init failed");
         Self {
             sequence_number: 0,
             mac_key,
@@ -1346,8 +1345,7 @@ pub struct Rc4Sha1Decryptor {
 
 impl Rc4Sha1Decryptor {
     pub fn new(mac_key: [u8; 20], enc_key: [u8; 16]) -> Self {
-        let cipher =
-            Rc4::new_from_slice(&enc_key).expect("RC4 cipher init failed");
+        let cipher = Rc4::new_from_slice(&enc_key).expect("RC4 cipher init failed");
         Self {
             sequence_number: 0,
             mac_key,
