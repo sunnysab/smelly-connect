@@ -1,7 +1,7 @@
 use crate::auth::CaptchaHandler;
 use crate::config::EasyConnectConfig;
 use crate::error::{ControlPlaneError, Error};
-use crate::facade::session::Session;
+use crate::session::EasyConnectSession;
 use smelly_tls::ServerCertPolicy;
 
 pub struct EasyConnectClient {
@@ -29,7 +29,7 @@ impl EasyConnectClient {
         }
     }
 
-    pub async fn connect(&self) -> Result<Session, Error> {
+    pub async fn connect(&self) -> Result<EasyConnectSession, Error> {
         self.config.clone().connect().await
     }
 }
