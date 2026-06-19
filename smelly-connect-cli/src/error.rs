@@ -18,3 +18,9 @@ impl Display for CliError {
 }
 
 impl std::error::Error for CliError {}
+
+impl CliError {
+    pub fn is_config_error(&self) -> bool {
+        matches!(self, Self::Config(_))
+    }
+}

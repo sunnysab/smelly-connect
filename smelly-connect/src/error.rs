@@ -12,6 +12,34 @@ pub enum Error {
     Transport(TransportError),
 }
 
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ControlPlane(e) => write!(f, "control plane: {e}"),
+            Self::Integration(e) => write!(f, "integration: {e}"),
+            Self::Proxy(e) => write!(f, "proxy: {e}"),
+            Self::Resolve(e) => write!(f, "resolve: {e}"),
+            Self::RouteDecision(e) => write!(f, "route decision: {e}"),
+            Self::TunnelBootstrap(e) => write!(f, "tunnel bootstrap: {e}"),
+            Self::Transport(e) => write!(f, "transport: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ControlPlane(e) => Some(e),
+            Self::Integration(e) => Some(e),
+            Self::Proxy(e) => Some(e),
+            Self::Resolve(e) => Some(e),
+            Self::RouteDecision(e) => Some(e),
+            Self::TunnelBootstrap(e) => Some(e),
+            Self::Transport(e) => Some(e),
+        }
+    }
+}
+
 impl Error {
     pub fn is_permanent_auth_failure(&self) -> bool {
         matches!(
@@ -43,6 +71,8 @@ impl Display for AuthError {
     }
 }
 
+impl std::error::Error for AuthError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolError {
     InvalidSessionIdLength,
@@ -50,15 +80,47 @@ pub enum ProtocolError {
     ReplyTooShort,
 }
 
+impl Display for ProtocolError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSessionIdLength => f.write_str("invalid session id length"),
+            Self::UnexpectedReplyType(ty) => write!(f, "unexpected reply type: 0x{ty:02x}"),
+            Self::ReplyTooShort => f.write_str("reply too short"),
+        }
+    }
+}
+
+impl std::error::Error for ProtocolError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
     NoRecordFound,
 }
 
+impl Display for ResolveError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoRecordFound => f.write_str("no DNS record found"),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteDecisionError {
     TargetNotAllowed,
 }
+
+impl Display for RouteDecisionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TargetNotAllowed => f.write_str("target not allowed by route policy"),
+        }
+    }
+}
+
+impl std::error::Error for RouteDecisionError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlPlaneError {
@@ -67,6 +129,27 @@ pub enum ControlPlaneError {
     CaptchaRequired,
     NotImplemented,
     ResourceParseFailed(String),
+}
+
+impl Display for ControlPlaneError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AuthFlowFailed(msg) => write!(f, "auth flow failed: {msg}"),
+            Self::PermanentAuthFailure(e) => write!(f, "permanent auth failure: {e}"),
+            Self::CaptchaRequired => f.write_str("captcha required"),
+            Self::NotImplemented => f.write_str("not implemented"),
+            Self::ResourceParseFailed(msg) => write!(f, "resource parse failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ControlPlaneError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PermanentAuthFailure(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 impl ControlPlaneError {
@@ -88,6 +171,16 @@ pub enum TunnelBootstrapError {
     HandshakeFailed(String),
 }
 
+impl Display for TunnelBootstrapError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HandshakeFailed(msg) => write!(f, "tunnel handshake failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for TunnelBootstrapError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportError {
     ConnectTimedOut,
@@ -95,15 +188,47 @@ pub enum TransportError {
     ConnectionClosed,
 }
 
+impl Display for TransportError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConnectTimedOut => f.write_str("connect timed out"),
+            Self::ConnectFailed(msg) => write!(f, "connect failed: {msg}"),
+            Self::ConnectionClosed => f.write_str("connection closed"),
+        }
+    }
+}
+
+impl std::error::Error for TransportError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxyError {
     BindFailed(String),
 }
 
+impl Display for ProxyError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BindFailed(msg) => write!(f, "proxy bind failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ProxyError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntegrationError {
     ClientBuildFailed(String),
 }
+
+impl Display for IntegrationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClientBuildFailed(msg) => write!(f, "integration client build failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for IntegrationError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptchaError {
