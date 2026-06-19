@@ -202,21 +202,12 @@ impl EasyConnectSession {
         let host = target.host();
         let port = target.port();
         if let Ok(ip) = host.parse::<Ipv4Addr>() {
-            !self
-                .inner
-                .resources
-                .matches_ip(IpAddr::V4(ip), port, RouteProtocol::Tcp)
-                && !self
-                    .local_route_overrides
-                    .matches_ip(IpAddr::V4(ip), port, RouteProtocol::Tcp)
+            !self.matches_ip_resource(IpAddr::V4(ip), port, RouteProtocol::Tcp)
         } else {
-            !self
-                .inner
-                .resources
-                .matches_domain(host, port, RouteProtocol::Tcp)
-                && !self
-                    .local_route_overrides
-                    .matches_domain(host, port, RouteProtocol::Tcp)
+            !(
+                self.inner.resources.matches_domain(host, port, RouteProtocol::Tcp)
+                || self.local_route_overrides.matches_domain(host, port, RouteProtocol::Tcp)
+            )
         }
     }
 
@@ -683,14 +674,7 @@ impl EasyConnectSession {
         port: u16,
         protocol: RouteProtocol,
     ) -> Result<RoutePlan, Error> {
-        if self.allow_all_routes
-            || self.inner.resources.matches_domain(host, port, protocol)
-            || self
-                .local_route_overrides
-                .matches_domain(host, port, protocol)
-            || self.inner.resources.matches_ip(ip, port, protocol)
-            || self.local_route_overrides.matches_ip(ip, port, protocol)
-        {
+        if self.allow_all_routes || self.matches_any_resource(host, ip, port, protocol) {
             Ok(RoutePlan::VpnResolved(SocketAddr::new(ip, port)))
         } else {
             self.plan_direct_or_block(SocketAddr::new(ip, port))
@@ -704,15 +688,7 @@ impl EasyConnectSession {
         protocol: RouteProtocol,
     ) -> Result<RoutePlan, Error> {
         let addr = SocketAddr::new(IpAddr::V4(ip), port);
-        if self.allow_all_routes
-            || self
-                .inner
-                .resources
-                .matches_ip(IpAddr::V4(ip), port, protocol)
-            || self
-                .local_route_overrides
-                .matches_ip(IpAddr::V4(ip), port, protocol)
-        {
+        if self.allow_all_routes || self.matches_ip_resource(IpAddr::V4(ip), port, protocol) {
             Ok(RoutePlan::VpnResolved(addr))
         } else {
             self.plan_direct_or_block(addr)
@@ -751,14 +727,7 @@ impl EasyConnectSession {
             .await
             .map_err(Error::Resolve)?;
 
-        if !self.allow_all_routes
-            && !self.inner.resources.matches_domain(&host, port, protocol)
-            && !self
-                .local_route_overrides
-                .matches_domain(&host, port, protocol)
-            && !self.inner.resources.matches_ip(ip, port, protocol)
-            && !self.local_route_overrides.matches_ip(ip, port, protocol)
-        {
+        if !self.allow_all_routes && !self.matches_any_resource(&host, ip, port, protocol) {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
 
@@ -771,19 +740,33 @@ impl EasyConnectSession {
         port: u16,
         protocol: RouteProtocol,
     ) -> Result<SocketAddr, Error> {
-        if !self.allow_all_routes
-            && !self
-                .inner
-                .resources
-                .matches_ip(IpAddr::V4(ip), port, protocol)
-            && !self
-                .local_route_overrides
-                .matches_ip(IpAddr::V4(ip), port, protocol)
-        {
+        if !self.allow_all_routes && !self.matches_ip_resource(IpAddr::V4(ip), port, protocol) {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
 
         Ok(SocketAddr::new(IpAddr::V4(ip), port))
+    }
+
+    /// Returns true if the given host (domain name) or resolved IP matches any known
+    /// resource rule, including local overrides and server-issued resources.
+    fn matches_any_resource(
+        &self,
+        host: &str,
+        ip: IpAddr,
+        port: u16,
+        protocol: RouteProtocol,
+    ) -> bool {
+        self.inner.resources.matches_domain(host, port, protocol)
+            || self
+                .local_route_overrides
+                .matches_domain(host, port, protocol)
+            || self.matches_ip_resource(ip, port, protocol)
+    }
+
+    /// Returns true if the given IP matches any known IP-based resource rule.
+    fn matches_ip_resource(&self, ip: IpAddr, port: u16, protocol: RouteProtocol) -> bool {
+        self.inner.resources.matches_ip(ip, port, protocol)
+            || self.local_route_overrides.matches_ip(ip, port, protocol)
     }
 
     pub fn failing_transport(message: &'static str) -> TransportStack {
