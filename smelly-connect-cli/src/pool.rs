@@ -6,7 +6,9 @@ use std::net::IpAddr;
 #[cfg(any(test, feature = "test-utils"))]
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(any(test, feature = "test-utils"))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use smelly_connect::domain::route_policy::RoutePolicy;
