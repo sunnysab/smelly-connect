@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 #[cfg(any(test, feature = "test-utils"))]
@@ -6,8 +5,8 @@ use std::future::Future;
 use std::net::IpAddr;
 #[cfg(any(test, feature = "test-utils"))]
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use smelly_connect::domain::route_policy::RoutePolicy;
@@ -15,16 +14,24 @@ use smelly_connect::session::normalize_override_domain;
 use smelly_connect::{
     CaptchaError, CaptchaHandler, EasyConnectClient, LocalRouteOverrides, Session,
 };
-use tokio::sync::{Mutex, watch};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::config::{AccountConfig, AppConfig, RoutingDefaultAction};
 
+mod maintenance;
 mod selection;
+mod snapshot;
 mod state;
 
+use maintenance::PoolMaintenance;
 use selection::next_selectable_index;
+use snapshot::{build_local_route_set_snapshot, build_route_set_snapshot};
+pub use snapshot::{
+    AccountNodeSnapshot, AccountRoutesSnapshot, PoolHealthStatus, PoolSnapshot, PoolSummary,
+    ProbeRaceResult, RoutesSnapshot,
+};
 use state::disable_node;
 #[cfg(any(test, feature = "test-utils"))]
 use state::next_backoff;
@@ -121,73 +128,6 @@ struct PoolState {
     total_reconnections: u64,
 }
 
-struct PoolMaintenance {
-    shutdown_tx: watch::Sender<bool>,
-    task: StdMutex<Option<JoinHandle<()>>>,
-    running: Arc<AtomicBool>,
-}
-
-impl PoolMaintenance {
-    fn new_shared() -> Arc<Self> {
-        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
-        Arc::new(Self {
-            shutdown_tx,
-            task: StdMutex::new(None),
-            running: Arc::new(AtomicBool::new(false)),
-        })
-    }
-
-    fn subscribe(&self) -> watch::Receiver<bool> {
-        self.shutdown_tx.subscribe()
-    }
-
-    fn install(&self, task: JoinHandle<()>) {
-        let mut slot = self
-            .task
-            .lock()
-            .expect("pool maintenance task mutex poisoned");
-        if slot.is_some() {
-            task.abort();
-            return;
-        }
-        *slot = Some(task);
-    }
-
-    fn signal_shutdown(&self) {
-        self.shutdown_tx.send_replace(true);
-    }
-
-    async fn shutdown(&self) {
-        self.signal_shutdown();
-        let task = {
-            let mut slot = self
-                .task
-                .lock()
-                .expect("pool maintenance task mutex poisoned");
-            slot.take()
-        };
-        if let Some(task) = task {
-            let _ = task.await;
-        }
-        self.running.store(false, Ordering::Release);
-    }
-
-    fn abort(&self) {
-        self.signal_shutdown();
-        let task = {
-            let mut slot = self
-                .task
-                .lock()
-                .expect("pool maintenance task mutex poisoned");
-            slot.take()
-        };
-        if let Some(task) = task {
-            task.abort();
-        }
-        self.running.store(false, Ordering::Release);
-    }
-}
-
 pub struct SessionPool {
     inner: Arc<Mutex<PoolState>>,
     maintenance: Arc<PoolMaintenance>,
@@ -260,94 +200,6 @@ pub enum PoolError {
 pub enum PoolStartupMode {
     RequireReady,
     AllowEmpty,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProbeRaceResult {
-    pub successes: usize,
-    pub fast_failures: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PoolHealthStatus {
-    Healthy,
-    Recovering,
-    Down,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AccountNodeSnapshot {
-    pub name: String,
-    pub state: String,
-    pub consecutive_failures: u32,
-    pub failure_threshold: u32,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct PoolSummary {
-    pub status: PoolHealthStatus,
-    pub total_nodes: usize,
-    pub selectable_nodes: usize,
-    pub ready_nodes: usize,
-    pub suspect_nodes: usize,
-    pub open_nodes: usize,
-    pub disabled_auth_nodes: usize,
-    pub half_open_nodes: usize,
-    pub connecting_nodes: usize,
-    pub configured_nodes: usize,
-    pub total_reconnections: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct PoolSnapshot {
-    #[serde(flatten)]
-    pub summary: PoolSummary,
-    pub nodes: Vec<AccountNodeSnapshot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DomainRouteSnapshot {
-    pub domain: String,
-    pub port_min: u16,
-    pub port_max: u16,
-    pub protocol: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IpRouteSnapshot {
-    pub ip_min: String,
-    pub ip_max: String,
-    pub port_min: u16,
-    pub port_max: u16,
-    pub protocol: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StaticDnsSnapshot {
-    pub host: String,
-    pub ip: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouteSetSnapshot {
-    pub domain_rules: Vec<DomainRouteSnapshot>,
-    pub ip_rules: Vec<IpRouteSnapshot>,
-    pub static_dns: Vec<StaticDnsSnapshot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AccountRoutesSnapshot {
-    pub name: String,
-    pub state: String,
-    pub routes: Option<RouteSetSnapshot>,
-    pub local_routes: Option<RouteSetSnapshot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoutesSnapshot {
-    pub total_nodes: usize,
-    pub nodes: Vec<AccountRoutesSnapshot>,
 }
 
 impl PoolError {
@@ -2398,102 +2250,6 @@ fn route_policy_from_default_action(default_action: RoutingDefaultAction) -> Rou
     match default_action {
         RoutingDefaultAction::Direct => RoutePolicy::direct_non_resource_targets(),
         RoutingDefaultAction::Block => RoutePolicy::block_non_resource_targets(),
-    }
-}
-
-fn build_route_set_snapshot(session: &Session) -> RouteSetSnapshot {
-    let resources = session.resources();
-
-    let mut domain_rules = resources
-        .domain_rules
-        .iter()
-        .map(|(domain, rule)| DomainRouteSnapshot {
-            domain: domain.clone(),
-            port_min: rule.port_min,
-            port_max: rule.port_max,
-            protocol: rule.protocol.to_string(),
-        })
-        .collect::<Vec<_>>();
-    domain_rules.sort_by(|a, b| a.domain.cmp(&b.domain));
-
-    let mut ip_rules = resources
-        .ip_rules
-        .iter()
-        .map(|rule| IpRouteSnapshot {
-            ip_min: rule.ip_min.to_string(),
-            ip_max: rule.ip_max.to_string(),
-            port_min: rule.port_min,
-            port_max: rule.port_max,
-            protocol: rule.protocol.to_string(),
-        })
-        .collect::<Vec<_>>();
-    ip_rules.sort_by(|a, b| {
-        (&a.ip_min, &a.ip_max, a.port_min, a.port_max, &a.protocol).cmp(&(
-            &b.ip_min,
-            &b.ip_max,
-            b.port_min,
-            b.port_max,
-            &b.protocol,
-        ))
-    });
-
-    let mut static_dns = resources
-        .static_dns
-        .iter()
-        .map(|(host, ip)| StaticDnsSnapshot {
-            host: host.clone(),
-            ip: ip.to_string(),
-        })
-        .collect::<Vec<_>>();
-    static_dns.sort_by(|a, b| a.host.cmp(&b.host));
-
-    RouteSetSnapshot {
-        domain_rules,
-        ip_rules,
-        static_dns,
-    }
-}
-
-fn build_local_route_set_snapshot(session: &Session) -> RouteSetSnapshot {
-    let local = session.local_route_overrides();
-
-    let mut domain_rules = local
-        .domain_rules()
-        .iter()
-        .map(|(domain, rule)| DomainRouteSnapshot {
-            domain: domain.clone(),
-            port_min: rule.port_min,
-            port_max: rule.port_max,
-            protocol: rule.protocol.to_string(),
-        })
-        .collect::<Vec<_>>();
-    domain_rules.sort_by(|a, b| a.domain.cmp(&b.domain));
-
-    let mut ip_rules = local
-        .ip_rules()
-        .iter()
-        .map(|rule| IpRouteSnapshot {
-            ip_min: rule.ip_min.to_string(),
-            ip_max: rule.ip_max.to_string(),
-            port_min: rule.port_min,
-            port_max: rule.port_max,
-            protocol: rule.protocol.to_string(),
-        })
-        .collect::<Vec<_>>();
-    ip_rules.sort_by(|a, b| {
-        (&a.ip_min, &a.ip_max, a.port_min, a.port_max, &a.protocol).cmp(&(
-            &b.ip_min,
-            &b.ip_max,
-            b.port_min,
-            b.port_max,
-            &b.protocol,
-        ))
-    });
-
-    RouteSetSnapshot {
-        domain_rules,
-        ip_rules,
-        static_dns: vec![],
     }
 }
 

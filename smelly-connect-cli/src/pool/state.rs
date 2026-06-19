@@ -1,6 +1,7 @@
 use tokio::time::Instant;
 
-use super::{AccountFailure, AccountNode, AccountState, PoolHealthStatus, PoolState, PoolSummary};
+use super::snapshot::{PoolHealthStatus, PoolSummary};
+use super::{AccountFailure, AccountNode, AccountState, PoolState};
 
 pub(super) fn next_backoff(
     current: std::time::Duration,
