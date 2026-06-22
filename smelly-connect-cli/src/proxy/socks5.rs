@@ -222,8 +222,8 @@ async fn handle_live_client(
         .read_command()
         .await
         .map_err(|err| err.to_string())?;
-    let (account_name, session) = match pool.next_live_session().await {
-        Ok(ready) => ready,
+    let pooled = match pool.acquire().await {
+        Ok(s) => s,
         Err(_) => {
             tracing::warn!(
                 protocol = tracing::field::display("socks5"),
@@ -236,6 +236,19 @@ async fn handle_live_client(
                 .map_err(|err| err.to_string())?;
             return Ok(());
         }
+    };
+    let account_name = pooled.account_name().to_string();
+    let Some(session) = pooled.session().cloned() else {
+        tracing::warn!(
+            protocol = tracing::field::display("socks5"),
+            "acquired session with no inner session"
+        );
+        stats.record_service_unavailable_no_ready_session(ProxyProtocol::Socks5);
+        proto
+            .reply_error(&ReplyError::NetworkUnreachable)
+            .await
+            .map_err(|err| err.to_string())?;
+        return Ok(());
     };
 
     match cmd {
@@ -254,12 +267,7 @@ async fn handle_live_client(
                             UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
                         )
                     {
-                        pool.report_live_session_unhealthy_if_probe_fails(
-                            &account_name,
-                            &session,
-                            format!("{err:?}"),
-                        )
-                        .await;
+                        pool.report_failure(&account_name).await;
                     }
                     proto
                         .reply_error(&map_socks5_reply_error(&err))
@@ -290,12 +298,7 @@ async fn handle_live_client(
                             UpstreamConnectError::RouteRejected | UpstreamConnectError::TimedOut
                         )
                     {
-                        pool.report_live_session_unhealthy_if_probe_fails(
-                            &account_name,
-                            &session,
-                            format!("{err:?}"),
-                        )
-                        .await;
+                        pool.report_failure(&account_name).await;
                     }
                     proto
                         .reply_error(&map_socks5_reply_error(&err))

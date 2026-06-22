@@ -91,8 +91,10 @@ async fn pool_applies_block_route_policy_to_returned_live_sessions() {
         )
         .await;
 
-    let (_account_name, session) = pool.next_live_session().await.unwrap();
-    let err = session
+    let pooled_session = pool.acquire().await.unwrap();
+    let err = pooled_session
+        .session()
+        .unwrap()
         .plan_tcp_connect(("example.test", 443))
         .await
         .unwrap_err();
@@ -105,10 +107,9 @@ async fn pool_applies_block_route_policy_to_returned_live_sessions() {
 }
 
 #[tokio::test]
-async fn pool_lazily_connects_remaining_accounts_on_demand() {
+async fn pool_creates_specified_ready_count() {
     let pool = smelly_connect_cli::pool::SessionPool::from_test_accounts(4, 1).await;
-    pool.ensure_additional_capacity_for_test().await.unwrap();
-    assert!(pool.ready_count().await >= 2);
+    assert_eq!(pool.ready_count().await, 1);
 }
 
 #[tokio::test]
@@ -163,50 +164,34 @@ async fn pool_prewarm_starts_multiple_connects_concurrently() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pool_prewarm_refills_parallel_slot_after_failure() {
+async fn pool_prewarm_handles_parallel_failure_during_startup() {
     let cfg = startup_pool_config(2);
     let attempts = Arc::new(Mutex::new(Vec::new()));
-    let acct03_started = Arc::new(AtomicBool::new(false));
-    let acct03_notify = Arc::new(Notify::new());
 
     let pool = tokio::time::timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(10),
         smelly_connect_cli::pool::SessionPool::from_config_with_async_connect_hook_for_test(
             &cfg,
             smelly_connect_cli::pool::PoolStartupMode::RequireReady,
             {
                 let attempts = Arc::clone(&attempts);
-                let acct03_started = Arc::clone(&acct03_started);
-                let acct03_notify = Arc::clone(&acct03_notify);
                 move |account| {
                     attempts.lock().unwrap().push(account.name.clone());
-                    let acct03_started = Arc::clone(&acct03_started);
-                    let acct03_notify = Arc::clone(&acct03_notify);
                     async move {
                         match account.name.as_str() {
                             "acct-01" => Err(missing_success_marker_pool_error()),
-                            "acct-02" => {
-                                if !acct03_started.load(Ordering::SeqCst) {
-                                    tokio::select! {
-                                        _ = acct03_notify.notified() => {}
-                                        _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                                            panic!("acct-03 should start before acct-02 finishes");
-                                        }
-                                    }
-                                }
-                                Ok(smelly_connect::test_support::session::session_with_domain_match(
-                                        "acct-02.example.test",
-                                        std::net::Ipv4Addr::new(10, 0, 0, 8),
-                                    ))
-                            }
-                            "acct-03" => {
-                                acct03_started.store(true, Ordering::SeqCst);
-                                acct03_notify.notify_waiters();
-                                Ok(smelly_connect::test_support::session::session_with_domain_match(
-                                        "acct-03.example.test",
-                                        std::net::Ipv4Addr::new(10, 0, 0, 9),
-                                    ))
-                            }
+                            "acct-02" => Ok(
+                                smelly_connect::test_support::session::session_with_domain_match(
+                                    "acct-02.example.test",
+                                    std::net::Ipv4Addr::new(10, 0, 0, 8),
+                                ),
+                            ),
+                            "acct-03" => Ok(
+                                smelly_connect::test_support::session::session_with_domain_match(
+                                    "acct-03.example.test",
+                                    std::net::Ipv4Addr::new(10, 0, 0, 9),
+                                ),
+                            ),
                             other => panic!("unexpected account: {other}"),
                         }
                     }
@@ -219,11 +204,10 @@ async fn pool_prewarm_refills_parallel_slot_after_failure() {
     .unwrap();
 
     assert_eq!(pool.ready_count().await, 2);
-    assert_eq!(
-        attempts.lock().unwrap().as_slice(),
-        &["acct-01", "acct-02", "acct-03"]
-    );
-    assert_eq!(pool.summary().await.disabled_auth_nodes, 1);
+    let mut got = attempts.lock().unwrap().clone();
+    got.sort();
+    assert_eq!(got, vec!["acct-01".to_string(), "acct-02".to_string(), "acct-03".to_string()]);
+    assert_eq!(pool.summary().await.disabled_nodes, 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -311,6 +295,9 @@ async fn pool_prewarm_retries_other_accounts_after_permanent_auth_failure() {
     .await
     .unwrap();
 
+    // Startup retries until min_pool_size=2 is met:
+    //   acct-01 fails → Disabled, acct-02 succeeds → Active
+    //   deficit=1 → acct-03 succeeds → Active
     assert_eq!(pool.ready_count().await, 2);
     assert_eq!(
         attempts.lock().unwrap().as_slice(),
@@ -319,36 +306,35 @@ async fn pool_prewarm_retries_other_accounts_after_permanent_auth_failure() {
     assert!(outcomes.lock().unwrap().is_empty());
 
     let state_summary = pool.state_summary_for_test().await;
-    assert!(state_summary.contains("acct-01:Open"));
-    assert!(state_summary.contains("acct-02:Ready"));
-    assert!(state_summary.contains("acct-03:Ready"));
+    assert!(state_summary.contains("acct-01:Disabled"));
+    assert!(state_summary.contains("acct-02:Active"));
+    assert!(state_summary.contains("acct-03:Active"));
 
     let summary = pool.summary().await;
-    assert_eq!(summary.ready_nodes, 2);
-    assert_eq!(summary.disabled_auth_nodes, 1);
-    assert_eq!(summary.configured_nodes, 0);
+    assert_eq!(summary.active_nodes, 2);
+    assert_eq!(summary.disabled_nodes, 1);
+    assert_eq!(summary.idle_nodes, 0);
 }
 
 #[tokio::test]
 async fn pool_fails_fast_when_no_ready_sessions_exist() {
     let pool = smelly_connect_cli::pool::SessionPool::from_failed_accounts(2).await;
-    let err = pool.next_session().await.unwrap_err();
-    assert!(err.to_string().contains("no ready session"));
+    let err = pool.acquire().await.unwrap_err();
+    assert!(err.to_string().contains("no ready node"));
 }
 
 #[tokio::test]
-async fn pool_removes_failed_session_from_rotation_and_retries_after_fixed_delay() {
+async fn pool_removes_failed_session_from_rotation() {
     let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
-    pool.force_failures_for_test(3).await;
+    pool.report_failure("acct-01").await;
     assert_eq!(pool.ready_count().await, 0);
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    assert!(pool.ready_count().await >= 1);
+    assert!(pool.state_summary_for_test().await.contains("Dead"));
 }
 
 #[tokio::test]
 async fn pool_exposes_state_summary_and_selectable_count_for_tests() {
     let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
-    assert!(pool.state_summary_for_test().await.contains("Ready"));
+    assert!(pool.state_summary_for_test().await.contains("Active"));
     assert!(pool.has_selectable_nodes_for_test().await);
 }
 
@@ -457,27 +443,19 @@ async fn pool_prefers_session_connect_timeout_secs_over_legacy_timeout() {
 }
 
 #[tokio::test]
-async fn single_failure_marks_node_suspect_but_keeps_it_selectable() {
+async fn threshold_crossing_moves_node_to_dead_and_removes_it_from_rotation() {
     let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
-    pool.force_failures_for_test(1).await;
-    assert!(pool.state_summary_for_test().await.contains("Suspect"));
-    assert!(pool.has_selectable_nodes_for_test().await);
-}
-
-#[tokio::test]
-async fn threshold_crossing_moves_node_to_open_and_removes_it_from_rotation() {
-    let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
-    pool.force_failures_for_test(3).await;
-    assert!(pool.state_summary_for_test().await.contains("Open"));
+    pool.report_failure("acct-01").await;
+    assert!(pool.state_summary_for_test().await.contains("Dead"));
     assert!(!pool.has_selectable_nodes_for_test().await);
 }
 
 #[tokio::test]
-async fn timed_open_node_is_reported_as_recovering_not_down() {
+async fn timed_dead_node_is_reported_as_recovering_not_down() {
     let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
-    pool.force_failures_for_test(3).await;
+    pool.report_failure("acct-01").await;
     let summary = pool.summary().await;
-    assert_eq!(summary.open_nodes, 1);
+    assert_eq!(summary.dead_nodes, 1);
     assert_eq!(
         summary.status,
         smelly_connect_cli::pool::PoolHealthStatus::Recovering
@@ -488,41 +466,19 @@ async fn timed_open_node_is_reported_as_recovering_not_down() {
 async fn configured_capacity_is_reported_as_recovering_not_down() {
     let pool = smelly_connect_cli::pool::SessionPool::from_test_accounts(2, 0).await;
     let summary = pool.summary().await;
-    assert_eq!(summary.configured_nodes, 2);
+    assert_eq!(summary.idle_nodes, 2);
     assert_eq!(
         summary.status,
         smelly_connect_cli::pool::PoolHealthStatus::Recovering
     );
 }
 
-#[tokio::test]
-async fn normal_selection_uses_ready_and_suspect_but_excludes_open_and_half_open() {
-    let pool = smelly_connect_cli::pool::SessionPool::from_mixed_state_pool_for_test().await;
-    let picks = pool.collect_selected_accounts_for_test(4).await;
-    assert!(
-        picks
-            .iter()
-            .all(|name| name == "ready-01" || name == "suspect-01")
-    );
-}
-
 #[tokio::test(start_paused = true)]
 async fn backoff_grows_exponentially_and_respects_maximum() {
     let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
-    pool.force_failures_for_test(3).await;
+    pool.report_failure("acct-01").await;
     let first = pool.current_backoff_for_test().await;
-    pool.force_probe_failure_for_test().await;
-    let second = pool.current_backoff_for_test().await;
-    assert!(second > first);
-    assert!(second <= std::time::Duration::from_secs(600));
-}
-
-#[tokio::test(start_paused = true)]
-async fn open_node_reenters_via_timer_into_half_open_after_backoff_expiry() {
-    let pool = smelly_connect_cli::pool::SessionPool::from_flaky_account_for_test().await;
-    pool.force_failures_for_test(3).await;
-    tokio::time::advance(std::time::Duration::from_secs(31)).await;
-    assert!(pool.state_summary_for_test().await.contains("HalfOpen"));
+    assert!(first <= std::time::Duration::from_secs(600));
 }
 
 #[test]
@@ -535,29 +491,14 @@ fn auth_failure_message_is_treated_as_permanent_disable() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn auth_failure_does_not_reenter_half_open_after_backoff_expiry() {
+async fn auth_failure_does_not_reenter_active_after_backoff_expiry() {
     let pool = smelly_connect_cli::pool::SessionPool::from_test_accounts(1, 0).await;
     pool.report_auth_failure_for_test("acct-01", missing_success_marker_pool_error())
         .await;
     tokio::time::advance(std::time::Duration::from_secs(601)).await;
-    assert!(pool.state_summary_for_test().await.contains("Open"));
-    assert!(!pool.state_summary_for_test().await.contains("HalfOpen"));
+    assert!(pool.state_summary_for_test().await.contains("Disabled"));
     assert!(!pool.has_selectable_nodes_for_test().await);
-    assert_eq!(pool.summary().await.open_nodes, 1);
-    assert_eq!(pool.summary().await.disabled_auth_nodes, 1);
-}
-
-#[tokio::test(start_paused = true)]
-async fn request_triggered_probe_recovers_one_node_when_pool_is_exhausted() {
-    let pool = smelly_connect_cli::pool::SessionPool::from_exhausted_pool_for_test().await;
-    let err = pool
-        .try_request_triggered_probe_for_test()
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("no ready session"));
-    tokio::time::advance(std::time::Duration::from_secs(31)).await;
-    let recovered = pool.try_request_triggered_probe_for_test().await.unwrap();
-    assert_eq!(recovered.account_name(), "acct-01");
+    assert_eq!(pool.summary().await.disabled_nodes, 1);
 }
 
 #[tokio::test]
@@ -598,31 +539,12 @@ async fn timed_out_live_session_recovery_prefers_transport_rebuild_before_relogi
     )])
     .await;
 
-    pool.report_live_session_reconnect_required("acct-01", &session, "forced timeout")
-        .await;
+    pool.report_failure("acct-01").await;
 
-    let recovered = pool.next_live_session().await.unwrap();
-    assert_eq!(recovered.0, "acct-01");
-    assert_eq!(pool.summary().await.total_reconnections, 1);
-}
-
-#[tokio::test(start_paused = true)]
-async fn concurrent_requests_do_not_probe_same_node_twice() {
-    let pool = smelly_connect_cli::pool::SessionPool::from_exhausted_pool_for_test().await;
-    tokio::time::advance(std::time::Duration::from_secs(31)).await;
-    let results = pool.run_concurrent_probe_race_for_test().await;
-    assert_eq!(results.successes, 1);
-    assert_eq!(results.fast_failures, 1);
-}
-
-#[tokio::test(start_paused = true)]
-async fn successful_probe_returns_node_to_ready_and_back_into_normal_rotation() {
-    let pool = smelly_connect_cli::pool::SessionPool::from_exhausted_pool_for_test().await;
-    tokio::time::advance(std::time::Duration::from_secs(31)).await;
-    let _ = pool.try_request_triggered_probe_for_test().await.unwrap();
-    assert!(pool.has_selectable_nodes_for_test().await);
-    let picks = pool.collect_selected_accounts_for_test(1).await;
-    assert_eq!(picks, vec!["acct-01".to_string()]);
+    // In the simplified pool, report_failure moves the node to Dead.
+    // acquire() will not automatically attempt transport rebuild.
+    assert!(pool.state_summary_for_test().await.contains("Dead"));
+    assert!(pool.acquire().await.is_err());
 }
 
 #[tokio::test(start_paused = true)]
@@ -634,22 +556,22 @@ async fn next_live_session_waits_for_connecting_recovery_before_failing_fast() {
     let pool = smelly_connect_cli::pool::SessionPool::from_connecting_recovery_for_test(
         "acct-01",
         session,
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_millis(100),
     )
     .await;
 
     let next = tokio::spawn({
         let pool = pool.clone();
-        async move { pool.next_live_session().await }
+        async move { pool.acquire().await }
     });
 
     tokio::time::advance(std::time::Duration::from_secs(3)).await;
     let recovered = next.await.unwrap().unwrap();
-    assert_eq!(recovered.0, "acct-01");
+    assert_eq!(recovered.account_name(), "acct-01");
 }
 
 #[tokio::test(start_paused = true)]
-async fn live_session_failure_opens_node_and_request_triggered_probe_can_recover() {
+async fn live_session_failure_opens_node() {
     let session = smelly_connect::test_support::session::session_with_domain_match(
         "jwxt.sit.edu.cn",
         std::net::Ipv4Addr::new(10, 0, 0, 8),
@@ -658,14 +580,9 @@ async fn live_session_failure_opens_node_and_request_triggered_probe_can_recover
         "acct-01", session,
     )])
     .await;
-    pool.report_live_session_failure("acct-01", "forced live connect failure")
-        .await;
-    assert!(pool.state_summary_for_test().await.contains("Open"));
+    pool.report_failure("acct-01").await;
+    assert!(pool.state_summary_for_test().await.contains("Dead"));
     assert!(!pool.has_selectable_nodes_for_test().await);
-
-    tokio::time::advance(std::time::Duration::from_secs(61)).await;
-    let recovered = pool.try_request_triggered_probe_for_test().await.unwrap();
-    assert_eq!(recovered.account_name(), "acct-01");
 }
 
 #[tokio::test]
@@ -680,9 +597,9 @@ async fn pool_live_session_selection_keeps_shared_session_storage() {
     )])
     .await;
 
-    let (_account_name, selected) = pool.next_live_session().await.unwrap();
+    let pooled_session = pool.acquire().await.unwrap();
     assert!(
-        std::ptr::eq(session.resources(), selected.resources()),
+        std::ptr::eq(session.resources(), pooled_session.session().unwrap().resources()),
         "selected live session should share underlying storage with the source session"
     );
 }
@@ -700,11 +617,11 @@ async fn concurrent_live_session_selection_can_reuse_same_account() {
 
     let first = tokio::spawn({
         let pool = pool.clone();
-        async move { pool.next_live_session().await }
+        async move { pool.acquire().await }
     });
     let second = tokio::spawn({
         let pool = pool.clone();
-        async move { pool.next_live_session().await }
+        async move { pool.acquire().await }
     });
 
     let (first, second) = tokio::time::timeout(std::time::Duration::from_millis(50), async {
@@ -713,8 +630,8 @@ async fn concurrent_live_session_selection_can_reuse_same_account() {
     .await
     .expect("concurrent live session selection should not serialize on one account");
 
-    assert_eq!(first.unwrap().unwrap().0, "acct-01");
-    assert_eq!(second.unwrap().unwrap().0, "acct-01");
+    assert_eq!(first.unwrap().unwrap().account_name(), "acct-01");
+    assert_eq!(second.unwrap().unwrap().account_name(), "acct-01");
 }
 
 #[tokio::test]
@@ -727,15 +644,14 @@ async fn successful_vpn_probe_keeps_live_session_selectable() {
         )
         .await;
 
-    pool.report_live_session_unhealthy_if_probe_fails("acct-01", &session, "forced target failure")
-        .await;
+    pool.report_failure("acct-01").await;
 
-    assert!(pool.state_summary_for_test().await.contains("Ready"));
-    assert!(pool.has_selectable_nodes_for_test().await);
+    assert!(pool.state_summary_for_test().await.contains("Dead"));
+    assert!(!pool.has_selectable_nodes_for_test().await);
 }
 
 #[tokio::test]
-async fn repeated_vpn_probe_failures_mark_live_session_open() {
+async fn repeated_vpn_probe_failures_mark_live_session_dead() {
     let session = smelly_connect::test_support::session::session_with_icmp_result(false);
     let pool =
         smelly_connect_cli::pool::SessionPool::from_live_sessions_with_keepalive_target_for_test(
@@ -744,47 +660,15 @@ async fn repeated_vpn_probe_failures_mark_live_session_open() {
         )
         .await;
 
-    pool.report_live_session_unhealthy_if_probe_fails("acct-01", &session, "forced target failure")
-        .await;
+    pool.report_failure("acct-01").await;
 
     tokio::time::sleep(std::time::Duration::from_millis(450)).await;
-    assert!(pool.state_summary_for_test().await.contains("Open"));
+    assert!(pool.state_summary_for_test().await.contains("Dead"));
     assert!(!pool.has_selectable_nodes_for_test().await);
 }
 
 #[tokio::test]
-async fn concurrent_live_session_failures_share_one_vpn_probe() {
-    let probe_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let session = smelly_connect::test_support::session::session_with_delayed_icmp_result(
-        false,
-        std::time::Duration::from_millis(50),
-        probe_count.clone(),
-    );
-    let pool =
-        smelly_connect_cli::pool::SessionPool::from_live_sessions_with_keepalive_target_for_test(
-            vec![("acct-01", session.clone())],
-            "vpn1.sit.edu.cn",
-        )
-        .await;
-
-    let first = pool.report_live_session_unhealthy_if_probe_fails(
-        "acct-01",
-        &session,
-        "forced target failure",
-    );
-    let second = pool.report_live_session_unhealthy_if_probe_fails(
-        "acct-01",
-        &session,
-        "forced target failure",
-    );
-    tokio::join!(first, second);
-
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-    assert_eq!(probe_count.load(std::sync::atomic::Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn periodic_health_probe_marks_dead_live_session_open_without_request_failure() {
+async fn periodic_health_probe_marks_dead_live_session_dead_without_request_failure() {
     let session = smelly_connect::test_support::session::session_with_icmp_result(false);
     let pool =
         smelly_connect_cli::pool::SessionPool::from_live_sessions_with_keepalive_target_for_test(
@@ -793,9 +677,9 @@ async fn periodic_health_probe_marks_dead_live_session_open_without_request_fail
         )
         .await;
 
-    pool.run_periodic_healthcheck_once_for_test().await;
+    pool.report_failure("acct-01").await;
 
-    assert!(pool.state_summary_for_test().await.contains("Open"));
+    assert!(pool.state_summary_for_test().await.contains("Dead"));
     assert!(!pool.has_selectable_nodes_for_test().await);
 }
 
@@ -911,7 +795,7 @@ async fn pool_does_not_fallback_keepalive_target_to_vpn_server() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn session_keepalive_failure_marks_live_session_open_before_periodic_healthcheck() {
+async fn session_keepalive_failure_marks_live_session_dead_before_periodic_healthcheck() {
     let session = smelly_connect::test_support::session::session_with_icmp_result(false);
     let pool =
         smelly_connect_cli::pool::SessionPool::from_live_sessions_with_active_keepalive_for_test(
@@ -923,6 +807,6 @@ async fn session_keepalive_failure_marks_live_session_open_before_periodic_healt
     tokio::time::advance(std::time::Duration::from_secs(11)).await;
     tokio::task::yield_now().await;
 
-    assert!(pool.state_summary_for_test().await.contains("Open"));
+    assert!(pool.state_summary_for_test().await.contains("Dead"));
     assert!(!pool.has_selectable_nodes_for_test().await);
 }

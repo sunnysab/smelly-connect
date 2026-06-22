@@ -1,17 +1,11 @@
-use tokio::time::Instant;
+use std::time::Duration;
 
 use super::snapshot::{PoolHealthStatus, PoolSummary};
-use super::{AccountFailure, AccountNode, AccountState, PoolState};
+use super::{AccountState, PoolState};
 
-pub(super) fn next_backoff(
-    current: std::time::Duration,
-    base: std::time::Duration,
-    max: std::time::Duration,
-) -> std::time::Duration {
-    let doubled = current.saturating_mul(2);
-    if doubled < base {
-        base
-    } else if doubled > max {
+pub(super) fn next_backoff(backoff: Duration, max: Duration) -> Duration {
+    let doubled = backoff.saturating_mul(2);
+    if doubled > max {
         max
     } else {
         doubled
@@ -20,52 +14,35 @@ pub(super) fn next_backoff(
 
 pub(super) fn state_label(state: &AccountState) -> &'static str {
     match state {
-        AccountState::Configured(_) => "Configured",
+        AccountState::Idle => "Idle",
         AccountState::Connecting => "Connecting",
-        AccountState::Ready(_) => "Ready",
-        AccountState::Suspect(_) => "Suspect",
-        AccountState::Open(_) => "Open",
-        AccountState::HalfOpen(_) => "HalfOpen",
+        AccountState::Active(_) => "Active",
+        AccountState::Dead => "Dead",
+        AccountState::Disabled => "Disabled",
     }
 }
 
 pub(super) fn build_pool_summary(state: &PoolState) -> PoolSummary {
-    let mut ready_nodes = 0;
-    let mut suspect_nodes = 0;
-    let mut open_nodes = 0;
-    let mut disabled_auth_nodes = 0;
-    let mut timed_open_nodes = 0;
-    let mut half_open_nodes = 0;
+    let mut active_nodes = 0;
     let mut connecting_nodes = 0;
-    let mut configured_nodes = 0;
+    let mut idle_nodes = 0;
+    let mut dead_nodes = 0;
+    let mut disabled_nodes = 0;
 
     for node in &state.nodes {
         match node.state {
-            AccountState::Configured(_) => configured_nodes += 1,
+            AccountState::Active(_) => active_nodes += 1,
             AccountState::Connecting => connecting_nodes += 1,
-            AccountState::Ready(_) => ready_nodes += 1,
-            AccountState::Suspect(_) => suspect_nodes += 1,
-            AccountState::Open(AccountFailure { permanent_auth, .. }) => {
-                open_nodes += 1;
-                if permanent_auth {
-                    disabled_auth_nodes += 1;
-                }
-                if node.open_until.is_some() {
-                    timed_open_nodes += 1;
-                }
-            }
-            AccountState::HalfOpen(_) => half_open_nodes += 1,
+            AccountState::Idle => idle_nodes += 1,
+            AccountState::Dead => dead_nodes += 1,
+            AccountState::Disabled => disabled_nodes += 1,
         }
     }
 
-    let selectable_nodes = ready_nodes + suspect_nodes;
+    let selectable_nodes = active_nodes;
     let status = if selectable_nodes > 0 {
         PoolHealthStatus::Healthy
-    } else if half_open_nodes > 0
-        || connecting_nodes > 0
-        || timed_open_nodes > 0
-        || configured_nodes > 0
-    {
+    } else if connecting_nodes > 0 || idle_nodes > 0 || dead_nodes > 0 {
         PoolHealthStatus::Recovering
     } else {
         PoolHealthStatus::Down
@@ -75,27 +52,13 @@ pub(super) fn build_pool_summary(state: &PoolState) -> PoolSummary {
         status,
         total_nodes: state.nodes.len(),
         selectable_nodes,
-        ready_nodes,
-        suspect_nodes,
-        open_nodes,
-        disabled_auth_nodes,
-        half_open_nodes,
+        active_nodes,
         connecting_nodes,
-        configured_nodes,
+        idle_nodes,
+        dead_nodes,
+        disabled_nodes,
         total_reconnections: state.total_reconnections,
     }
 }
 
-pub(super) fn open_node(node: &mut AccountNode, failure: AccountFailure) {
-    node.current_backoff = next_backoff(node.current_backoff, node.backoff_base, node.backoff_max);
-    node.open_until = Some(Instant::now() + node.current_backoff);
-    node.live_probe_in_flight = false;
-    node.state = AccountState::Open(failure);
-}
 
-pub(super) fn disable_node(node: &mut AccountNode, failure: AccountFailure) {
-    node.live_probe_in_flight = false;
-    node.open_until = None;
-    node.reconnect_session = None;
-    node.state = AccountState::Open(failure);
-}

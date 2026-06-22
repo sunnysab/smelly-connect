@@ -85,10 +85,14 @@ pub async fn run_tcp_with_config_typed(
     let pool = crate::pool::SessionPool::from_config(&config)
         .await
         .map_err(|err| CliError::Command(err.to_string()))?;
-    let (_account_name, session) = pool
-        .next_live_session()
+    let pooled = pool
+        .acquire()
         .await
         .map_err(|err| CliError::Command(err.to_string()))?;
+    let session = pooled
+        .session()
+        .cloned()
+        .ok_or_else(|| CliError::Command("acquired session with no inner session".to_string()))?;
     let (host, port) = split_target_typed(target)?;
     let _stream = session
         .connect_tcp((host.as_str(), port))
@@ -114,10 +118,14 @@ pub async fn run_icmp_with_config_typed(
     let pool = crate::pool::SessionPool::from_config(&config)
         .await
         .map_err(|err| CliError::Command(err.to_string()))?;
-    let (_account_name, session) = pool
-        .next_live_session()
+    let pooled = pool
+        .acquire()
         .await
         .map_err(|err| CliError::Command(err.to_string()))?;
+    let session = pooled
+        .session()
+        .cloned()
+        .ok_or_else(|| CliError::Command("acquired session with no inner session".to_string()))?;
     session
         .icmp_ping(target.into())
         .await
@@ -148,10 +156,14 @@ pub async fn run_http_with_config_typed(
     let pool = crate::pool::SessionPool::from_config(&config)
         .await
         .map_err(|err| CliError::Command(err.to_string()))?;
-    let (_account_name, session) = pool
-        .next_live_session()
+    let pooled = pool
+        .acquire()
         .await
         .map_err(|err| CliError::Command(err.to_string()))?;
+    let session = pooled
+        .session()
+        .cloned()
+        .ok_or_else(|| CliError::Command("acquired session with no inner session".to_string()))?;
     let client = session
         .reqwest_client()
         .await

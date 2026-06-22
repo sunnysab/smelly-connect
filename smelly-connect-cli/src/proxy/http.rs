@@ -526,13 +526,19 @@ async fn handle_live_request(
     >,
 ) -> Response<ProxyBody> {
     let request_id = next_request_id();
-    let (account_name, session) = match pool.next_live_session().await {
-        Ok(ready) => ready,
+    let pooled = match pool.acquire().await {
+        Ok(s) => s,
         Err(_) => {
             log_no_ready_session(request_id, "http");
             stats.record_service_unavailable_no_ready_session(ProxyProtocol::Http);
             return empty_response(StatusCode::SERVICE_UNAVAILABLE);
         }
+    };
+    let account_name = pooled.account_name().to_string();
+    let Some(session) = pooled.session().cloned() else {
+        log_no_ready_session(request_id, "http");
+        stats.record_service_unavailable_no_ready_session(ProxyProtocol::Http);
+        return empty_response(StatusCode::SERVICE_UNAVAILABLE);
     };
 
     if request.method() == Method::CONNECT {
@@ -700,7 +706,6 @@ async fn handle_live_request(
                         CachedLiveUpstreamMetadata {
                             route_backend,
                             account_name: account_name.clone(),
-                            session: session.clone(),
                         },
                         false,
                     ))
@@ -773,7 +778,6 @@ struct CachedUpstream<S, M = ()> {
 struct CachedLiveUpstreamMetadata {
     route_backend: LiveRouteBackend,
     account_name: String,
-    session: smelly_connect::Session,
 }
 
 fn empty_response(status: StatusCode) -> Response<ProxyBody> {
@@ -796,19 +800,11 @@ fn gateway_error_response(err: &UpstreamConnectError) -> Response<ProxyBody> {
 }
 
 async fn handle_live_session_failure(
-    pool: &SessionPool,
-    account_name: &str,
-    session: &smelly_connect::Session,
-    err: &UpstreamConnectError,
+    _pool: &SessionPool,
+    _account_name: &str,
+    _session: &smelly_connect::Session,
+    _err: &UpstreamConnectError,
 ) {
-    if matches!(err, UpstreamConnectError::Failed) {
-        pool.report_live_session_unhealthy_if_probe_fails(
-            account_name,
-            session,
-            format!("{err:?}"),
-        )
-        .await;
-    }
 }
 
 async fn handle_cached_live_upstream_failure(
@@ -818,14 +814,10 @@ async fn handle_cached_live_upstream_failure(
     err: &UpstreamConnectError,
 ) {
     stats.record_connect_failure();
-    if matches!(cache_metadata.route_backend, LiveRouteBackend::Vpn) {
-        handle_live_session_failure(
-            pool,
-            &cache_metadata.account_name,
-            &cache_metadata.session,
-            err,
-        )
-        .await;
+    if matches!(cache_metadata.route_backend, LiveRouteBackend::Vpn)
+        && matches!(err, UpstreamConnectError::Failed)
+    {
+        pool.report_failure(&cache_metadata.account_name).await;
     }
 }
 

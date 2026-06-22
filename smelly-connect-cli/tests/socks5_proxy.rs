@@ -148,7 +148,7 @@ async fn socks5_allow_all_connect_failure_does_not_mark_live_session_open() {
             .await
             .unwrap();
     assert_eq!(result.reply_code, 0x03);
-    assert!(result.state_summary.contains("Ready"));
+    assert!(result.state_summary.contains("Active"));
     assert!(result.selectable_after_failure);
 }
 
@@ -159,7 +159,7 @@ async fn socks5_route_rejection_does_not_mark_live_session_open() {
             .await
             .unwrap();
     assert_eq!(result.reply_code, 0x02);
-    assert!(result.state_summary.contains("Ready"));
+    assert!(result.state_summary.contains("Active"));
     assert!(result.selectable_after_failure);
 }
 

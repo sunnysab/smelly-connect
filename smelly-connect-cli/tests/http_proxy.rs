@@ -61,7 +61,7 @@ async fn http_cached_vpn_upstream_reuse_failure_marks_live_session_open() {
             .unwrap();
     assert_eq!(result.status_code, 502);
     assert!(
-        result.state_summary.contains("Open"),
+        result.state_summary.contains("Dead"),
         "state_summary={}, selectable_after_failure={}",
         result.state_summary,
         result.selectable_after_failure
@@ -81,7 +81,7 @@ async fn http_cached_vpn_keep_alive_reuse_failure_marks_live_session_open() {
         .unwrap();
     assert_eq!(result.status_code, 502);
     assert!(
-        result.state_summary.contains("Open"),
+        result.state_summary.contains("Dead"),
         "state_summary={}, selectable_after_failure={}",
         result.state_summary,
         result.selectable_after_failure
@@ -203,7 +203,7 @@ async fn http_direct_connect_failure_does_not_mark_live_session_open() {
             .await
             .unwrap();
     assert_eq!(result.status_code, 502);
-    assert!(result.state_summary.contains("Ready"));
+    assert!(result.state_summary.contains("Active"));
     assert!(result.selectable_after_failure);
 }
 
@@ -266,7 +266,7 @@ async fn http_live_connect_failure_stays_request_scoped() {
             .await
             .unwrap();
     assert_eq!(result.status_code, 502);
-    assert!(result.state_summary.contains("Ready"));
+    assert!(result.state_summary.contains("Active"));
     assert!(result.selectable_after_failure);
     assert_eq!(result.recovered_account, "acct-01");
 }
@@ -278,7 +278,7 @@ async fn http_route_rejection_does_not_mark_live_session_open() {
             .await
             .unwrap();
     assert_eq!(result.status_code, 403);
-    assert!(result.state_summary.contains("Ready"));
+    assert!(result.state_summary.contains("Active"));
     assert!(result.selectable_after_failure);
 }
 
@@ -288,7 +288,7 @@ async fn http_connect_timeout_does_not_mark_live_session_open() {
         .await
         .unwrap();
     assert_eq!(result.status_code, 504);
-    assert!(result.state_summary.contains("Ready"));
+    assert!(result.state_summary.contains("Active"));
     assert!(result.selectable_after_failure);
 }
 
@@ -317,7 +317,7 @@ async fn http_allow_all_connect_failure_does_not_mark_live_session_open() {
             .await
             .unwrap();
     assert_eq!(result.status_code, 502);
-    assert!(result.state_summary.contains("Ready"));
+    assert!(result.state_summary.contains("Active"));
     assert!(result.selectable_after_failure);
 }
 

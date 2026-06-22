@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

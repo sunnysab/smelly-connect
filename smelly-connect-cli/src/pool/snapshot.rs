@@ -2,12 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use smelly_connect::Session;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProbeRaceResult {
-    pub successes: usize,
-    pub fast_failures: usize,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolHealthStatus {
@@ -20,8 +14,6 @@ pub enum PoolHealthStatus {
 pub struct AccountNodeSnapshot {
     pub name: String,
     pub state: String,
-    pub consecutive_failures: u32,
-    pub failure_threshold: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -29,13 +21,11 @@ pub struct PoolSummary {
     pub status: PoolHealthStatus,
     pub total_nodes: usize,
     pub selectable_nodes: usize,
-    pub ready_nodes: usize,
-    pub suspect_nodes: usize,
-    pub open_nodes: usize,
-    pub disabled_auth_nodes: usize,
-    pub half_open_nodes: usize,
+    pub active_nodes: usize,
     pub connecting_nodes: usize,
-    pub configured_nodes: usize,
+    pub idle_nodes: usize,
+    pub dead_nodes: usize,
+    pub disabled_nodes: usize,
     pub total_reconnections: u64,
 }
 

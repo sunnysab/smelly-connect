@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 #[tokio::test]
 async fn routes_command_reports_domain_ip_and_static_dns_rules() {
     let output = smelly_connect_cli::commands::routes::run_routes_for_test(

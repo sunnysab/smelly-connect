@@ -17,7 +17,6 @@ use smelly_connect::{
     CaptchaError, CaptchaHandler, EasyConnectClient, LocalRouteOverrides, Session,
 };
 use tokio::sync::Mutex;
-use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::config::{AccountConfig, AppConfig, RoutingDefaultAction};
@@ -31,13 +30,10 @@ use maintenance::PoolMaintenance;
 use selection::next_selectable_index;
 pub use snapshot::{
     AccountNodeSnapshot, AccountRoutesSnapshot, PoolHealthStatus, PoolSnapshot, PoolSummary,
-    ProbeRaceResult, RoutesSnapshot,
+    RoutesSnapshot,
 };
 use snapshot::{build_local_route_set_snapshot, build_route_set_snapshot};
-use state::disable_node;
-#[cfg(any(test, feature = "test-utils"))]
-use state::next_backoff;
-use state::{build_pool_summary, open_node, state_label};
+use state::{build_pool_summary, state_label};
 
 #[derive(Clone)]
 pub struct PooledSession {
@@ -75,59 +71,29 @@ impl std::fmt::Debug for PooledSession {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct AccountFailure {
-    pub message: String,
-    pub permanent_auth: bool,
-}
-
-impl AccountFailure {
-    fn transient(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            permanent_auth: false,
-        }
-    }
-
-    fn permanent_auth(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            permanent_auth: true,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub enum AccountState {
-    Configured(AccountConfig),
+    Idle,
     Connecting,
-    Ready(Box<PooledSession>),
-    Suspect(Box<PooledSession>),
-    Open(AccountFailure),
-    HalfOpen(AccountConfig),
+    Active(Box<PooledSession>),
+    Dead,
+    Disabled,
 }
 
 #[derive(Clone)]
 struct AccountNode {
     account: AccountConfig,
     state: AccountState,
-    reconnect_session: Option<Session>,
-    #[allow(dead_code)]
-    flaky_retry: bool,
-    consecutive_failures: u32,
-    failure_threshold: u32,
-    current_backoff: Duration,
-    backoff_base: Duration,
-    backoff_max: Duration,
-    open_until: Option<Instant>,
-    live_probe_in_flight: bool,
+    backoff: Duration,
+    backoff_until: Option<Instant>,
+    probe_in_flight: bool,
 }
 
-#[derive(Default)]
 struct PoolState {
     nodes: Vec<AccountNode>,
     cursor: usize,
     total_reconnections: u64,
+    notify: Arc<tokio::sync::Notify>,
 }
 
 pub struct SessionPool {
@@ -145,8 +111,11 @@ pub struct SessionPool {
     keepalive_target: Option<String>,
     server: Option<String>,
     server_cert_policy: smelly_connect::ServerCertPolicy,
-    allow_request_triggered_probe: bool,
     min_pool_size: usize,
+    backoff_base: Duration,
+    backoff_max: Duration,
+    #[cfg(any(test, feature = "test-utils"))]
+    test_connect_hook: Option<TestConnectHook>,
 }
 
 impl Clone for SessionPool {
@@ -166,13 +135,7 @@ impl Drop for SessionPool {
 const DEFAULT_SESSION_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const DEFAULT_VPN_HEALTH_PROBE_ATTEMPTS: usize = 3;
 const DEFAULT_VPN_HEALTH_PROBE_DELAY: Duration = Duration::from_millis(200);
-const RECOVERY_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
-
-/// Additional margin added to pool.connect_timeout when awaiting a spawned maintenance
-/// recovery task. If the inner task does not complete within connect_timeout + margin,
-/// the JoinSet is aborted to unblock the maintenance loop. Any node left in Connecting
-/// state is reclaimed by refresh_time_based_states on the next cycle.
-const MAINTENANCE_TASK_TIMEOUT_MARGIN: Duration = Duration::from_secs(5);
+const ACQUIRE_NOTIFY_TIMEOUT: Duration = Duration::from_millis(200);
 
 #[cfg(any(test, feature = "test-utils"))]
 type TestConnectFuture = Pin<Box<dyn Future<Output = Result<Session, PoolError>> + Send>>;
@@ -195,7 +158,8 @@ pub enum PoolError {
     Message(String),
     ClientBuildFailed(smelly_connect::Error),
     SessionConnectFailed(smelly_connect::Error),
-    SessionConnectTimeout,
+    /// No node is available to serve the request (all are Dead/Connecting/Disabled/Idle).
+    NoReadyNode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,7 +184,7 @@ impl PoolError {
     pub fn underlying_error(&self) -> Option<&smelly_connect::Error> {
         match self {
             Self::ClientBuildFailed(error) | Self::SessionConnectFailed(error) => Some(error),
-            Self::Message(_) | Self::SessionConnectTimeout => None,
+            Self::Message(_) | Self::NoReadyNode => None,
         }
     }
 }
@@ -235,7 +199,7 @@ impl Display for PoolError {
             Self::SessionConnectFailed(error) => {
                 write!(f, "pool session connect failed: {error:?}")
             }
-            Self::SessionConnectTimeout => f.write_str("session connect timeout"),
+            Self::NoReadyNode => f.write_str("no ready node available"),
         }
     }
 }
@@ -262,8 +226,11 @@ impl SessionPool {
             keepalive_target: self.keepalive_target.clone(),
             server: self.server.clone(),
             server_cert_policy: self.server_cert_policy.clone(),
-            allow_request_triggered_probe: self.allow_request_triggered_probe,
             min_pool_size: self.min_pool_size,
+            backoff_base: self.backoff_base,
+            backoff_max: self.backoff_max,
+            #[cfg(any(test, feature = "test-utils"))]
+            test_connect_hook: self.test_connect_hook.clone(),
         }
     }
 
@@ -304,42 +271,13 @@ impl SessionPool {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn from_test_accounts(total: usize, ready_count: usize) -> Self {
-        let mut nodes = Vec::new();
-        for idx in 0..total {
-            let name = format!("acct-{:02}", idx + 1);
-            let state = if idx < ready_count {
-                AccountState::Ready(PooledSession::new(name.clone(), None).into())
-            } else {
-                AccountState::Configured(AccountConfig {
-                    name: name.clone(),
-                    username: name.clone(),
-                    password: "pass".to_string(),
-                })
-            };
-            nodes.push(AccountNode {
-                account: AccountConfig {
-                    name: name.clone(),
-                    username: name.clone(),
-                    password: "pass".to_string(),
-                },
-                state,
-                reconnect_session: None,
-                flaky_retry: false,
-                consecutive_failures: 0,
-                failure_threshold: 3,
-                current_backoff: Duration::from_secs(30),
-                backoff_base: Duration::from_secs(30),
-                backoff_max: Duration::from_secs(600),
-                open_until: None,
-                live_probe_in_flight: false,
-            });
-        }
+    fn test_pool_base(nodes: Vec<AccountNode>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(PoolState {
                 nodes,
                 cursor: 0,
                 total_reconnections: 0,
+                notify: Arc::new(tokio::sync::Notify::new()),
             })),
             maintenance: PoolMaintenance::new_shared(),
             user_refs: Arc::new(AtomicUsize::new(1)),
@@ -354,9 +292,37 @@ impl SessionPool {
             keepalive_target: None,
             server: None,
             server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
-            allow_request_triggered_probe: true,
             min_pool_size: 0,
+            backoff_base: Duration::from_secs(30),
+            backoff_max: Duration::from_secs(600),
+            #[cfg(any(test, feature = "test-utils"))]
+            test_connect_hook: current_test_connect_hook(),
         }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn from_test_accounts(total: usize, ready_count: usize) -> Self {
+        let mut nodes = Vec::new();
+        for idx in 0..total {
+            let name = format!("acct-{:02}", idx + 1);
+            let state = if idx < ready_count {
+                AccountState::Active(PooledSession::new(name.clone(), None).into())
+            } else {
+                AccountState::Idle
+            };
+            nodes.push(AccountNode {
+                account: AccountConfig {
+                    name: name.clone(),
+                    username: name.clone(),
+                    password: "pass".to_string(),
+                },
+                state,
+                backoff: Duration::from_secs(30),
+                backoff_until: None,
+                probe_in_flight: false,
+            });
+        }
+        Self::test_pool_base(nodes)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -369,40 +335,13 @@ impl SessionPool {
                     username: name.to_string(),
                     password: "pass".to_string(),
                 },
-                state: AccountState::Ready(PooledSession::new(name.to_string(), None).into()),
-                reconnect_session: None,
-                flaky_retry: false,
-                consecutive_failures: 0,
-                failure_threshold: 3,
-                current_backoff: Duration::from_secs(30),
-                backoff_base: Duration::from_secs(30),
-                backoff_max: Duration::from_secs(600),
-                open_until: None,
-                live_probe_in_flight: false,
+                state: AccountState::Active(PooledSession::new(name.to_string(), None).into()),
+                backoff: Duration::from_secs(30),
+                backoff_until: None,
+                probe_in_flight: false,
             })
             .collect();
-        Self {
-            inner: Arc::new(Mutex::new(PoolState {
-                nodes,
-                cursor: 0,
-                total_reconnections: 0,
-            })),
-            maintenance: PoolMaintenance::new_shared(),
-            user_refs: Arc::new(AtomicUsize::new(1)),
-            counts_for_shutdown: true,
-            healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, feature = "test-utils"))]
-            retry_delay: Duration::from_secs(1),
-            connect_timeout: Duration::from_secs(20),
-            local_route_overrides: LocalRouteOverrides::default(),
-            route_policy: RoutePolicy::default(),
-            allow_all_routes: false,
-            keepalive_target: None,
-            server: None,
-            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
-            allow_request_triggered_probe: true,
-            min_pool_size: 0,
-        }
+        Self::test_pool_base(nodes)
     }
 
     #[cfg(feature = "test-utils")]
@@ -417,7 +356,7 @@ impl SessionPool {
                     username: account_name.to_string(),
                     password: "pass".to_string(),
                 },
-                state: AccountState::Ready(
+                state: AccountState::Active(
                     PooledSession::new(
                         account_name.to_string(),
                         Some(
@@ -428,39 +367,12 @@ impl SessionPool {
                     )
                     .into(),
                 ),
-                reconnect_session: None,
-                flaky_retry: false,
-                consecutive_failures: 0,
-                failure_threshold: 3,
-                current_backoff: Duration::from_secs(30),
-                backoff_base: Duration::from_secs(30),
-                backoff_max: Duration::from_secs(600),
-                open_until: None,
-                live_probe_in_flight: false,
+                backoff: Duration::from_secs(30),
+                backoff_until: None,
+                probe_in_flight: false,
             })
             .collect();
-        Self {
-            inner: Arc::new(Mutex::new(PoolState {
-                nodes,
-                cursor: 0,
-                total_reconnections: 0,
-            })),
-            maintenance: PoolMaintenance::new_shared(),
-            user_refs: Arc::new(AtomicUsize::new(1)),
-            counts_for_shutdown: true,
-            healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, feature = "test-utils"))]
-            retry_delay: Duration::from_secs(1),
-            connect_timeout: Duration::from_secs(20),
-            local_route_overrides: LocalRouteOverrides::default(),
-            route_policy: RoutePolicy::default(),
-            allow_all_routes: false,
-            keepalive_target: None,
-            server: None,
-            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
-            allow_request_triggered_probe: true,
-            min_pool_size: 0,
-        }
+        Self::test_pool_base(nodes)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -485,18 +397,12 @@ impl SessionPool {
                         username: account_name.to_string(),
                         password: "pass".to_string(),
                     },
-                    state: AccountState::Ready(
+                    state: AccountState::Active(
                         PooledSession::new(account_name.to_string(), Some(session)).into(),
                     ),
-                    reconnect_session: None,
-                    flaky_retry: false,
-                    consecutive_failures: 0,
-                    failure_threshold: 3,
-                    current_backoff: Duration::from_secs(30),
-                    backoff_base: Duration::from_secs(30),
-                    backoff_max: Duration::from_secs(600),
-                    open_until: None,
-                    live_probe_in_flight: false,
+                    backoff: Duration::from_secs(30),
+                    backoff_until: None,
+                    probe_in_flight: false,
                 }
             })
             .collect();
@@ -505,6 +411,7 @@ impl SessionPool {
                 nodes,
                 cursor: 0,
                 total_reconnections: 0,
+                notify: Arc::new(tokio::sync::Notify::new()),
             })),
             maintenance: PoolMaintenance::new_shared(),
             user_refs: Arc::new(AtomicUsize::new(1)),
@@ -519,8 +426,11 @@ impl SessionPool {
             keepalive_target: None,
             server: None,
             server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
-            allow_request_triggered_probe: true,
             min_pool_size: 0,
+            backoff_base: Duration::from_secs(30),
+            backoff_max: Duration::from_secs(600),
+            #[cfg(any(test, feature = "test-utils"))]
+            test_connect_hook: current_test_connect_hook(),
         }
     }
 
@@ -557,40 +467,13 @@ impl SessionPool {
             username: account_name.to_string(),
             password: "pass".to_string(),
         };
-        let pool = Self {
-            inner: Arc::new(Mutex::new(PoolState {
-                nodes: vec![AccountNode {
-                    account: account.clone(),
-                    state: AccountState::Connecting,
-                    reconnect_session: None,
-                    flaky_retry: false,
-                    consecutive_failures: 3,
-                    failure_threshold: 3,
-                    current_backoff: Duration::from_secs(30),
-                    backoff_base: Duration::from_secs(30),
-                    backoff_max: Duration::from_secs(600),
-                    open_until: None,
-                    live_probe_in_flight: false,
-                }],
-                cursor: 0,
-                total_reconnections: 0,
-            })),
-            maintenance: PoolMaintenance::new_shared(),
-            user_refs: Arc::new(AtomicUsize::new(1)),
-            counts_for_shutdown: true,
-            healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, feature = "test-utils"))]
-            retry_delay: Duration::from_secs(1),
-            connect_timeout: Duration::from_secs(20),
-            local_route_overrides: LocalRouteOverrides::default(),
-            route_policy: RoutePolicy::default(),
-            allow_all_routes: false,
-            keepalive_target: None,
-            server: None,
-            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
-            allow_request_triggered_probe: true,
-            min_pool_size: 0,
-        };
+        let pool = Self::test_pool_base(vec![AccountNode {
+            account: account.clone(),
+            state: AccountState::Connecting,
+            backoff: Duration::from_secs(30),
+            backoff_until: None,
+            probe_in_flight: false,
+        }]);
         let inner = Arc::clone(&pool.inner);
         let account_name = account_name.to_string();
         tokio::spawn(async move {
@@ -601,10 +484,10 @@ impl SessionPool {
                 .iter_mut()
                 .find(|node| node.account.name == account_name)
             {
-                node.state = AccountState::Ready(
+                node.state = AccountState::Active(
                     PooledSession::new(account_name.clone(), Some(session)).into(),
                 );
-                node.consecutive_failures = 0;
+                state.notify.notify_waiters();
             }
         });
         pool
@@ -620,19 +503,12 @@ impl SessionPool {
             let (name, state) = match outcome {
                 Ok(name) if idx < min_ready => (
                     name.to_string(),
-                    AccountState::Ready(PooledSession::new(name.to_string(), None).into()),
+                    AccountState::Active(PooledSession::new(name.to_string(), None).into()),
                 ),
-                Ok(name) => (
-                    name.to_string(),
-                    AccountState::Configured(AccountConfig {
-                        name: name.to_string(),
-                        username: name.to_string(),
-                        password: "pass".to_string(),
-                    }),
-                ),
-                Err(message) => (
+                Ok(name) => (name.to_string(), AccountState::Idle),
+                Err(_message) => (
                     format!("failed-{idx}"),
-                    AccountState::Open(AccountFailure::transient(message)),
+                    AccountState::Dead,
                 ),
             };
             nodes.push(AccountNode {
@@ -642,39 +518,12 @@ impl SessionPool {
                     password: "pass".to_string(),
                 },
                 state,
-                reconnect_session: None,
-                flaky_retry: false,
-                consecutive_failures: 0,
-                failure_threshold: 3,
-                current_backoff: Duration::from_secs(30),
-                backoff_base: Duration::from_secs(30),
-                backoff_max: Duration::from_secs(600),
-                open_until: None,
-                live_probe_in_flight: false,
+                backoff: Duration::from_secs(30),
+                backoff_until: Some(Instant::now() + Duration::from_secs(30)),
+                probe_in_flight: false,
             });
         }
-        Self {
-            inner: Arc::new(Mutex::new(PoolState {
-                nodes,
-                cursor: 0,
-                total_reconnections: 0,
-            })),
-            maintenance: PoolMaintenance::new_shared(),
-            user_refs: Arc::new(AtomicUsize::new(1)),
-            counts_for_shutdown: true,
-            healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, feature = "test-utils"))]
-            retry_delay: Duration::from_secs(1),
-            connect_timeout: Duration::from_secs(20),
-            local_route_overrides: LocalRouteOverrides::default(),
-            route_policy: RoutePolicy::default(),
-            allow_all_routes: false,
-            keepalive_target: None,
-            server: None,
-            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
-            allow_request_triggered_probe: true,
-            min_pool_size: 0,
-        }
+        Self::test_pool_base(nodes)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -688,84 +537,30 @@ impl SessionPool {
                     username: name.clone(),
                     password: "pass".to_string(),
                 },
-                state: AccountState::Open(AccountFailure::transient("not ready")),
-                reconnect_session: None,
-                flaky_retry: false,
-                consecutive_failures: 0,
-                failure_threshold: 3,
-                current_backoff: Duration::from_secs(30),
-                backoff_base: Duration::from_secs(30),
-                backoff_max: Duration::from_secs(600),
-                open_until: None,
-                live_probe_in_flight: false,
+                state: AccountState::Dead,
+                backoff: Duration::from_secs(30),
+                backoff_until: Some(Instant::now() + Duration::from_secs(30)),
+                probe_in_flight: false,
             });
         }
-        Self {
-            inner: Arc::new(Mutex::new(PoolState {
-                nodes,
-                cursor: 0,
-                total_reconnections: 0,
-            })),
-            maintenance: PoolMaintenance::new_shared(),
-            user_refs: Arc::new(AtomicUsize::new(1)),
-            counts_for_shutdown: true,
-            healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, feature = "test-utils"))]
-            retry_delay: Duration::from_secs(1),
-            connect_timeout: Duration::from_secs(20),
-            local_route_overrides: LocalRouteOverrides::default(),
-            route_policy: RoutePolicy::default(),
-            allow_all_routes: false,
-            keepalive_target: None,
-            server: None,
-            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
-            allow_request_triggered_probe: true,
-            min_pool_size: 0,
-        }
+        Self::test_pool_base(nodes)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_flaky_account_for_test() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(PoolState {
-                nodes: vec![AccountNode {
-                    account: AccountConfig {
-                        name: "acct-01".to_string(),
-                        username: "acct-01".to_string(),
-                        password: "pass".to_string(),
-                    },
-                    state: AccountState::Ready(
-                        PooledSession::new("acct-01".to_string(), None).into(),
-                    ),
-                    reconnect_session: None,
-                    flaky_retry: true,
-                    consecutive_failures: 0,
-                    failure_threshold: 3,
-                    current_backoff: Duration::from_secs(30),
-                    backoff_base: Duration::from_secs(30),
-                    backoff_max: Duration::from_secs(600),
-                    open_until: None,
-                    live_probe_in_flight: false,
-                }],
-                cursor: 0,
-                total_reconnections: 0,
-            })),
-            maintenance: PoolMaintenance::new_shared(),
-            user_refs: Arc::new(AtomicUsize::new(1)),
-            counts_for_shutdown: true,
-            healthcheck_interval: Duration::from_secs(60),
-            #[cfg(any(test, feature = "test-utils"))]
-            retry_delay: Duration::from_millis(100),
-            connect_timeout: Duration::from_secs(20),
-            local_route_overrides: LocalRouteOverrides::default(),
-            route_policy: RoutePolicy::default(),
-            allow_all_routes: false,
-            keepalive_target: None,
-            server: None,
-            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
-            allow_request_triggered_probe: true,
-            min_pool_size: 0,
-        }
+        Self::test_pool_base(vec![AccountNode {
+            account: AccountConfig {
+                name: "acct-01".to_string(),
+                username: "acct-01".to_string(),
+                password: "pass".to_string(),
+            },
+            state: AccountState::Active(
+                PooledSession::new("acct-01".to_string(), None).into(),
+            ),
+            backoff: Duration::from_secs(30),
+            backoff_until: None,
+            probe_in_flight: false,
+        }])
     }
 
     pub async fn from_config(cfg: &AppConfig) -> Result<Self, PoolError> {
@@ -784,22 +579,17 @@ impl SessionPool {
             min_pool_size = cfg.pool.min_pool_size,
             "pool startup"
         );
-        let mut nodes = Vec::new();
-        for account in &cfg.accounts {
-            nodes.push(AccountNode {
+        let nodes: Vec<AccountNode> = cfg
+            .accounts
+            .iter()
+            .map(|account| AccountNode {
                 account: account.clone(),
-                state: AccountState::Configured(account.clone()),
-                reconnect_session: None,
-                flaky_retry: false,
-                consecutive_failures: 0,
-                failure_threshold: cfg.pool.failure_threshold,
-                current_backoff: Duration::from_secs(cfg.pool.backoff_base_secs),
-                backoff_base: Duration::from_secs(cfg.pool.backoff_base_secs),
-                backoff_max: Duration::from_secs(cfg.pool.backoff_max_secs),
-                open_until: None,
-                live_probe_in_flight: false,
-            });
-        }
+                state: AccountState::Idle,
+                backoff: Duration::from_secs(cfg.pool.backoff_base_secs),
+                backoff_until: None,
+                probe_in_flight: false,
+            })
+            .collect();
 
         let keepalive_target = cfg.icmp_keepalive_target().map(str::to_owned);
         let pool = Self {
@@ -807,6 +597,7 @@ impl SessionPool {
                 nodes,
                 cursor: 0,
                 total_reconnections: 0,
+                notify: Arc::new(tokio::sync::Notify::new()),
             })),
             maintenance: PoolMaintenance::new_shared(),
             user_refs: Arc::new(AtomicUsize::new(1)),
@@ -821,26 +612,48 @@ impl SessionPool {
             keepalive_target,
             server: Some(cfg.vpn.server.clone()),
             server_cert_policy,
-            allow_request_triggered_probe: cfg.pool.allow_request_triggered_probe,
             min_pool_size: cfg.pool.min_pool_size,
+            backoff_base: Duration::from_secs(cfg.pool.backoff_base_secs),
+            backoff_max: Duration::from_secs(cfg.pool.backoff_max_secs),
+            #[cfg(any(test, feature = "test-utils"))]
+            test_connect_hook: current_test_connect_hook(),
         };
 
-        pool.ensure_min_pool_size().await;
-        let ready = pool.ready_count().await;
+        // Retry connecting until we hit min_pool_size or exhaust Idle nodes.
+        // Each maintenance_tick spawns connect tasks for the deficit, but a
+        // failed connect marks the node Dead – without a retry loop the pool
+        // would give up after the first batch of failures.
+        loop {
+            let join_handles = pool.maintenance_tick().await;
+            if join_handles.is_empty() {
+                break;
+            }
+            for h in join_handles {
+                let _ = tokio::time::timeout(Duration::from_secs(30), h).await;
+            }
+            let state = pool.inner.lock().await;
+            if pool.active_count_locked(&state) >= cfg.pool.min_pool_size {
+                break;
+            }
+        }
+        let active = {
+            let state = pool.inner.lock().await;
+            pool.active_count_locked(&state)
+        };
         tracing::info!(
-            configured = cfg.accounts.len(),
+            accounts = cfg.accounts.len(),
             min_pool_size = cfg.pool.min_pool_size,
-            ready,
+            active,
             "pool startup summary"
         );
-        if ready == 0 {
+        if active == 0 {
             match startup_mode {
                 PoolStartupMode::RequireReady => {
-                    tracing::error!("no ready session after startup");
-                    return Err(PoolError::new("no ready session after startup"));
+                    tracing::error!("no active session after startup");
+                    return Err(PoolError::new("no active session after startup"));
                 }
                 PoolStartupMode::AllowEmpty => {
-                    tracing::warn!("starting with no ready session after startup");
+                    tracing::warn!("starting with no active session after startup");
                 }
             }
         }
@@ -848,19 +661,21 @@ impl SessionPool {
         Ok(pool)
     }
 
-    pub async fn ready_count(&self) -> usize {
-        self.refresh_time_based_states().await;
-        let state = self.inner.lock().await;
+    fn active_count_locked(&self, state: &PoolState) -> usize {
         state
             .nodes
             .iter()
-            .filter(|node| matches!(node.state, AccountState::Ready(_)))
+            .filter(|node| matches!(node.state, AccountState::Active(_)))
             .count()
+    }
+
+    pub async fn ready_count(&self) -> usize {
+        let state = self.inner.lock().await;
+        self.active_count_locked(&state)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn state_summary_for_test(&self) -> String {
-        self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
         state
             .nodes
@@ -874,25 +689,21 @@ impl SessionPool {
     }
 
     pub async fn snapshot(&self) -> PoolSnapshot {
-        self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
         let summary = build_pool_summary(&state);
-        let mut nodes = Vec::with_capacity(state.nodes.len());
-
-        for node in &state.nodes {
-            nodes.push(AccountNodeSnapshot {
+        let nodes = state
+            .nodes
+            .iter()
+            .map(|node| AccountNodeSnapshot {
                 name: node.account.name.clone(),
                 state: state_label(&node.state).to_ascii_lowercase(),
-                consecutive_failures: node.consecutive_failures,
-                failure_threshold: node.failure_threshold,
-            });
-        }
+            })
+            .collect();
 
         PoolSnapshot { summary, nodes }
     }
 
     pub async fn summary(&self) -> PoolSummary {
-        self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
         build_pool_summary(&state)
     }
@@ -902,19 +713,16 @@ impl SessionPool {
     }
 
     pub async fn routes_snapshot(&self) -> RoutesSnapshot {
-        self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
         let mut nodes = Vec::with_capacity(state.nodes.len());
 
         for node in &state.nodes {
             let routes = match &node.state {
-                AccountState::Ready(session) | AccountState::Suspect(session) => {
-                    session.session().map(build_route_set_snapshot)
-                }
+                AccountState::Active(session) => session.session().map(build_route_set_snapshot),
                 _ => None,
             };
             let local_routes = match &node.state {
-                AccountState::Ready(session) | AccountState::Suspect(session) => session
+                AccountState::Active(session) => session
                     .session()
                     .map(build_local_route_set_snapshot)
                     .filter(|routes| {
@@ -938,118 +746,23 @@ impl SessionPool {
         }
     }
 
-    pub async fn report_live_session_failure(&self, account_name: &str, error: impl Into<String>) {
-        let error = error.into();
+    /// Unified failure reporter: mark an Active node as Dead with doubled backoff.
+    pub async fn report_failure(&self, account_name: &str) {
         let mut state = self.inner.lock().await;
         if let Some(node) = state
             .nodes
             .iter_mut()
-            .find(|node| node.account.name == account_name)
+            .find(|node| node.account.name == account_name && matches!(node.state, AccountState::Active(_)))
         {
-            node.live_probe_in_flight = false;
-            if matches!(
-                node.state,
-                AccountState::Ready(_) | AccountState::Suspect(_)
-            ) {
-                node.consecutive_failures = node.failure_threshold;
-                open_node(node, AccountFailure::transient(error.clone()));
+                node.backoff = state::next_backoff(node.backoff, self.backoff_max);
+                node.backoff_until = Some(Instant::now() + node.backoff);
+                node.state = AccountState::Dead;
                 tracing::warn!(
                     account = %account_name,
-                    reason = %error,
-                    failure_threshold = node.failure_threshold,
-                    "live session marked open after proxy failure"
+                    backoff_secs = node.backoff.as_secs(),
+                    "active session marked dead after proxy failure"
                 );
-            }
         }
-    }
-
-    pub async fn report_live_session_unhealthy(
-        &self,
-        account_name: &str,
-        error: impl Into<String>,
-    ) {
-        let error = error.into();
-        let mut state = self.inner.lock().await;
-        if let Some(node) = state
-            .nodes
-            .iter_mut()
-            .find(|node| node.account.name == account_name)
-            && matches!(
-                node.state,
-                AccountState::Ready(_) | AccountState::Suspect(_)
-            )
-        {
-            node.consecutive_failures = node.failure_threshold;
-            open_node(node, AccountFailure::transient(error.clone()));
-            tracing::warn!(
-                account = %account_name,
-                reason = %error,
-                failure_threshold = node.failure_threshold,
-                backoff_secs = node.current_backoff.as_secs(),
-                "live session marked unhealthy after vpn probe failures"
-            );
-        }
-    }
-
-    pub async fn report_live_session_reconnect_required(
-        &self,
-        account_name: &str,
-        session: &Session,
-        error: impl Into<String>,
-    ) {
-        let error = error.into();
-        let mut state = self.inner.lock().await;
-        if let Some(node) = state
-            .nodes
-            .iter_mut()
-            .find(|node| node.account.name == account_name)
-            && matches!(
-                node.state,
-                AccountState::Ready(_) | AccountState::Suspect(_)
-            )
-        {
-            node.reconnect_session = Some(session.clone());
-            node.consecutive_failures = node.failure_threshold;
-            open_node(node, AccountFailure::transient(error.clone()));
-            tracing::warn!(
-                account = %account_name,
-                reason = %error,
-                failure_threshold = node.failure_threshold,
-                backoff_secs = node.current_backoff.as_secs(),
-                "live session retired and queued for reconnect"
-            );
-        }
-    }
-
-    pub async fn report_live_session_unhealthy_if_probe_fails(
-        &self,
-        account_name: &str,
-        session: &Session,
-        error: impl Into<String>,
-    ) {
-        let Some(target) = self.keepalive_target.clone() else {
-            return;
-        };
-        if !self.claim_live_session_probe(account_name).await {
-            return;
-        }
-        let account_name = account_name.to_string();
-        let error = error.into();
-        let pool = self.clone_with_refcount(false);
-        let session = session.clone();
-        tokio::spawn(async move {
-            let result = probe_live_session_health(
-                &session,
-                smelly_connect::session::IcmpKeepAliveTarget::from(target),
-            )
-            .await;
-            if result.is_ok() {
-                pool.clear_live_session_probe(&account_name).await;
-            } else {
-                pool.report_live_session_unhealthy(&account_name, error)
-                    .await;
-            }
-        });
     }
 
     fn spawn_background_maintenance_task(&self) {
@@ -1071,65 +784,12 @@ impl SessionPool {
                         }
                     }
                     _ = tokio::time::sleep(interval) => {
-                        pool.run_periodic_maintenance_once().await;
+                        pool.maintenance_tick().await;
                     }
                 }
             }
             maintenance.running.store(false, Ordering::Release);
         }));
-    }
-
-    async fn run_periodic_maintenance_once(&self) {
-        self.ensure_min_pool_size().await;
-        if self.keepalive_target.is_some() {
-            self.run_periodic_healthcheck_once().await;
-        }
-    }
-
-    async fn collect_periodic_probe_targets(&self) -> Vec<(String, Session)> {
-        if self.keepalive_target.is_none() {
-            return Vec::new();
-        }
-
-        self.refresh_time_based_states().await;
-        let mut state = self.inner.lock().await;
-        let mut sessions = Vec::new();
-        for node in &mut state.nodes {
-            if node.live_probe_in_flight {
-                continue;
-            }
-            let Some(session) = (match &node.state {
-                AccountState::Ready(session) | AccountState::Suspect(session) => {
-                    session.session().cloned()
-                }
-                _ => None,
-            }) else {
-                continue;
-            };
-            node.live_probe_in_flight = true;
-            sessions.push((node.account.name.clone(), session));
-        }
-        sessions
-    }
-
-    async fn run_periodic_healthcheck_once(&self) {
-        let Some(target) = self.keepalive_target.clone() else {
-            return;
-        };
-
-        for (account_name, session) in self.collect_periodic_probe_targets().await {
-            let result = probe_live_session_health(
-                &session,
-                smelly_connect::session::IcmpKeepAliveTarget::from(target.clone()),
-            )
-            .await;
-            if result.is_ok() {
-                self.clear_live_session_probe(&account_name).await;
-            } else {
-                self.report_live_session_unhealthy(&account_name, "background healthcheck failed")
-                    .await;
-            }
-        }
     }
 
     fn build_keepalive_handle(
@@ -1148,11 +808,7 @@ impl SessionPool {
                     let pool = pool.clone_with_refcount(false);
                     let account_name = account_name.clone();
                     tokio::spawn(async move {
-                        pool.report_live_session_unhealthy(
-                            &account_name,
-                            "session keepalive failed",
-                        )
-                        .await;
+                        pool.report_failure(&account_name).await;
                     });
                 },
             ),
@@ -1168,202 +824,97 @@ impl SessionPool {
         }
     }
 
-    async fn claim_live_session_probe(&self, account_name: &str) -> bool {
-        let mut state = self.inner.lock().await;
-        let Some(node) = state
-            .nodes
-            .iter_mut()
-            .find(|node| node.account.name == account_name)
-        else {
-            return false;
-        };
-        if !matches!(
-            node.state,
-            AccountState::Ready(_) | AccountState::Suspect(_)
-        ) {
-            return false;
-        }
-        if node.live_probe_in_flight {
-            return false;
-        }
-        node.live_probe_in_flight = true;
-        true
-    }
-
-    async fn clear_live_session_probe(&self, account_name: &str) {
-        let mut state = self.inner.lock().await;
-        if let Some(node) = state
-            .nodes
-            .iter_mut()
-            .find(|node| node.account.name == account_name)
-        {
-            node.live_probe_in_flight = false;
-        }
-    }
-
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn has_selectable_nodes_for_test(&self) -> bool {
-        self.refresh_time_based_states().await;
         let state = self.inner.lock().await;
-        state.nodes.iter().any(|node| {
-            matches!(
-                node.state,
-                AccountState::Ready(_) | AccountState::Suspect(_)
-            )
-        })
+        state
+            .nodes
+            .iter()
+            .any(|node| matches!(node.state, AccountState::Active(_)))
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_mixed_state_pool_for_test() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(PoolState {
-                nodes: vec![
-                    AccountNode {
-                        account: AccountConfig {
-                            name: "ready-01".to_string(),
-                            username: "ready-01".to_string(),
-                            password: "pass".to_string(),
-                        },
-                        state: AccountState::Ready(
-                            PooledSession::new("ready-01".to_string(), None).into(),
-                        ),
-                        reconnect_session: None,
-                        flaky_retry: false,
-                        consecutive_failures: 0,
-                        failure_threshold: 3,
-                        current_backoff: Duration::from_secs(30),
-                        backoff_base: Duration::from_secs(30),
-                        backoff_max: Duration::from_secs(600),
-                        open_until: None,
-                        live_probe_in_flight: false,
-                    },
-                    AccountNode {
-                        account: AccountConfig {
-                            name: "suspect-01".to_string(),
-                            username: "suspect-01".to_string(),
-                            password: "pass".to_string(),
-                        },
-                        state: AccountState::Suspect(
-                            PooledSession::new("suspect-01".to_string(), None).into(),
-                        ),
-                        reconnect_session: None,
-                        flaky_retry: false,
-                        consecutive_failures: 1,
-                        failure_threshold: 3,
-                        current_backoff: Duration::from_secs(30),
-                        backoff_base: Duration::from_secs(30),
-                        backoff_max: Duration::from_secs(600),
-                        open_until: None,
-                        live_probe_in_flight: false,
-                    },
-                    AccountNode {
-                        account: AccountConfig {
-                            name: "open-01".to_string(),
-                            username: "open-01".to_string(),
-                            password: "pass".to_string(),
-                        },
-                        state: AccountState::Open(AccountFailure::transient("open")),
-                        reconnect_session: None,
-                        flaky_retry: false,
-                        consecutive_failures: 3,
-                        failure_threshold: 3,
-                        current_backoff: Duration::from_secs(30),
-                        backoff_base: Duration::from_secs(30),
-                        backoff_max: Duration::from_secs(600),
-                        open_until: Some(Instant::now() + Duration::from_secs(30)),
-                        live_probe_in_flight: false,
-                    },
-                    AccountNode {
-                        account: AccountConfig {
-                            name: "half-open-01".to_string(),
-                            username: "half-open-01".to_string(),
-                            password: "pass".to_string(),
-                        },
-                        state: AccountState::HalfOpen(AccountConfig {
-                            name: "half-open-01".to_string(),
-                            username: "half-open-01".to_string(),
-                            password: "pass".to_string(),
-                        }),
-                        reconnect_session: None,
-                        flaky_retry: false,
-                        consecutive_failures: 3,
-                        failure_threshold: 3,
-                        current_backoff: Duration::from_secs(30),
-                        backoff_base: Duration::from_secs(30),
-                        backoff_max: Duration::from_secs(600),
-                        open_until: None,
-                        live_probe_in_flight: false,
-                    },
-                ],
-                cursor: 0,
-                total_reconnections: 0,
-            })),
-            maintenance: PoolMaintenance::new_shared(),
-            user_refs: Arc::new(AtomicUsize::new(1)),
-            counts_for_shutdown: true,
-            healthcheck_interval: Duration::from_secs(60),
-            retry_delay: Duration::from_secs(1),
-            connect_timeout: Duration::from_secs(20),
-            local_route_overrides: LocalRouteOverrides::default(),
-            route_policy: RoutePolicy::default(),
-            allow_all_routes: false,
-            keepalive_target: None,
-            server: None,
-            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
-            allow_request_triggered_probe: true,
-            min_pool_size: 0,
-        }
+        Self::test_pool_base(vec![
+            AccountNode {
+                account: AccountConfig {
+                    name: "active-01".to_string(),
+                    username: "active-01".to_string(),
+                    password: "pass".to_string(),
+                },
+                state: AccountState::Active(
+                    PooledSession::new("active-01".to_string(), None).into(),
+                ),
+                backoff: Duration::from_secs(30),
+                backoff_until: None,
+                probe_in_flight: false,
+            },
+            AccountNode {
+                account: AccountConfig {
+                    name: "idle-01".to_string(),
+                    username: "idle-01".to_string(),
+                    password: "pass".to_string(),
+                },
+                state: AccountState::Idle,
+                backoff: Duration::from_secs(30),
+                backoff_until: None,
+                probe_in_flight: false,
+            },
+            AccountNode {
+                account: AccountConfig {
+                    name: "dead-01".to_string(),
+                    username: "dead-01".to_string(),
+                    password: "pass".to_string(),
+                },
+                state: AccountState::Dead,
+                backoff: Duration::from_secs(60),
+                backoff_until: Some(Instant::now() + Duration::from_secs(30)),
+                probe_in_flight: false,
+            },
+            AccountNode {
+                account: AccountConfig {
+                    name: "disabled-01".to_string(),
+                    username: "disabled-01".to_string(),
+                    password: "pass".to_string(),
+                },
+                state: AccountState::Disabled,
+                backoff: Duration::from_secs(30),
+                backoff_until: None,
+                probe_in_flight: false,
+            },
+        ])
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn from_exhausted_pool_for_test() -> Self {
-        let account = AccountConfig {
-            name: "acct-01".to_string(),
-            username: "acct-01".to_string(),
-            password: "pass".to_string(),
-        };
-        Self {
-            inner: Arc::new(Mutex::new(PoolState {
-                nodes: vec![AccountNode {
-                    account: account.clone(),
-                    state: AccountState::Open(AccountFailure::transient("vpn unavailable")),
-                    reconnect_session: None,
-                    flaky_retry: false,
-                    consecutive_failures: 3,
-                    failure_threshold: 3,
-                    current_backoff: Duration::from_secs(30),
-                    backoff_base: Duration::from_secs(30),
-                    backoff_max: Duration::from_secs(600),
-                    open_until: Some(Instant::now() + Duration::from_secs(30)),
-                    live_probe_in_flight: false,
-                }],
-                cursor: 0,
-                total_reconnections: 0,
-            })),
-            maintenance: PoolMaintenance::new_shared(),
-            user_refs: Arc::new(AtomicUsize::new(1)),
-            counts_for_shutdown: true,
-            healthcheck_interval: Duration::from_secs(60),
-            retry_delay: Duration::from_secs(1),
-            connect_timeout: Duration::from_secs(20),
-            local_route_overrides: LocalRouteOverrides::default(),
-            route_policy: RoutePolicy::default(),
-            allow_all_routes: false,
-            keepalive_target: None,
-            server: None,
-            server_cert_policy: smelly_connect::ServerCertPolicy::Verify,
-            allow_request_triggered_probe: true,
-            min_pool_size: 0,
-        }
+        Self::test_pool_base(vec![AccountNode {
+            account: AccountConfig {
+                name: "acct-01".to_string(),
+                username: "acct-01".to_string(),
+                password: "pass".to_string(),
+            },
+            state: AccountState::Dead,
+            backoff: Duration::from_secs(30),
+            backoff_until: Some(Instant::now() + Duration::from_secs(30)),
+            probe_in_flight: false,
+        }])
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn collect_selected_accounts_for_test(&self, count: usize) -> Vec<String> {
         let mut out = Vec::new();
         for _ in 0..count {
-            match self.next_account_name().await {
-                Ok(name) => out.push(name),
-                Err(_) => break,
+            let mut state = self.inner.lock().await;
+            let idx = next_selectable_index(&mut state, |node| {
+                matches!(node.state, AccountState::Active(_))
+            });
+            drop(state);
+            match idx {
+                Some(idx) => {
+                    let state = self.inner.lock().await;
+                    out.push(state.nodes[idx].account.name.clone());
+                }
+                None => break,
             }
         }
         out
@@ -1375,7 +926,7 @@ impl SessionPool {
         state
             .nodes
             .first()
-            .map(|node| node.current_backoff)
+            .map(|node| node.backoff)
             .unwrap_or_default()
     }
 
@@ -1385,95 +936,26 @@ impl SessionPool {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn report_auth_failure_for_test(&self, account_name: &str, error: PoolError) {
+    pub async fn report_auth_failure_for_test(&self, account_name: &str, _error: PoolError) {
         let mut state = self.inner.lock().await;
         if let Some(node) = state
             .nodes
             .iter_mut()
             .find(|node| node.account.name == account_name)
         {
-            disable_node(node, account_failure_from_pool_error(&error));
-        }
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn try_request_triggered_probe_for_test(&self) -> Result<PooledSession, PoolError> {
-        let Some((name, account, _reconnect_session)) =
-            self.claim_request_triggered_probe().await?
-        else {
-            return Err(PoolError::new("no ready session"));
-        };
-        let session = PooledSession::new(name.clone(), None);
-        self.complete_probe_success(&name, session.clone(), account)
-            .await?;
-        Ok(session)
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn run_concurrent_probe_race_for_test(&self) -> ProbeRaceResult {
-        let first = {
-            let pool = self.clone_with_refcount(false);
-            tokio::spawn(async move { pool.try_request_triggered_probe_for_test().await })
-        };
-        let second = {
-            let pool = self.clone_with_refcount(false);
-            tokio::spawn(async move { pool.try_request_triggered_probe_for_test().await })
-        };
-
-        let mut results = ProbeRaceResult {
-            successes: 0,
-            fast_failures: 0,
-        };
-
-        for outcome in [first.await, second.await] {
-            match outcome {
-                Ok(Ok(_)) => results.successes += 1,
-                Ok(Err(err)) if err.to_string().contains("no ready session") => {
-                    results.fast_failures += 1;
-                }
-                Ok(Err(err)) => panic!("unexpected probe failure: {err}"),
-                Err(err) => panic!("probe task join failure: {err}"),
-            }
-        }
-
-        results
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn force_probe_failure_for_test(&self) {
-        let mut state = self.inner.lock().await;
-        if let Some(node) = state.nodes.first_mut() {
-            node.current_backoff =
-                next_backoff(node.current_backoff, node.backoff_base, node.backoff_max);
-            node.open_until = Some(Instant::now() + node.current_backoff);
-            node.state = AccountState::Open(AccountFailure::transient("forced probe failure"));
-            let name = node.account.name.clone();
-            let backoff = node.current_backoff;
-            let account = node.account.clone();
-            let inner = Arc::clone(&self.inner);
-            drop(state);
-            tokio::spawn(async move {
-                tokio::time::sleep(backoff).await;
-                let mut state = inner.lock().await;
-                if let Some(node) = state
-                    .nodes
-                    .iter_mut()
-                    .find(|node| node.account.name == name)
-                {
-                    node.state = AccountState::HalfOpen(account);
-                }
-            });
+            node.state = AccountState::Disabled;
         }
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn next_account_name(&self) -> Result<String, PoolError> {
-        Ok(self.next_session().await?.account_name().to_string())
+        let pooled = self.acquire().await?;
+        Ok(pooled.account_name().to_string())
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn run_periodic_healthcheck_once_for_test(&self) {
-        self.run_periodic_healthcheck_once().await;
+        // No-op: health probing is now done inside maintenance_tick phase 3
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -1495,317 +977,204 @@ impl SessionPool {
     async fn arm_keepalives_for_live_sessions_for_test(&self) {
         let mut state = self.inner.lock().await;
         for node in &mut state.nodes {
-            match &mut node.state {
-                AccountState::Ready(session) | AccountState::Suspect(session) => {
-                    if let Some(live) = session.session.as_ref() {
-                        session._keepalive =
-                            self.build_keepalive_handle(session.account_name(), live);
+            if let AccountState::Active(session) = &mut node.state {
+                if let Some(live) = session.session.as_ref() {
+                    session._keepalive =
+                        self.build_keepalive_handle(session.account_name(), live);
+                }
+            }
+        }
+    }
+
+    /// Acquire a healthy session. Returns immediately with round-robin from Active pool,
+    /// or waits briefly if nodes are connecting, or returns NoReadyNode.
+    pub async fn acquire(&self) -> Result<PooledSession, PoolError> {
+        // Fast path: round-robin from Active nodes
+        {
+            let mut state = self.inner.lock().await;
+            let idx = next_selectable_index(&mut state, |node| {
+                matches!(node.state, AccountState::Active(_))
+            });
+            if let Some(AccountState::Active(session)) = idx.map(|i| &state.nodes[i].state) {
+                return Ok(session.as_ref().clone());
+            }
+        }
+
+        // Slow path: if any node is Connecting, wait briefly for Notify
+        let has_connecting = {
+            let state = self.inner.lock().await;
+            state
+                .nodes
+                .iter()
+                .any(|node| matches!(node.state, AccountState::Connecting))
+        };
+        if has_connecting {
+            let notify = {
+                let state = self.inner.lock().await;
+                Arc::clone(&state.notify)
+            };
+            let notified = notify.notified();
+            tokio::select! {
+                _ = notified => {
+                    let mut state = self.inner.lock().await;
+                    let idx = next_selectable_index(&mut state, |node| {
+                        matches!(node.state, AccountState::Active(_))
+                    });
+                    if let Some(AccountState::Active(session)) = idx.map(|i| &state.nodes[i].state) {
+                        return Ok(session.as_ref().clone());
                     }
                 }
-                _ => {}
+                _ = tokio::time::sleep(ACQUIRE_NOTIFY_TIMEOUT) => {}
             }
         }
+
+        Err(PoolError::NoReadyNode)
     }
 
-    pub async fn next_session(&self) -> Result<PooledSession, PoolError> {
-        self.refresh_time_based_states().await;
-        let mut state = self.inner.lock().await;
-        let Some(idx) = next_selectable_index(&mut state, |node| {
-            matches!(
-                node.state,
-                AccountState::Ready(_) | AccountState::Suspect(_)
-            )
-        }) else {
-            return Err(PoolError::new("no ready session"));
+    /// Single maintenance tick. Called periodically and on startup.
+    /// Returns JoinHandles for Phase 2 connect tasks so callers may await them.
+    async fn maintenance_tick(&self) -> Vec<tokio::task::JoinHandle<()>> {
+        let now = Instant::now();
+
+        // Phase 1: time progression
+        {
+            let mut state = self.inner.lock().await;
+            for node in &mut state.nodes {
+                match node.state {
+                    AccountState::Dead if node.backoff_until.is_some_and(|until| now >= until) => {
+                        node.state = AccountState::Idle;
+                        node.backoff_until = None;
+                        tracing::info!(
+                            account = %node.account.name,
+                            "dead -> idle after backoff"
+                        );
+                    }
+                    AccountState::Connecting
+                        if node.backoff_until.is_some_and(|until| now >= until) =>
+                    {
+                        node.backoff =
+                            state::next_backoff(node.backoff, self.backoff_max);
+                        node.backoff_until = Some(now + node.backoff);
+                        node.state = AccountState::Dead;
+                        tracing::warn!(
+                            account = %node.account.name,
+                            backoff_secs = node.backoff.as_secs(),
+                            "connecting timed out, -> dead"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Phase 2: fill deficit
+        let deficit = {
+            let state = self.inner.lock().await;
+            let active = self.active_count_locked(&state);
+            let connecting = state
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.state, AccountState::Connecting))
+                .count();
+            let target = self.min_pool_size;
+            if target > active + connecting {
+                target - active - connecting
+            } else {
+                0
+            }
         };
 
-        match &state.nodes[idx].state {
-            AccountState::Ready(session) | AccountState::Suspect(session) => {
-                Ok(session.as_ref().clone())
-            }
-            _ => Err(PoolError::new("no ready session")),
-        }
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn ensure_additional_capacity_for_test(&self) -> Result<(), PoolError> {
-        let mut state = self.inner.lock().await;
-        if let Some(node) = state
-            .nodes
-            .iter_mut()
-            .find(|node| matches!(node.state, AccountState::Configured(_)))
-        {
-            node.state =
-                AccountState::Ready(PooledSession::new(node.account.name.clone(), None).into());
-            return Ok(());
-        }
-        Err(PoolError::new("no configurable account remaining"))
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn force_one_failure_for_test(&self) {
-        self.force_failures_for_test(1).await;
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn force_failures_for_test(&self, count: u32) {
-        for _ in 0..count {
-            let mut should_retry = None;
-            {
+        let mut handles = Vec::new();
+        for _ in 0..deficit {
+            let (name, account, server) = {
                 let mut state = self.inner.lock().await;
-                if let Some(node) = state.nodes.iter_mut().find(|node| {
-                    matches!(
-                        node.state,
-                        AccountState::Ready(_) | AccountState::Suspect(_)
-                    )
-                }) {
-                    let name = node.account.name.clone();
-                    let flaky_retry = node.flaky_retry;
-                    node.live_probe_in_flight = false;
-                    node.consecutive_failures += 1;
-
-                    let session = match std::mem::replace(
-                        &mut node.state,
-                        AccountState::Open(AccountFailure::transient("forced failure")),
-                    ) {
-                        AccountState::Ready(session) | AccountState::Suspect(session) => session,
-                        other => {
-                            node.state = other;
+                let idx = state.nodes.iter_mut().enumerate().find(|(_, n)| {
+                    matches!(n.state, AccountState::Idle)
+                });
+                match idx {
+                    Some((_i, node)) => {
+                        let name = node.account.name.clone();
+                        let account = node.account.clone();
+                        let server = self.server.clone();
+                        if server.is_none() {
                             continue;
                         }
-                    };
+                        node.state = AccountState::Connecting;
+                        node.backoff_until = Some(now + self.connect_timeout);
+                        (name, account, server.unwrap())
+                    }
+                    None => break,
+                }
+            };
 
-                    if node.consecutive_failures >= node.failure_threshold {
-                        node.open_until = Some(Instant::now() + node.current_backoff);
-                        tracing::warn!(
-                            account = %name,
-                            failures = node.consecutive_failures,
-                            "node moved to open"
-                        );
-                        should_retry = flaky_retry.then_some(name);
-                    } else {
-                        node.state = AccountState::Suspect(session);
-                        tracing::warn!(
-                            account = %name,
-                            failures = node.consecutive_failures,
-                            "node marked suspect"
-                        );
+            let pool = Arc::new(self.clone_with_refcount(false));
+            handles.push(tokio::spawn(async move {
+                pool.recover_account_session(&name, &account, &server)
+                    .await;
+            }));
+        }
+
+        // Phase 3: health probe Active nodes (if keepalive_target is configured)
+        if self.keepalive_target.is_some() {
+            let targets: Vec<(String, Session)> = {
+                let mut state = self.inner.lock().await;
+                let mut out = Vec::new();
+                for node in &mut state.nodes {
+                    if node.probe_in_flight {
+                        continue;
+                    }
+                    if let Some(live) = match &node.state {
+                        AccountState::Active(session) => session.session().cloned(),
+                        _ => None,
+                    } {
+                        node.probe_in_flight = true;
+                        out.push((node.account.name.clone(), live));
                     }
                 }
-            }
+                out
+            };
 
-            if let Some(name) = should_retry {
-                let inner = Arc::clone(&self.inner);
-                let retry_delay = self.retry_delay;
-                tokio::spawn(async move {
-                    tracing::warn!(
-                        account = %name,
-                        delay_ms = retry_delay.as_millis(),
-                        "retrying account after fixed-delay backoff"
-                    );
-                    tokio::time::sleep(retry_delay).await;
-                    let mut state = inner.lock().await;
-                    if let Some(node) = state
-                        .nodes
-                        .iter_mut()
-                        .find(|node| node.account.name == name)
-                    {
-                        node.state = AccountState::Ready(
-                            PooledSession::new(node.account.name.clone(), None).into(),
-                        );
-                        node.consecutive_failures = 0;
-                        node.open_until = None;
-                    }
-                });
-            }
-        }
-    }
-
-    pub async fn next_live_session(&self) -> Result<(String, Session), PoolError> {
-        self.refresh_time_based_states().await;
-        if let Some(ready) = self.next_ready_with_session().await? {
-            return Ok(ready);
-        }
-
-        let _ = self.connect_one_configured().await;
-
-        if let Some(ready) = self.next_ready_with_session().await? {
-            return Ok(ready);
-        }
-
-        if let Some(probed) = self.try_request_triggered_live_probe().await? {
-            return Ok(probed);
-        }
-
-        if self.has_connecting_nodes().await {
-            let deadline = Instant::now() + self.connect_timeout;
-            while Instant::now() < deadline {
-                tokio::time::sleep(RECOVERY_WAIT_POLL_INTERVAL).await;
-                if let Some(ready) = self.next_ready_with_session().await? {
-                    return Ok(ready);
-                }
-                if !self.has_connecting_nodes().await {
-                    break;
-                }
-            }
-        }
-
-        Err(PoolError::new("no ready session"))
-    }
-
-    async fn ensure_min_pool_size(&self) {
-        let target = self.min_pool_size;
-        if target == 0 {
-            return;
-        }
-
-        #[cfg(any(test, feature = "test-utils"))]
-        let test_connect_hook = current_test_connect_hook();
-        let mut pending = JoinSet::new();
-
-        loop {
-            self.refresh_time_based_states().await;
-            let ready = self.ready_count().await;
-            if ready >= target {
-                break;
-            }
-
-            while ready + pending.len() < target {
-                // Prefer connecting fresh Configured accounts, fall back to HalfOpen.
-                if self.has_configured_accounts().await {
+            if let Some(ref target) = self.keepalive_target {
+                for (name, session) in targets {
                     let pool = self.clone_with_refcount(false);
-                    #[cfg(any(test, feature = "test-utils"))]
-                    let test_connect_hook = test_connect_hook.clone();
-                    pending.spawn(async move {
-                        pool.connect_one_configured_with_test_hook(
-                            #[cfg(any(test, feature = "test-utils"))]
-                            test_connect_hook,
+                    let target = target.clone();
+                    tokio::spawn(async move {
+                        let result = probe_live_session_health(
+                            &session,
+                            smelly_connect::session::IcmpKeepAliveTarget::from(target),
                         )
-                        .await
+                        .await;
+                        if result.is_err() {
+                            pool.report_failure(&name).await;
+                        } else {
+                            let mut state = pool.inner.lock().await;
+                            if let Some(node) = state
+                                .nodes
+                                .iter_mut()
+                                .find(|n| n.account.name == name)
+                            {
+                                node.probe_in_flight = false;
+                            }
+                        }
                     });
-                } else if let Some((name, account, reconnect_session)) =
-                    self.claim_maintenance_probe().await
-                {
-                    let pool = self.clone_with_refcount(false);
-                    pending.spawn(async move {
-                        pool.recover_and_complete_probe(&name, &account, reconnect_session)
-                            .await
-                    });
-                } else {
-                    break;
-                }
-            }
-
-            let task_timeout = self.connect_timeout + MAINTENANCE_TASK_TIMEOUT_MARGIN;
-            match tokio::time::timeout(task_timeout, pending.join_next()).await {
-                Ok(Some(Ok(Ok(()))) | Some(Ok(Err(_)))) => {}
-                Ok(Some(Err(err))) if err.is_panic() => {
-                    std::panic::resume_unwind(err.into_panic());
-                }
-                Ok(Some(Err(err))) => {
-                    tracing::warn!(
-                        error = %err,
-                        "pool maintenance task did not complete cleanly"
-                    );
-                }
-                Ok(None) => break,
-                Err(_elapsed) => {
-                    tracing::error!(
-                        timeout_secs = task_timeout.as_secs(),
-                        "pool maintenance task hung; aborting pending tasks"
-                    );
-                    pending.abort_all();
-                    break;
                 }
             }
         }
+
+        handles
     }
 
-    async fn next_ready_with_session(&self) -> Result<Option<(String, Session)>, PoolError> {
-        self.refresh_time_based_states().await;
-        let mut state = self.inner.lock().await;
-        let selectable_indices: Vec<_> = state
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, node)| match &node.state {
-                AccountState::Ready(session) | AccountState::Suspect(session)
-                    if session.session().is_some() =>
-                {
-                    Some(idx)
-                }
-                _ => None,
-            })
-            .collect();
-        if selectable_indices.is_empty() {
-            return Ok(None);
-        }
-        let pos = state.cursor % selectable_indices.len();
-        state.cursor += 1;
-        let idx = selectable_indices[pos];
-
-        match &state.nodes[idx].state {
-            AccountState::Ready(session) | AccountState::Suspect(session) => {
-                let account_name = session.account_name().to_string();
-                let live = session.session().cloned();
-                Ok(live.map(|live| (account_name, live)))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    async fn has_connecting_nodes(&self) -> bool {
-        let state = self.inner.lock().await;
-        state
-            .nodes
-            .iter()
-            .any(|node| matches!(node.state, AccountState::Connecting))
-    }
-
-    async fn has_configured_accounts(&self) -> bool {
-        let state = self.inner.lock().await;
-        state
-            .nodes
-            .iter()
-            .any(|node| matches!(node.state, AccountState::Configured(_)))
-    }
-
-    async fn connect_one_configured(&self) -> Result<(), PoolError> {
-        self.connect_one_configured_with_test_hook(
-            #[cfg(any(test, feature = "test-utils"))]
-            current_test_connect_hook(),
-        )
-        .await
-    }
-
-    async fn connect_one_configured_with_test_hook(
-        &self,
-        #[cfg(any(test, feature = "test-utils"))] test_connect_hook: Option<TestConnectHook>,
-    ) -> Result<(), PoolError> {
-        let (name, account, server) = {
-            let mut state = self.inner.lock().await;
-            let Some(server) = self.server.clone() else {
-                return Err(PoolError::new("real server configuration unavailable"));
-            };
-            let Some(idx) = state
-                .nodes
-                .iter_mut()
-                .enumerate()
-                .find(|(_, node)| matches!(node.state, AccountState::Configured(_)))
-                .map(|(idx, _)| idx)
-            else {
-                return Err(PoolError::new("no configurable account remaining"));
-            };
-            let account = state.nodes[idx].account.clone();
-            let name = state.nodes[idx].account.name.clone();
-            state.nodes[idx].state = AccountState::Connecting;
-            state.nodes[idx].open_until = Some(Instant::now() + self.connect_timeout);
-            (name, account, server)
-        };
-
-        match connect_account(
-            &server,
-            &account,
+    /// Spawn a full recovery (login + session) for an account transitioning from
+    /// Connecting to Active/Dead/Disabled.
+    async fn recover_account_session(
+        self: &Arc<Self>,
+        name: &str,
+        account: &AccountConfig,
+        server: &str,
+    ) {
+        let result = connect_account(
+            server,
+            account,
             self.connect_timeout,
             ConnectAccountContext {
                 local_route_overrides: &self.local_route_overrides,
@@ -1814,273 +1183,57 @@ impl SessionPool {
                 _keepalive_target: self.keepalive_target.as_deref(),
                 server_cert_policy: self.server_cert_policy.clone(),
                 #[cfg(any(test, feature = "test-utils"))]
-                test_connect_hook,
+                test_connect_hook: self.test_connect_hook.clone(),
             },
         )
-        .await
-        {
-            Ok(session) => {
-                let pooled = self.wrap_live_session(account.name.clone(), session);
-                let mut state = self.inner.lock().await;
-                if let Some(node) = state
-                    .nodes
-                    .iter_mut()
-                    .find(|node| node.account.name == name)
-                {
-                    node.state = AccountState::Ready(pooled.into());
-                    tracing::info!(account = %account.name, "account ready");
-                }
-                Ok(())
-            }
-            Err(err) => {
-                let mut state = self.inner.lock().await;
-                if let Some(node) = state
-                    .nodes
-                    .iter_mut()
-                    .find(|node| node.account.name == name)
-                {
-                    let failure = account_failure_from_pool_error(&err);
-                    if failure.permanent_auth {
-                        disable_node(node, failure);
-                    } else {
-                        open_node(node, failure);
-                    }
-                }
-                tracing::warn!(account = %account.name, error = %err, "account connect failed");
-                Err(err)
-            }
-        }
-    }
+        .await;
 
-    async fn claim_request_triggered_probe(
-        &self,
-    ) -> Result<Option<(String, AccountConfig, Option<Session>)>, PoolError> {
-        if !self.allow_request_triggered_probe {
-            return Ok(None);
-        }
-
-        self.refresh_time_based_states().await;
         let mut state = self.inner.lock().await;
-        if state.nodes.iter().any(|node| {
-            matches!(
-                node.state,
-                AccountState::Ready(_) | AccountState::Suspect(_)
-            )
-        }) {
-            return Ok(None);
-        }
-
-        let probe_candidates: Vec<_> = state
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, node)| {
-                matches!(node.state, AccountState::HalfOpen(_)).then_some(idx)
-            })
-            .collect();
-        if probe_candidates.is_empty() {
-            return Ok(None);
-        }
-
-        let pos = state.cursor % probe_candidates.len();
-        state.cursor += 1;
-        let idx = probe_candidates[pos];
-        let node = &mut state.nodes[idx];
-        let account = node.account.clone();
-        let name = node.account.name.clone();
-        let reconnect_session = node.reconnect_session.clone();
-        node.state = AccountState::Connecting;
-        node.open_until = Some(Instant::now() + self.connect_timeout);
-        tracing::info!(account = %name, "request-triggered recovery probe scheduled");
-        Ok(Some((name, account, reconnect_session)))
-    }
-
-    async fn try_request_triggered_live_probe(
-        &self,
-    ) -> Result<Option<(String, Session)>, PoolError> {
-        let Some((name, account, reconnect_session)) = self.claim_request_triggered_probe().await?
-        else {
-            return Ok(None);
-        };
-        match self
-            .recover_account_session(&name, &account, reconnect_session)
-            .await
-        {
-            Ok(session) => {
-                let live = session.clone();
-                let pooled = self.wrap_live_session(name.clone(), session);
-                self.complete_probe_success(&name, pooled, account).await?;
-                Ok(Some((name, live)))
-            }
-            Err(err) => {
-                self.complete_probe_failure(&name, account_failure_from_pool_error(&err))
-                    .await?;
-                Err(err)
-            }
-        }
-    }
-
-    async fn claim_maintenance_probe(&self) -> Option<(String, AccountConfig, Option<Session>)> {
-        self.refresh_time_based_states().await;
-        let mut state = self.inner.lock().await;
-
-        let probe_candidates: Vec<_> = state
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, node)| {
-                (!node.live_probe_in_flight && matches!(node.state, AccountState::HalfOpen(_)))
-                    .then_some(idx)
-            })
-            .collect();
-        if probe_candidates.is_empty() {
-            return None;
-        }
-
-        let pos = state.cursor % probe_candidates.len();
-        state.cursor += 1;
-        let idx = probe_candidates[pos];
-        let node = &mut state.nodes[idx];
-        let account = node.account.clone();
-        let name = node.account.name.clone();
-        let reconnect_session = node.reconnect_session.clone();
-        node.state = AccountState::Connecting;
-        node.open_until = Some(Instant::now() + self.connect_timeout);
-        node.live_probe_in_flight = true;
-        tracing::info!(account = %name, "maintenance recovery probe scheduled");
-        Some((name, account, reconnect_session))
-    }
-
-    async fn recover_and_complete_probe(
-        &self,
-        name: &str,
-        account: &AccountConfig,
-        reconnect_session: Option<Session>,
-    ) -> Result<(), PoolError> {
-        match self
-            .recover_account_session(name, account, reconnect_session)
-            .await
-        {
+        match result {
             Ok(session) => {
                 let pooled = self.wrap_live_session(name.to_string(), session);
-                let mut state = self.inner.lock().await;
                 if let Some(node) = state
                     .nodes
                     .iter_mut()
-                    .find(|node| node.account.name == name)
+                    .find(|n| n.account.name == name)
                 {
-                    node.account = account.clone();
-                    node.consecutive_failures = 0;
-                    node.current_backoff = node.backoff_base;
-                    node.open_until = None;
-                    node.reconnect_session = None;
-                    node.live_probe_in_flight = false;
-                    node.state = AccountState::Ready(Box::new(pooled));
+                    node.state = AccountState::Active(Box::new(pooled));
+                    node.backoff = self.backoff_base;
                     state.total_reconnections += 1;
-                    tracing::info!(
-                        account = %name,
-                        reconnects = state.total_reconnections,
-                        "maintenance recovery probe succeeded"
-                    );
+                    tracing::info!(account = %name, "recover -> active");
                 }
-                Ok(())
             }
             Err(err) => {
-                let mut state = self.inner.lock().await;
-                if let Some(node) = state
-                    .nodes
-                    .iter_mut()
-                    .find(|node| node.account.name == name)
-                {
-                    node.live_probe_in_flight = false;
-                    let failure = account_failure_from_pool_error(&err);
-                    if failure.permanent_auth {
-                        disable_node(node, failure);
-                    } else {
-                        open_node(node, failure);
+                if is_permanent_auth_failure(&err) {
+                    if let Some(node) = state
+                        .nodes
+                        .iter_mut()
+                        .find(|n| n.account.name == name)
+                    {
+                        node.state = AccountState::Disabled;
+                        tracing::error!(account = %name, error = %err, "permanent auth failure, -> disabled");
+                    }
+                } else {
+                    if let Some(node) = state
+                        .nodes
+                        .iter_mut()
+                        .find(|n| n.account.name == name)
+                    {
+                        node.backoff = state::next_backoff(node.backoff, self.backoff_max);
+                        node.backoff_until = Some(Instant::now() + node.backoff);
+                        node.state = AccountState::Dead;
+                        tracing::warn!(
+                            account = %name,
+                            error = %err,
+                            backoff_secs = node.backoff.as_secs(),
+                            "recover failed, -> dead"
+                        );
                     }
                 }
-                tracing::warn!(account = %name, error = %err, "maintenance recovery probe failed");
-                Err(err)
             }
         }
-    }
-
-    async fn complete_probe_success(
-        &self,
-        name: &str,
-        session: PooledSession,
-        account: AccountConfig,
-    ) -> Result<(), PoolError> {
-        let mut state = self.inner.lock().await;
-        let node = state
-            .nodes
-            .iter_mut()
-            .find(|node| node.account.name == name)
-            .ok_or_else(|| PoolError::new(format!("probe target disappeared: {name}")))?;
-        node.account = account;
-        node.consecutive_failures = 0;
-        node.current_backoff = node.backoff_base;
-        node.open_until = None;
-        node.reconnect_session = None;
-        node.state = AccountState::Ready(Box::new(session));
-        state.total_reconnections += 1;
-        tracing::info!(
-            account = %name,
-            reconnects = state.total_reconnections,
-            "request-triggered recovery probe succeeded"
-        );
-        Ok(())
-    }
-
-    async fn complete_probe_failure(
-        &self,
-        name: &str,
-        failure: AccountFailure,
-    ) -> Result<(), PoolError> {
-        let mut state = self.inner.lock().await;
-        let node = state
-            .nodes
-            .iter_mut()
-            .find(|node| node.account.name == name)
-            .ok_or_else(|| PoolError::new(format!("probe target disappeared: {name}")))?;
-        if failure.permanent_auth {
-            disable_node(node, failure.clone());
-        } else {
-            open_node(node, failure.clone());
-        }
-        tracing::warn!(account = %name, error = %failure.message, "request-triggered recovery probe failed");
-        Ok(())
-    }
-
-    async fn refresh_time_based_states(&self) {
-        let mut state = self.inner.lock().await;
-        let now = Instant::now();
-        for node in &mut state.nodes {
-            match &node.state {
-                AccountState::Open(_) if node.open_until.is_some_and(|t| now >= t) => {
-                    node.state = AccountState::HalfOpen(node.account.clone());
-                    node.open_until = None;
-                }
-                AccountState::Connecting if node.open_until.is_some_and(|t| now >= t) => {
-                    tracing::warn!(
-                        account = %node.account.name,
-                        "connecting timed out, degrading to open"
-                    );
-                    node.live_probe_in_flight = false;
-                    open_node(node, AccountFailure::transient("connecting timed out"));
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-fn account_failure_from_pool_error(error: &PoolError) -> AccountFailure {
-    if is_permanent_auth_failure(error) {
-        AccountFailure::permanent_auth(error.to_string())
-    } else {
-        AccountFailure::transient(error.to_string())
+        state.notify.notify_waiters();
+        drop(state);
     }
 }
 
@@ -2093,55 +1246,6 @@ fn is_permanent_auth_failure(error: &PoolError) -> bool {
     error
         .underlying_error()
         .is_some_and(smelly_connect::Error::is_permanent_auth_failure)
-}
-
-impl SessionPool {
-    async fn recover_account_session(
-        &self,
-        name: &str,
-        account: &AccountConfig,
-        reconnect_session: Option<Session>,
-    ) -> Result<Session, PoolError> {
-        if let Some(session) = reconnect_session {
-            match session.rebuild_transport_from_existing_lease().await {
-                Ok(rebuilt) => {
-                    tracing::info!(
-                        account = %name,
-                        "live session transport rebuilt"
-                    );
-                    return Ok(rebuilt);
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        account = %name,
-                        error = ?err,
-                        "live session transport rebuild failed; falling back to full reconnect"
-                    );
-                }
-            }
-        }
-
-        let server = self
-            .server
-            .as_deref()
-            .ok_or_else(|| PoolError::new("real server configuration unavailable"))?;
-
-        connect_account(
-            server,
-            account,
-            self.connect_timeout,
-            ConnectAccountContext {
-                local_route_overrides: &self.local_route_overrides,
-                route_policy: self.route_policy,
-                allow_all_routes: self.allow_all_routes,
-                _keepalive_target: self.keepalive_target.as_deref(),
-                server_cert_policy: self.server_cert_policy.clone(),
-                #[cfg(any(test, feature = "test-utils"))]
-                test_connect_hook: current_test_connect_hook(),
-            },
-        )
-        .await
-    }
 }
 
 async fn probe_live_session_health(
@@ -2208,7 +1312,7 @@ async fn connect_account(
 
     let session = tokio::time::timeout(timeout, client.connect())
         .await
-        .map_err(|_| PoolError::SessionConnectTimeout)?
+        .map_err(|_| PoolError::new("session connect timeout"))?
         .map_err(PoolError::session_connect_failed)?;
     let session = apply_pool_routing(
         session,

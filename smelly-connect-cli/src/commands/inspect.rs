@@ -33,10 +33,14 @@ pub async fn run_route_with_config_typed(
     let pool = crate::pool::SessionPool::from_config(&config)
         .await
         .map_err(|err| CliError::Command(err.to_string()))?;
-    let (_account_name, session) = pool
-        .next_live_session()
+    let pooled = pool
+        .acquire()
         .await
         .map_err(|err| CliError::Command(err.to_string()))?;
+    let session = pooled
+        .session()
+        .cloned()
+        .ok_or_else(|| CliError::Command("acquired session with no inner session".to_string()))?;
     match session.plan_tcp_connect((host, port)).await {
         Ok(route) => Ok(format!("allowed: {route:?}")),
         Err(err) => Ok(format!("rejected: {err:?}")),

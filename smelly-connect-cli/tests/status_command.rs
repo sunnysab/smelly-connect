@@ -10,13 +10,12 @@ async fn status_command_reports_health_and_runtime_stats() {
                 "status":"healthy",
                 "total_nodes":2,
                 "selectable_nodes":2,
-                "ready_nodes":2,
-                "suspect_nodes":0,
-                "open_nodes":0,
-                "disabled_auth_nodes":0,
-                "half_open_nodes":0,
+                "active_nodes":2,
                 "connecting_nodes":0,
-                "configured_nodes":0
+                "idle_nodes":0,
+                "dead_nodes":0,
+                "disabled_nodes":0,
+                "total_reconnections":0
             }
         }"#,
         r#"{
@@ -25,13 +24,12 @@ async fn status_command_reports_health_and_runtime_stats() {
                 "status":"healthy",
                 "total_nodes":2,
                 "selectable_nodes":2,
-                "ready_nodes":2,
-                "suspect_nodes":0,
-                "open_nodes":0,
-                "disabled_auth_nodes":0,
-                "half_open_nodes":0,
+                "active_nodes":2,
                 "connecting_nodes":0,
-                "configured_nodes":0
+                "idle_nodes":0,
+                "dead_nodes":0,
+                "disabled_nodes":0,
+                "total_reconnections":0
             },
             "total":{
                 "current_connections":3,
@@ -64,7 +62,7 @@ async fn status_command_reports_health_and_runtime_stats() {
 
     assert!(output.contains("management=127.0.0.1:19090"));
     assert!(output.contains("status=healthy"));
-    assert!(output.contains("pool total=2 selectable=2 ready=2 suspect=0 open=0 disabled_auth=0"));
+    assert!(output.contains("pool total=2 selectable=2 active=2 connecting=0 idle=0 dead=0 disabled=0 reconnects=0"));
     assert!(output.contains(
         "total current=3 total=9 c2u=120 B u2c=240 B svc503_no_ready=4 svc503_over_capacity=1"
     ));
@@ -117,12 +115,12 @@ async fn status_command_prefers_management_api_override_over_config() {
         "pool":{
             "total_nodes":1,
             "selectable_nodes":1,
-            "ready_nodes":1,
-            "suspect_nodes":0,
-            "open_nodes":0,
-            "half_open_nodes":0,
+            "active_nodes":1,
             "connecting_nodes":0,
-            "configured_nodes":1
+            "idle_nodes":1,
+            "dead_nodes":0,
+            "disabled_nodes":0,
+            "total_reconnections":0
         }
     }"#
     .to_string();
@@ -217,12 +215,12 @@ async fn status_command_formats_large_byte_counters_with_human_units() {
                 "status":"healthy",
                 "total_nodes":1,
                 "selectable_nodes":1,
-                "ready_nodes":1,
-                "suspect_nodes":0,
-                "open_nodes":0,
-                "half_open_nodes":0,
+                "active_nodes":1,
                 "connecting_nodes":0,
-                "configured_nodes":1
+                "idle_nodes":1,
+                "dead_nodes":0,
+                "disabled_nodes":0,
+                "total_reconnections":0
             }
         }"#,
         r#"{
