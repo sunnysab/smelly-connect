@@ -114,6 +114,7 @@ impl SessionReqwestProxy {
     }
 
     /// Shut down the proxy handle.  Idempotent — the second call is a no-op.
+    #[allow(dead_code)]
     pub(crate) async fn shutdown(&self) {
         let handle = self
             .handle
