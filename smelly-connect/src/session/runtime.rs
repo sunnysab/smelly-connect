@@ -113,7 +113,12 @@ impl SessionReqwestProxy {
         &self.proxy_url
     }
 
-    /// Shut down the proxy handle.  Idempotent — the second call is a no-op.
+    /// Shut down the proxy handle in the current async context.
+    /// Idempotent — the second call is a no-op.
+    ///
+    /// This is the preferred shutdown path when called from an async context
+    /// (e.g. explicit session teardown).  It is intentionally separate from
+    /// `Drop`, which must handle the sync/non-async fallback.
     #[allow(dead_code)]
     pub(crate) async fn shutdown(&self) {
         let handle = self

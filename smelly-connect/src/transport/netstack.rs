@@ -185,6 +185,7 @@ struct SmolUdpSocket {
 
 #[cfg(test)]
 struct NetstackSnapshot {
+    num_sockets: usize,
     pending_outbound: usize,
 }
 
@@ -489,6 +490,7 @@ impl NetstackActor {
             #[cfg(test)]
             NetstackCommand::TestSnapshot { reply } => {
                 let _ = reply.send(NetstackSnapshot {
+                    num_sockets: self.sockets.iter().count(),
                     pending_outbound: self.pending_outbound.len(),
                 });
             }
@@ -590,7 +592,9 @@ impl NetstackActor {
         })();
 
         if let Err(err) = result {
-            self.remove_socket(handle);
+            // The handle was added to smoltcp (line 567) but not yet tracked in
+            // our maps — remove_socket() would skip sockets.remove() and leak it.
+            let _ = self.sockets.remove(handle);
             let _ = reply.send(Err(err));
             return Ok(());
         }
@@ -1635,6 +1639,12 @@ mod tests {
         )
         .await;
         assert!(result.is_err(), "connect should time out in test");
+
+        let snapshot = stack.snapshot().await;
+        assert_eq!(
+            snapshot.num_sockets, 0,
+            "timed out connect leaked smoltcp socket handles"
+        );
     }
 
     #[tokio::test]
