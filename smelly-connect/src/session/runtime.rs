@@ -112,6 +112,18 @@ impl SessionReqwestProxy {
     pub(crate) fn proxy_url(&self) -> &reqwest::Url {
         &self.proxy_url
     }
+
+    /// Shut down the proxy handle.  Idempotent — the second call is a no-op.
+    pub(crate) async fn shutdown(&self) {
+        let handle = self
+            .handle
+            .lock()
+            .expect("reqwest proxy mutex poisoned")
+            .take();
+        if let Some(handle) = handle {
+            let _ = handle.shutdown().await;
+        }
+    }
 }
 
 impl Drop for SessionReqwestProxy {
