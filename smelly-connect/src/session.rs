@@ -98,7 +98,6 @@ pub fn normalize_override_domain(value: &str) -> String {
 #[derive(Clone)]
 pub struct EasyConnectSession {
     inner: Arc<SessionInner>,
-    local_route_overrides: LocalRouteOverrides,
     route_policy: RoutePolicy,
     allow_all_routes: bool,
 }
@@ -116,10 +115,10 @@ impl EasyConnectSession {
                 resources,
                 resolver,
                 transport,
+                local_route_overrides: LocalRouteOverrides::default(),
                 legacy_data_plane: None,
                 runtime: Arc::new(SessionRuntime::default()),
             }),
-            local_route_overrides: LocalRouteOverrides::default(),
             route_policy: RoutePolicy::default(),
             allow_all_routes: false,
         }
@@ -176,11 +175,11 @@ impl EasyConnectSession {
     }
 
     pub fn local_route_overrides(&self) -> &LocalRouteOverrides {
-        &self.local_route_overrides
+        &self.inner.local_route_overrides
     }
 
     pub fn with_local_route_overrides(mut self, overrides: LocalRouteOverrides) -> Self {
-        self.local_route_overrides = overrides;
+        Arc::make_mut(&mut self.inner).local_route_overrides = overrides;
         self
     }
 
@@ -213,6 +212,7 @@ impl EasyConnectSession {
                 .resources
                 .matches_domain(host, port, RouteProtocol::Tcp)
                 || self
+                    .inner
                     .local_route_overrides
                     .matches_domain(host, port, RouteProtocol::Tcp))
         }
@@ -452,7 +452,7 @@ impl EasyConnectSession {
             self.inner.resolver.clone(),
             transport,
         )
-        .with_local_route_overrides(self.local_route_overrides.clone())
+        .with_local_route_overrides(self.inner.local_route_overrides.clone())
         .with_route_policy(self.route_policy)
         .with_allow_all_routes(self.allow_all_routes)
         .with_legacy_data_plane(
@@ -477,7 +477,7 @@ impl EasyConnectSession {
         let client_ip = self.inner.client_ip;
         let resources = self.inner.resources.clone();
         let resolver = self.inner.resolver.clone();
-        let local_route_overrides = self.local_route_overrides.clone();
+        let local_route_overrides = self.inner.local_route_overrides.clone();
         let route_policy = self.route_policy;
         let allow_all_routes = self.allow_all_routes;
         let request_ip_tunnel = self.inner.runtime.take_legacy_tunnel();
@@ -765,6 +765,7 @@ impl EasyConnectSession {
     ) -> bool {
         self.inner.resources.matches_domain(host, port, protocol)
             || self
+                .inner
                 .local_route_overrides
                 .matches_domain(host, port, protocol)
             || self.matches_ip_resource(ip, port, protocol)
@@ -773,7 +774,7 @@ impl EasyConnectSession {
     /// Returns true if the given IP matches any known IP-based resource rule.
     fn matches_ip_resource(&self, ip: IpAddr, port: u16, protocol: RouteProtocol) -> bool {
         self.inner.resources.matches_ip(ip, port, protocol)
-            || self.local_route_overrides.matches_ip(ip, port, protocol)
+            || self.inner.local_route_overrides.matches_ip(ip, port, protocol)
     }
 
     pub fn failing_transport(message: &'static str) -> TransportStack {

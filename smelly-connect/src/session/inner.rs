@@ -6,6 +6,7 @@ use crate::error::Error;
 use crate::resolver::SessionResolver;
 use crate::resource::ResourceSet;
 use crate::session::runtime::SessionRuntime;
+use crate::session::LocalRouteOverrides;
 use crate::transport::TransportStack;
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -18,6 +19,7 @@ pub(crate) struct SessionInner {
     pub(crate) resources: ResourceSet,
     pub(crate) resolver: SessionResolver,
     pub(crate) transport: TransportStack,
+    pub(crate) local_route_overrides: LocalRouteOverrides,
     pub(crate) legacy_data_plane: Option<LegacyDataPlaneConfig>,
     pub(crate) runtime: Arc<SessionRuntime>,
 }
