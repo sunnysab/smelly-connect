@@ -81,11 +81,8 @@ struct PoolState {
     notify: Arc<tokio::sync::Notify>,
 }
 
-pub struct SessionPool {
-    inner: Arc<Mutex<PoolState>>,
-    maintenance: Arc<PoolMaintenance>,
-    user_refs: Arc<AtomicUsize>,
-    counts_for_shutdown: bool,
+#[derive(Clone)]
+pub(crate) struct PoolConfig {
     healthcheck_interval: Duration,
     connect_timeout: Duration,
     local_route_overrides: LocalRouteOverrides,
@@ -97,6 +94,14 @@ pub struct SessionPool {
     min_pool_size: usize,
     backoff_base: Duration,
     backoff_max: Duration,
+}
+
+pub struct SessionPool {
+    inner: Arc<Mutex<PoolState>>,
+    maintenance: Arc<PoolMaintenance>,
+    user_refs: Arc<AtomicUsize>,
+    counts_for_shutdown: bool,
+    config: PoolConfig,
 }
 
 impl Clone for SessionPool {
@@ -181,17 +186,7 @@ impl SessionPool {
             maintenance: Arc::clone(&self.maintenance),
             user_refs: Arc::clone(&self.user_refs),
             counts_for_shutdown,
-            healthcheck_interval: self.healthcheck_interval,
-            connect_timeout: self.connect_timeout,
-            local_route_overrides: self.local_route_overrides.clone(),
-            route_policy: self.route_policy,
-            allow_all_routes: self.allow_all_routes,
-            keepalive_target: self.keepalive_target.clone(),
-            server: self.server.clone(),
-            server_cert_policy: self.server_cert_policy.clone(),
-            min_pool_size: self.min_pool_size,
-            backoff_base: self.backoff_base,
-            backoff_max: self.backoff_max,
+            config: self.config.clone(),
         }
     }
 
@@ -228,16 +223,7 @@ impl SessionPool {
             .collect();
 
         let keepalive_target = cfg.icmp_keepalive_target().map(str::to_owned);
-        let pool = Self {
-            inner: Arc::new(Mutex::new(PoolState {
-                nodes,
-                cursor: 0,
-                total_reconnections: 0,
-                notify: Arc::new(tokio::sync::Notify::new()),
-            })),
-            maintenance: PoolMaintenance::new_shared(),
-            user_refs: Arc::new(AtomicUsize::new(1)),
-            counts_for_shutdown: true,
+        let config = PoolConfig {
             healthcheck_interval: Duration::from_secs(cfg.pool.healthcheck_interval_secs.max(1)),
             connect_timeout: cfg.session_connect_timeout(),
             local_route_overrides: build_local_route_overrides(&cfg.routing)?,
@@ -249,6 +235,18 @@ impl SessionPool {
             min_pool_size: cfg.pool.min_pool_size,
             backoff_base: Duration::from_secs(cfg.pool.backoff_base_secs),
             backoff_max: Duration::from_secs(cfg.pool.backoff_max_secs),
+        };
+        let pool = Self {
+            inner: Arc::new(Mutex::new(PoolState {
+                nodes,
+                cursor: 0,
+                total_reconnections: 0,
+                notify: Arc::new(tokio::sync::Notify::new()),
+            })),
+            maintenance: PoolMaintenance::new_shared(),
+            user_refs: Arc::new(AtomicUsize::new(1)),
+            counts_for_shutdown: true,
+            config,
         };
 
         // Retry connecting until we hit min_pool_size or exhaust Idle nodes.
@@ -372,7 +370,7 @@ impl SessionPool {
             .iter_mut()
             .find(|node| node.account.name == account_name && matches!(node.state, AccountState::Active(_)))
         {
-                node.backoff = state::next_backoff(node.backoff, self.backoff_max);
+                        node.backoff = state::next_backoff(node.backoff, self.config.backoff_max);
                 node.backoff_until = Some(Instant::now() + node.backoff);
                 node.state = AccountState::Dead;
                 tracing::warn!(
@@ -384,7 +382,7 @@ impl SessionPool {
     }
 
     fn spawn_background_maintenance_task(&self) {
-        let interval = self.healthcheck_interval;
+        let interval = self.config.healthcheck_interval;
         let pool = self.clone_with_refcount(false);
         let maintenance = Arc::clone(&self.maintenance);
         let mut shutdown = self.maintenance.subscribe();
@@ -415,7 +413,7 @@ impl SessionPool {
         account_name: &str,
         session: &Session,
     ) -> Option<Arc<std::sync::Mutex<smelly_connect::KeepaliveHandle>>> {
-        let target = self.keepalive_target.clone()?;
+        let target = self.config.keepalive_target.clone()?;
         let pool = self.clone_with_refcount(false);
         let account_name = account_name.to_string();
         Some(Arc::new(std::sync::Mutex::new(
@@ -509,7 +507,7 @@ impl SessionPool {
                         if node.backoff_until.is_some_and(|until| now >= until) =>
                     {
                         node.backoff =
-                            state::next_backoff(node.backoff, self.backoff_max);
+                            state::next_backoff(node.backoff, self.config.backoff_max);
                         node.backoff_until = Some(now + node.backoff);
                         node.state = AccountState::Dead;
                         tracing::warn!(
@@ -532,7 +530,7 @@ impl SessionPool {
                 .iter()
                 .filter(|n| matches!(n.state, AccountState::Connecting))
                 .count();
-            let target = self.min_pool_size;
+            let target = self.config.min_pool_size;
             if target > active + connecting {
                 target - active - connecting
             } else {
@@ -551,12 +549,12 @@ impl SessionPool {
                     Some((_i, node)) => {
                         let name = node.account.name.clone();
                         let account = node.account.clone();
-                        let server = self.server.clone();
+                        let server = self.config.server.clone();
                         if server.is_none() {
                             continue;
                         }
                         node.state = AccountState::Connecting;
-                        node.backoff_until = Some(now + self.connect_timeout);
+                        node.backoff_until = Some(now + self.config.connect_timeout);
                         (name, account, server.unwrap())
                     }
                     None => break,
@@ -571,7 +569,7 @@ impl SessionPool {
         }
 
         // Phase 3: health probe Active nodes (if keepalive_target is configured)
-        if self.keepalive_target.is_some() {
+        if self.config.keepalive_target.is_some() {
             let targets: Vec<(String, Session)> = {
                 let mut state = self.inner.lock().await;
                 let mut out = Vec::new();
@@ -590,7 +588,7 @@ impl SessionPool {
                 out
             };
 
-            if let Some(ref target) = self.keepalive_target {
+            if let Some(ref target) = self.config.keepalive_target {
                 for (name, session) in targets {
                     let pool = self.clone_with_refcount(false);
                     let target = target.clone();
@@ -631,13 +629,13 @@ impl SessionPool {
         let result = connect_account(
             server,
             account,
-            self.connect_timeout,
+            self.config.connect_timeout,
             ConnectAccountContext {
-                local_route_overrides: &self.local_route_overrides,
-                route_policy: self.route_policy,
-                allow_all_routes: self.allow_all_routes,
-                _keepalive_target: self.keepalive_target.as_deref(),
-                server_cert_policy: self.server_cert_policy.clone(),
+                local_route_overrides: &self.config.local_route_overrides,
+                route_policy: self.config.route_policy,
+                allow_all_routes: self.config.allow_all_routes,
+                _keepalive_target: self.config.keepalive_target.as_deref(),
+                server_cert_policy: self.config.server_cert_policy.clone(),
             },
         )
         .await;
@@ -652,7 +650,7 @@ impl SessionPool {
                     .find(|n| n.account.name == name)
                 {
                     node.state = AccountState::Active(Box::new(pooled));
-                    node.backoff = self.backoff_base;
+                    node.backoff = self.config.backoff_base;
                     state.total_reconnections += 1;
                     tracing::info!(account = %name, "recover -> active");
                 }
@@ -673,7 +671,7 @@ impl SessionPool {
                         .iter_mut()
                         .find(|n| n.account.name == name)
                     {
-                        node.backoff = state::next_backoff(node.backoff, self.backoff_max);
+                node.backoff = state::next_backoff(node.backoff, self.config.backoff_max);
                         node.backoff_until = Some(Instant::now() + node.backoff);
                         node.state = AccountState::Dead;
                         tracing::warn!(
