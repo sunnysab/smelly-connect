@@ -728,20 +728,21 @@ async fn spawn_legacy_packet_device_bridges_packets_between_stack_and_tunnels() 
         }
     });
 
-    let device = smelly_connect::auth::control::spawn_legacy_packet_device_for_server_with_policy(
-        &test_server(addr),
-        addr,
-        &token,
-        client_ip,
-        Some("RC4-SHA"),
-        test_server_cert_policy(),
-    )
-    .await
-    .unwrap();
+    let (device, mut inbound_rx) =
+        smelly_connect::auth::control::spawn_legacy_packet_device_for_server_with_policy(
+            &test_server(addr),
+            addr,
+            &token,
+            client_ip,
+            Some("RC4-SHA"),
+            test_server_cert_policy(),
+        )
+        .await
+        .unwrap();
 
-    let inbound = device.read_for_stack().await.unwrap();
+    let inbound = inbound_rx.recv().await.unwrap();
     assert_eq!(inbound, vec![0xde, 0xad, 0xbe, 0xef]);
-    device.write_from_stack(vec![0xca, 0xfe]).await;
+    device.outbound_sender().send(vec![0xca, 0xfe]).await.unwrap();
     server.await.unwrap();
 
     async fn read_record(stream: &mut tokio::net::TcpStream) -> Vec<u8> {

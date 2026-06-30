@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::future::{pending, poll_fn};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -52,10 +52,13 @@ struct NetstackActor {
     device: QueueDevice,
     iface: Interface,
     sockets: SocketSet<'static>,
-    active_handles: HashSet<SocketHandle>,
     tcp_sockets: HashMap<SocketHandle, Arc<TcpSocketState>>,
     udp_sockets: HashMap<SocketHandle, Arc<UdpSocketState>>,
     pending_pings: HashMap<SocketHandle, PendingPing>,
+    /// Double buffer for outbound packets: smoltcp writes to `device.outbound`,
+    /// then `drive()` drains it into `pending_outbound`, and `flush_outbound()`
+    /// drains `pending_outbound` into the mpsc channel.  This decouples the
+    /// smoltcp poll cycle from backpressure on the outbound channel.
     pending_outbound: VecDeque<Vec<u8>>,
     local_ip: Ipv4Addr,
     next_port: u16,
@@ -182,7 +185,6 @@ struct SmolUdpSocket {
 
 #[cfg(test)]
 struct NetstackSnapshot {
-    active_handles: usize,
     pending_outbound: usize,
 }
 
@@ -254,7 +256,6 @@ impl SmolStack {
             device,
             iface,
             sockets: SocketSet::new(vec![]),
-            active_handles: HashSet::new(),
             tcp_sockets: HashMap::new(),
             udp_sockets: HashMap::new(),
             pending_pings: HashMap::new(),
@@ -488,7 +489,6 @@ impl NetstackActor {
             #[cfg(test)]
             NetstackCommand::TestSnapshot { reply } => {
                 let _ = reply.send(NetstackSnapshot {
-                    active_handles: self.active_handles.len(),
                     pending_outbound: self.pending_outbound.len(),
                 });
             }
@@ -508,7 +508,6 @@ impl NetstackActor {
         };
 
         let handle = self.sockets.add(tcp_socket());
-        self.active_handles.insert(handle);
         self.tcp_sockets.insert(handle, Arc::clone(&state));
 
         let local_port = self.next_local_port();
@@ -530,7 +529,6 @@ impl NetstackActor {
             ?handle,
             local_port,
             remote_addr = %addr,
-            active_handles = self.active_handles.len(),
             pending_outbound = self.pending_outbound.len(),
             "netstack tcp connect started"
         );
@@ -543,7 +541,6 @@ impl NetstackActor {
         state: Arc<UdpSocketState>,
     ) -> io::Result<(SocketHandle, SocketAddr)> {
         let handle = self.sockets.add(udp_socket());
-        self.active_handles.insert(handle);
         self.udp_sockets.insert(handle, Arc::clone(&state));
 
         let local_port = self.next_local_port();
@@ -568,7 +565,6 @@ impl NetstackActor {
         reply: oneshot::Sender<io::Result<()>>,
     ) -> io::Result<()> {
         let handle = self.sockets.add(icmp_socket());
-        self.active_handles.insert(handle);
         let seq_no = self.next_icmp_seq();
 
         let result = (|| {
@@ -766,7 +762,6 @@ impl NetstackActor {
                     self.pending_outbound.push_front(packet);
                     warn!(
                         pending_outbound = self.pending_outbound.len(),
-                        active_handles = self.active_handles.len(),
                         "netstack outbound queue backed up"
                     );
                     break;
@@ -784,32 +779,35 @@ impl NetstackActor {
     }
 
     fn remove_socket(&mut self, handle: SocketHandle) {
-        if !self.active_handles.remove(&handle) {
-            return;
-        }
+        let tcp_state = self.tcp_sockets.remove(&handle);
+        let udp_state = self.udp_sockets.remove(&handle);
+        let ping = self.pending_pings.remove(&handle);
+        let found = tcp_state.is_some() || udp_state.is_some() || ping.is_some();
 
-        if let Some(state) = self.tcp_sockets.remove(&handle) {
+        if let Some(state) = tcp_state {
             state.on_removed(Some(SharedIoError::new(
                 io::ErrorKind::ConnectionAborted,
                 "tcp socket removed",
             )));
         }
 
-        if let Some(state) = self.udp_sockets.remove(&handle) {
+        if let Some(state) = udp_state {
             state.on_removed();
         }
 
-        if let Some(ping) = self.pending_pings.remove(&handle) {
+        if let Some(ping) = ping {
             let _ = ping.reply.send(Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
                 "icmp ping cancelled",
             )));
         }
 
-        let _ = self.sockets.remove(handle);
+        // Only remove from smoltcp if we tracked this handle — double-removal panics.
+        if found {
+            let _ = self.sockets.remove(handle);
+        }
         debug!(
             ?handle,
-            active_handles = self.active_handles.len(),
             pending_outbound = self.pending_outbound.len(),
             "netstack socket removed"
         );
@@ -829,7 +827,6 @@ impl NetstackActor {
         }
 
         self.pending_outbound.clear();
-        self.active_handles.clear();
         self.tcp_sockets.clear();
         self.udp_sockets.clear();
     }
@@ -1638,12 +1635,6 @@ mod tests {
         )
         .await;
         assert!(result.is_err(), "connect should time out in test");
-
-        let snapshot = stack.snapshot().await;
-        assert_eq!(
-            snapshot.active_handles, 0,
-            "timed out connect leaked active socket handles"
-        );
     }
 
     #[tokio::test]

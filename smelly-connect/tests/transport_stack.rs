@@ -2,16 +2,16 @@
 
 #[tokio::test]
 async fn packet_device_forwards_frames_between_channels_and_stack() {
-    let harness = smelly_connect::test_support::transport::packet_harness();
+    let mut harness = smelly_connect::test_support::transport::packet_harness();
     harness.inject_from_vpn(vec![0, 1, 2, 3]).await;
-    assert_eq!(harness.read_for_stack().await, vec![0, 1, 2, 3]);
+    assert_eq!(harness.read_for_stack().await, Some(vec![0, 1, 2, 3]));
 }
 
 #[tokio::test]
 async fn packet_device_forwards_frames_from_stack_to_vpn() {
-    let harness = smelly_connect::test_support::transport::packet_harness();
+    let mut harness = smelly_connect::test_support::transport::packet_harness();
     harness.write_from_stack(vec![4, 5, 6, 7]).await;
-    assert_eq!(harness.read_for_vpn().await, vec![4, 5, 6, 7]);
+    assert_eq!(harness.read_for_vpn().await, Some(vec![4, 5, 6, 7]));
 }
 
 #[tokio::test]
@@ -29,9 +29,12 @@ async fn stack_can_create_outbound_udp_socket_handle() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn packet_device_builds_real_smoltcp_transport() {
-    let harness = smelly_connect::test_support::transport::packet_harness();
+    let (vpn_tx, vpn_rx) = tokio::sync::mpsc::channel(4);
+    let (stack_tx, _stack_rx) = tokio::sync::mpsc::channel(4);
+    let device = smelly_connect::transport::device::PacketDevice::new(vpn_tx, stack_tx);
     let transport = smelly_connect::transport::netstack::build_transport_from_packet_device(
-        harness.into_device(),
+        device,
+        vpn_rx,
         "10.0.0.8".parse().unwrap(),
     )
     .unwrap();
