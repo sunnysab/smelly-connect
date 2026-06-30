@@ -132,24 +132,6 @@ impl EasyConnectSession {
             server_addr,
             token,
             legacy_cipher_hint,
-            #[cfg(any(test, feature = "test-utils"))]
-            transport_rebuilder: None,
-        });
-        self
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn with_transport_rebuild_for_test<F>(mut self, rebuilder: F) -> Self
-    where
-        F: Fn() -> Result<TransportStack, Error> + Send + Sync + 'static,
-    {
-        let server_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 443));
-        let token = crate::protocol::DerivedToken([0_u8; 48]);
-        Arc::make_mut(&mut self.inner).legacy_data_plane = Some(LegacyDataPlaneConfig {
-            server_addr,
-            token,
-            legacy_cipher_hint: None,
-            transport_rebuilder: Some(Arc::new(rebuilder)),
         });
         self
     }
@@ -397,32 +379,6 @@ impl EasyConnectSession {
                 "legacy data plane unavailable".to_string(),
             ))
         })?;
-        #[cfg(any(test, feature = "test-utils"))]
-        let (client_ip, transport, request_ip_tunnel) = if let Some(rebuilder) =
-            &cfg.transport_rebuilder
-        {
-            (self.inner.client_ip, rebuilder()?, None)
-        } else {
-            let (client_ip, request_ip_tunnel) =
-                crate::auth::control::request_ip_via_tunnel_with_conn(
-                    cfg.server_addr,
-                    &cfg.token,
-                    cfg.legacy_cipher_hint.as_deref(),
-                )
-                .await?;
-            let (device, inbound_rx) = crate::auth::control::spawn_legacy_packet_device(
-                cfg.server_addr,
-                &cfg.token,
-                client_ip,
-                cfg.legacy_cipher_hint.as_deref(),
-            )
-            .await?;
-            let transport =
-                crate::transport::netstack::build_transport_from_packet_device(device, inbound_rx, client_ip)
-                    .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
-            (client_ip, transport, Some(request_ip_tunnel))
-        };
-        #[cfg(not(any(test, feature = "test-utils")))]
         let (client_ip, transport, request_ip_tunnel) = {
             let (client_ip, request_ip_tunnel) =
                 crate::auth::control::request_ip_via_tunnel_with_conn(
@@ -470,8 +426,6 @@ impl EasyConnectSession {
         let server_addr = cfg.server_addr;
         let token = cfg.token.clone();
         let legacy_cipher_hint = cfg.legacy_cipher_hint.clone();
-        #[cfg(any(test, feature = "test-utils"))]
-        let transport_rebuilder = cfg.transport_rebuilder.clone();
         let client_ip = self.inner.client_ip;
         let resources = self.inner.resources.clone();
         let resolver = self.inner.resolver.clone();
@@ -483,47 +437,6 @@ impl EasyConnectSession {
         drop(self);
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        #[cfg(any(test, feature = "test-utils"))]
-        let (transport, request_ip_tunnel) = if let Some(rebuilder) = transport_rebuilder {
-            (rebuilder()?, None)
-        } else if let Some(request_ip_tunnel) = request_ip_tunnel {
-            let recv = crate::auth::control::open_recv_tunnel(
-                server_addr,
-                &token,
-                client_ip,
-                legacy_cipher_hint.as_deref(),
-            )
-            .await?;
-            let send = crate::auth::control::open_send_tunnel(
-                server_addr,
-                &token,
-                client_ip,
-                legacy_cipher_hint.as_deref(),
-            )
-            .await?;
-            let (device, inbound_rx) = crate::auth::control::packet_device_from_tunnels(recv, send)?;
-            let transport =
-                crate::transport::netstack::build_transport_from_packet_device(device, inbound_rx, client_ip)
-                    .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
-            (transport, Some(request_ip_tunnel))
-        } else {
-            let rebuilt = EasyConnectSession::new(
-                client_ip,
-                resources.clone(),
-                resolver.clone(),
-                crate::transport::TransportStack::new(|_| async {
-                    Err(std::io::Error::other("placeholder transport"))
-                }),
-            )
-            .with_local_route_overrides(local_route_overrides.clone())
-            .with_route_policy(route_policy)
-            .with_allow_all_routes(allow_all_routes)
-            .with_legacy_data_plane(server_addr, token.clone(), legacy_cipher_hint.clone())
-            .rebuild_transport()
-            .await?;
-            return Ok(rebuilt);
-        };
-        #[cfg(not(any(test, feature = "test-utils")))]
         let (transport, request_ip_tunnel) = if let Some(request_ip_tunnel) = request_ip_tunnel {
             let recv = crate::auth::control::open_recv_tunnel(
                 server_addr,

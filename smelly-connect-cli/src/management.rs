@@ -1,15 +1,8 @@
-#[cfg(any(test, feature = "test-utils"))]
-use std::net::SocketAddr;
-
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
-#[cfg(any(test, feature = "test-utils"))]
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-#[cfg(any(test, feature = "test-utils"))]
-use tokio::net::TcpStream;
 use tokio::sync::watch;
 
 use crate::pool::{PoolHealthStatus, PoolSummary, SessionPool};
@@ -55,23 +48,6 @@ pub async fn serve_management(
         .map_err(|err| err.to_string())
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-pub async fn fetch_json_for_test(
-    pool: SessionPool,
-    runtime_stats: RuntimeStats,
-    path: &str,
-) -> Result<String, String> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|err| err.to_string())?;
-    let addr = listener.local_addr().map_err(|err| err.to_string())?;
-    let app = router(pool, runtime_stats);
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    request_json(addr, path).await
-}
-
 fn router(pool: SessionPool, runtime_stats: RuntimeStats) -> Router {
     let state = ManagementState {
         pool,
@@ -109,27 +85,4 @@ async fn nodes(State(state): State<ManagementState>) -> Json<NodesResponse> {
 
 async fn routes(State(state): State<ManagementState>) -> Json<crate::pool::RoutesSnapshot> {
     Json(state.pool.routes_snapshot().await)
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-async fn request_json(addr: SocketAddr, path: &str) -> Result<String, String> {
-    let mut client = TcpStream::connect(addr)
-        .await
-        .map_err(|err| err.to_string())?;
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    client
-        .write_all(request.as_bytes())
-        .await
-        .map_err(|err| err.to_string())?;
-    let mut response = Vec::new();
-    client
-        .read_to_end(&mut response)
-        .await
-        .map_err(|err| err.to_string())?;
-    let response = String::from_utf8(response).map_err(|err| err.to_string())?;
-    response
-        .split("\r\n\r\n")
-        .nth(1)
-        .map(str::to_string)
-        .ok_or_else(|| "missing management response body".to_string())
 }

@@ -1,48 +1,7 @@
 use std::path::Path;
-#[cfg(feature = "test-utils")]
-use std::sync::Arc;
-#[cfg(feature = "test-utils")]
-use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
-#[cfg(feature = "test-utils")]
-use smelly_connect::test_support;
-
 use crate::error::CliError;
-
-#[cfg(feature = "test-utils")]
-pub async fn run_tcp_for_test(target: &str) -> Result<String, String> {
-    let session = test_support::session::login_harness().ready_session().await;
-    let (host, port) = split_target(target)?;
-    let _stream = session
-        .connect_tcp((host.as_str(), port))
-        .await
-        .map_err(|err| format!("{err:?}"))?;
-    Ok(format!("tcp ok: {host}:{port}"))
-}
-
-#[cfg(feature = "test-utils")]
-pub async fn run_icmp_for_test(target: &str) -> Result<String, String> {
-    let counter = Arc::new(AtomicUsize::new(0));
-    let session = test_support::session::session_with_icmp_ping(counter);
-    session
-        .icmp_ping(target.into())
-        .await
-        .map_err(|err| format!("{err:?}"))?;
-    Ok(format!("icmp ok: {target}"))
-}
-
-#[cfg(feature = "test-utils")]
-pub async fn run_http_for_test(url: &str) -> Result<String, String> {
-    let harness = test_support::integration::reqwest_harness().await;
-    let client = harness
-        .session
-        .reqwest_client()
-        .await
-        .map_err(|err| format!("{err:?}"))?;
-    let body = harness.get_with(client, url).await;
-    Ok(format!("status=200 body={body}"))
-}
 
 pub async fn run_tcp(target: &str) -> Result<(), String> {
     let output = run_tcp_with_config("config.toml", target).await?;
@@ -566,11 +525,6 @@ where
         Ok(Err(err)) => format!("err {err:?}"),
         Err(_) => "timeout".to_string(),
     }
-}
-
-#[cfg(feature = "test-utils")]
-fn split_target(target: &str) -> Result<(String, u16), String> {
-    split_target_typed(target).map_err(|err| err.to_string())
 }
 
 fn split_target_typed(target: &str) -> Result<(String, u16), CliError> {

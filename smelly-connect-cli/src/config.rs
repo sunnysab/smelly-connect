@@ -351,30 +351,6 @@ pub fn load_typed(path: impl AsRef<Path>) -> Result<AppConfig, CliError> {
     toml::from_str(&body).map_err(|err| CliError::Config(err.to_string()))
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-pub fn load_for_test(path: impl AsRef<Path>) -> Result<AppConfig, String> {
-    let body = fs::read_to_string(path).map_err(|err| err.to_string())?;
-    toml::from_str(&body).map_err(|err| err.to_string())
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub fn merge_for_test<const N: usize>(
-    path: impl AsRef<Path>,
-    args: [&str; N],
-) -> Result<AppConfig, String> {
-    let mut cfg = load_for_test(path)?;
-    let cli = crate::cli::Cli::parse_from(
-        std::iter::once("smelly-connect-cli")
-            .chain(std::iter::once("proxy"))
-            .chain(args),
-    );
-    let crate::cli::Command::Proxy(command) = cli.command else {
-        return Err("expected proxy command".to_string());
-    };
-    apply_proxy_overrides(&mut cfg, &command);
-    Ok(cfg)
-}
-
 pub fn merge_proxy_command(
     path: impl AsRef<Path>,
     command: &ProxyCommand,

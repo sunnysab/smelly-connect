@@ -1,5 +1,3 @@
-#[cfg(any(test, feature = "test-utils"))]
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -71,51 +69,6 @@ impl RuntimeStats {
         self.protocol_stats(protocol)
             .service_unavailable_over_capacity
             .fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn seed_protocol_for_test(&self, protocol: &str, values: BTreeMap<&str, u64>) {
-        let stats = match protocol {
-            "http" => &self.http,
-            "socks5" => &self.socks5,
-            other => panic!("unsupported protocol for test seed: {other}"),
-        };
-        if let Some(value) = values.get("current_connections") {
-            stats.current_connections.store(*value, Ordering::Relaxed);
-        }
-        if let Some(value) = values.get("total_connections") {
-            stats.total_connections.store(*value, Ordering::Relaxed);
-        }
-        if let Some(value) = values.get("client_to_upstream_bytes") {
-            stats
-                .client_to_upstream_bytes
-                .store(*value, Ordering::Relaxed);
-        }
-        if let Some(value) = values.get("upstream_to_client_bytes") {
-            stats
-                .upstream_to_client_bytes
-                .store(*value, Ordering::Relaxed);
-        }
-        if let Some(value) = values.get("service_unavailable_no_ready_session") {
-            stats
-                .service_unavailable_no_ready_session
-                .store(*value, Ordering::Relaxed);
-        }
-        if let Some(value) = values.get("service_unavailable_over_capacity") {
-            stats
-                .service_unavailable_over_capacity
-                .store(*value, Ordering::Relaxed);
-        }
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn record_connect_failure_for_test(&self) {
-        self.record_connect_failure();
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn record_connect_success_for_test(&self) {
-        self.record_connect_success();
     }
 
     fn protocol_stats(&self, protocol: ProxyProtocol) -> &ProtocolStats {

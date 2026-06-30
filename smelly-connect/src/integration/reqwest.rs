@@ -12,14 +12,6 @@ pub async fn build_client(session: &EasyConnectSession) -> Result<reqwest::Clien
     Ok(client)
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-#[doc(hidden)]
-pub async fn build_client_for_test(
-    session: &EasyConnectSession,
-) -> Result<(reqwest::Client, SocketAddr), Error> {
-    build_client_with_proxy_addr(session).await
-}
-
 async fn build_client_with_proxy_addr(
     session: &EasyConnectSession,
 ) -> Result<(reqwest::Client, SocketAddr), Error> {
