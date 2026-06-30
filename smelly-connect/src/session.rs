@@ -410,7 +410,7 @@ impl EasyConnectSession {
                     cfg.legacy_cipher_hint.as_deref(),
                 )
                 .await?;
-            let device = crate::auth::control::spawn_legacy_packet_device(
+            let (device, inbound_rx) = crate::auth::control::spawn_legacy_packet_device(
                 cfg.server_addr,
                 &cfg.token,
                 client_ip,
@@ -418,7 +418,7 @@ impl EasyConnectSession {
             )
             .await?;
             let transport =
-                crate::transport::netstack::build_transport_from_packet_device(device, client_ip)
+                crate::transport::netstack::build_transport_from_packet_device(device, inbound_rx, client_ip)
                     .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
             (client_ip, transport, Some(request_ip_tunnel))
         };
@@ -431,7 +431,7 @@ impl EasyConnectSession {
                     cfg.legacy_cipher_hint.as_deref(),
                 )
                 .await?;
-            let device = crate::auth::control::spawn_legacy_packet_device(
+            let (device, inbound_rx) = crate::auth::control::spawn_legacy_packet_device(
                 cfg.server_addr,
                 &cfg.token,
                 client_ip,
@@ -439,7 +439,7 @@ impl EasyConnectSession {
             )
             .await?;
             let transport =
-                crate::transport::netstack::build_transport_from_packet_device(device, client_ip)
+                crate::transport::netstack::build_transport_from_packet_device(device, inbound_rx, client_ip)
                     .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
             (client_ip, transport, Some(request_ip_tunnel))
         };
@@ -501,9 +501,9 @@ impl EasyConnectSession {
                 legacy_cipher_hint.as_deref(),
             )
             .await?;
-            let device = crate::auth::control::packet_device_from_tunnels(recv, send)?;
+            let (device, inbound_rx) = crate::auth::control::packet_device_from_tunnels(recv, send)?;
             let transport =
-                crate::transport::netstack::build_transport_from_packet_device(device, client_ip)
+                crate::transport::netstack::build_transport_from_packet_device(device, inbound_rx, client_ip)
                     .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
             (transport, Some(request_ip_tunnel))
         } else {
@@ -539,9 +539,9 @@ impl EasyConnectSession {
                 legacy_cipher_hint.as_deref(),
             )
             .await?;
-            let device = crate::auth::control::packet_device_from_tunnels(recv, send)?;
+            let (device, inbound_rx) = crate::auth::control::packet_device_from_tunnels(recv, send)?;
             let transport =
-                crate::transport::netstack::build_transport_from_packet_device(device, client_ip)
+                crate::transport::netstack::build_transport_from_packet_device(device, inbound_rx, client_ip)
                     .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
             (transport, Some(request_ip_tunnel))
         } else {
@@ -628,13 +628,14 @@ impl EasyConnectSession {
                 "legacy data plane unavailable".to_string(),
             ))
         })?;
-        crate::auth::control::spawn_legacy_packet_device(
+        let (device, _inbound_rx) = crate::auth::control::spawn_legacy_packet_device(
             cfg.server_addr,
             &cfg.token,
             self.inner.client_ip,
             cfg.legacy_cipher_hint.as_deref(),
         )
-        .await
+        .await?;
+        Ok(device)
     }
 
     pub async fn plan_tcp_connect<T>(&self, target: T) -> Result<RoutePlan, Error>

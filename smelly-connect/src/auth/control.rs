@@ -1,6 +1,7 @@
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 
 use smelly_tls::{ServerCertPolicy, TunnelConnection};
+use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::config::EasyConnectConfig;
@@ -206,7 +207,7 @@ pub async fn spawn_legacy_packet_device(
     token: &crate::protocol::DerivedToken,
     client_ip: Ipv4Addr,
     legacy_cipher_hint: Option<&str>,
-) -> Result<PacketDevice, Error> {
+) -> Result<(PacketDevice, mpsc::Receiver<Vec<u8>>), Error> {
     let recv = open_recv_tunnel(addr, token, client_ip, legacy_cipher_hint).await?;
     let send = open_send_tunnel(addr, token, client_ip, legacy_cipher_hint).await?;
 
@@ -220,7 +221,7 @@ pub async fn spawn_legacy_packet_device_for_server_with_policy(
     client_ip: Ipv4Addr,
     legacy_cipher_hint: Option<&str>,
     server_cert_policy: ServerCertPolicy,
-) -> Result<PacketDevice, Error> {
+) -> Result<(PacketDevice, mpsc::Receiver<Vec<u8>>), Error> {
     let server_identity = configured_server_identity(server);
     let recv = open_stream_tunnel(
         addr,
@@ -246,21 +247,16 @@ pub async fn spawn_legacy_packet_device_for_server_with_policy(
 pub(crate) fn packet_device_from_tunnels(
     recv: TunnelConnection,
     send: TunnelConnection,
-) -> Result<PacketDevice, Error> {
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(1024);
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(1024);
-    let mut device = PacketDevice::new(inbound_tx.clone(), inbound_rx, outbound_tx, outbound_rx);
-    let mut outbound_rx = device.take_outbound_rx().ok_or_else(|| {
-        Error::TunnelBootstrap(TunnelBootstrapError::HandshakeFailed(
-            "missing outbound rx".to_string(),
-        ))
-    })?;
+) -> Result<(PacketDevice, mpsc::Receiver<Vec<u8>>), Error> {
+    let (inbound_tx, inbound_rx) = mpsc::channel::<Vec<u8>>(1024);
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(1024);
 
+    let vpn_tx = inbound_tx.clone();
     tokio::spawn(async move {
         let mut recv = recv;
         while let Ok(packet) = recv.read_application_data().await {
             log_packet("vpn->stack", &packet);
-            let _ = inbound_tx.send(packet).await;
+            let _ = vpn_tx.send(packet).await;
         }
     });
 
@@ -272,7 +268,8 @@ pub(crate) fn packet_device_from_tunnels(
         }
     });
 
-    Ok(device)
+    let device = PacketDevice::new(inbound_tx, outbound_tx);
+    Ok((device, inbound_rx))
 }
 
 fn log_packet(direction: &str, packet: &[u8]) {

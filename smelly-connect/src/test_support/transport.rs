@@ -8,27 +8,44 @@ use tokio::sync::mpsc;
 use crate::transport::device::PacketDevice;
 use crate::transport::stack::TransportStack;
 
+/// Test harness that provides both directions of packet flow without needing a
+/// real VPN tunnel.  Unlike the production `PacketDevice` (which only holds
+/// senders), this harness also keeps the channel receivers so tests can assert
+/// on what flows through.
 pub struct PacketHarness {
     device: PacketDevice,
+    /// Sender for outbound direction (stack → VPN).
+    outbound_tx: mpsc::Sender<Vec<u8>>,
+    /// Receiver for outbound packets (stack → VPN).
+    outbound_rx: mpsc::Receiver<Vec<u8>>,
+    /// Receiver for inbound packets (VPN → stack).
+    inbound_rx: mpsc::Receiver<Vec<u8>>,
 }
 
 impl PacketHarness {
+    /// Inject a packet as if from the VPN tunnel (arrives at the stack side).
     pub async fn inject_from_vpn(&self, packet: Vec<u8>) {
         self.device.inject_from_vpn(packet).await;
     }
 
-    pub async fn read_for_stack(&self) -> Vec<u8> {
-        self.device.read_for_stack().await.unwrap()
+    /// Read a packet that arrived at the stack (previously injected via
+    /// `inject_from_vpn`).
+    pub async fn read_for_stack(&mut self) -> Option<Vec<u8>> {
+        self.inbound_rx.recv().await
     }
 
+    /// Write a packet as if from the stack (arrives at the VPN side).
     pub async fn write_from_stack(&self, packet: Vec<u8>) {
-        self.device.write_from_stack(packet).await;
+        let _ = self.outbound_tx.send(packet).await;
     }
 
-    pub async fn read_for_vpn(&self) -> Vec<u8> {
-        self.device.read_for_vpn().await.unwrap()
+    /// Read a packet sent by the stack (previously written via
+    /// `write_from_stack`).
+    pub async fn read_for_vpn(&mut self) -> Option<Vec<u8>> {
+        self.outbound_rx.recv().await
     }
 
+    /// Consume the harness and return the underlying device.
     pub fn into_device(self) -> PacketDevice {
         self.device
     }
@@ -37,8 +54,13 @@ impl PacketHarness {
 pub fn packet_harness() -> PacketHarness {
     let (vpn_tx, vpn_rx) = mpsc::channel(4);
     let (stack_tx, stack_rx) = mpsc::channel(4);
-    let device = PacketDevice::new(vpn_tx, vpn_rx, stack_tx, stack_rx);
-    PacketHarness { device }
+    let device = PacketDevice::new(vpn_tx, stack_tx.clone());
+    PacketHarness {
+        device,
+        outbound_tx: stack_tx,
+        outbound_rx: stack_rx,
+        inbound_rx: vpn_rx,
+    }
 }
 
 pub struct StackHarness {

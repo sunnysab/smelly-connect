@@ -199,24 +199,20 @@ fn acquire_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub fn build_transport_from_packet_device(
-    mut device: PacketDevice,
+    device: PacketDevice,
+    inbound_rx: mpsc::Receiver<Vec<u8>>,
     local_ip: Ipv4Addr,
 ) -> io::Result<TransportStack> {
-    let inbound_rx = device
-        .take_inbound_rx()
-        .ok_or_else(|| io::Error::other("missing inbound rx"))?;
     let outbound_tx = device.outbound_sender();
     let stack = SmolStack::new(local_ip, inbound_rx, outbound_tx);
     let connect_stack = stack.clone();
     let udp_stack = stack.clone();
     let ping_stack = stack.clone();
+    let device = Arc::new(device);
 
-    // Move the device into the connect closure so it stays alive as long as
-    // the TransportStack exists. Without this, the device's inbound_tx sender
-    // would be dropped, causing the driver loop to exit immediately.
     Ok(TransportStack::new(move |target: TargetAddr| {
         let stack = connect_stack.clone();
-        let _device = &device; // keep device alive
+        let _device = Arc::clone(&device); // keep device alive
         async move {
             let addr = socket_addr_from_target(target)?;
             stack.connect(addr).await

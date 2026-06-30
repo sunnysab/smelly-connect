@@ -152,7 +152,7 @@ impl EasyConnectConfig {
         // this connection to remain open for the data tunnels to work.
         // (zju-connect: "Request IP conn CAN NOT be closed, otherwise tx/rx
         // handshake will fail")
-        let device = crate::auth::control::spawn_legacy_packet_device_for_server_with_policy(
+        let (device, inbound_rx) = crate::auth::control::spawn_legacy_packet_device_for_server_with_policy(
             &self.server,
             server_addr,
             &token,
@@ -168,7 +168,7 @@ impl EasyConnectConfig {
         }
 
         let transport =
-            crate::transport::netstack::build_transport_from_packet_device(device, client_ip)
+            crate::transport::netstack::build_transport_from_packet_device(device, inbound_rx, client_ip)
                 .map_err(|err| Error::Transport(crate::error::TransportError::from_io(err)))?;
         let session = EasyConnectSession::new(
             client_ip,
