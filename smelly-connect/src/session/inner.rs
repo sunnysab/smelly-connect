@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 #[cfg(any(test, feature = "test-utils"))]
 use crate::error::Error;
+use crate::domain::route_policy::RoutePolicy;
 use crate::resolver::SessionResolver;
 use crate::resource::ResourceSet;
 use crate::session::runtime::SessionRuntime;
@@ -20,6 +21,8 @@ pub(crate) struct SessionInner {
     pub(crate) resolver: SessionResolver,
     pub(crate) transport: TransportStack,
     pub(crate) local_route_overrides: LocalRouteOverrides,
+    pub(crate) route_policy: RoutePolicy,
+    pub(crate) allow_all_routes: bool,
     pub(crate) legacy_data_plane: Option<LegacyDataPlaneConfig>,
     pub(crate) runtime: Arc<SessionRuntime>,
 }

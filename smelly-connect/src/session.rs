@@ -98,8 +98,6 @@ pub fn normalize_override_domain(value: &str) -> String {
 #[derive(Clone)]
 pub struct EasyConnectSession {
     inner: Arc<SessionInner>,
-    route_policy: RoutePolicy,
-    allow_all_routes: bool,
 }
 
 impl EasyConnectSession {
@@ -116,11 +114,11 @@ impl EasyConnectSession {
                 resolver,
                 transport,
                 local_route_overrides: LocalRouteOverrides::default(),
+                route_policy: RoutePolicy::default(),
+                allow_all_routes: false,
                 legacy_data_plane: None,
                 runtime: Arc::new(SessionRuntime::default()),
             }),
-            route_policy: RoutePolicy::default(),
-            allow_all_routes: false,
         }
     }
 
@@ -184,12 +182,12 @@ impl EasyConnectSession {
     }
 
     pub fn with_route_policy(mut self, route_policy: RoutePolicy) -> Self {
-        self.route_policy = route_policy;
+        Arc::make_mut(&mut self.inner).route_policy = route_policy;
         self
     }
 
     pub fn with_allow_all_routes(mut self, allow_all_routes: bool) -> Self {
-        self.allow_all_routes = allow_all_routes;
+        Arc::make_mut(&mut self.inner).allow_all_routes = allow_all_routes;
         self
     }
 
@@ -197,7 +195,7 @@ impl EasyConnectSession {
     where
         T: Into<TargetAddr>,
     {
-        if !self.allow_all_routes {
+        if !self.inner.allow_all_routes {
             return false;
         }
 
@@ -453,8 +451,8 @@ impl EasyConnectSession {
             transport,
         )
         .with_local_route_overrides(self.inner.local_route_overrides.clone())
-        .with_route_policy(self.route_policy)
-        .with_allow_all_routes(self.allow_all_routes)
+        .with_route_policy(self.inner.route_policy)
+        .with_allow_all_routes(self.inner.allow_all_routes)
         .with_legacy_data_plane(
             cfg.server_addr,
             cfg.token.clone(),
@@ -478,8 +476,8 @@ impl EasyConnectSession {
         let resources = self.inner.resources.clone();
         let resolver = self.inner.resolver.clone();
         let local_route_overrides = self.inner.local_route_overrides.clone();
-        let route_policy = self.route_policy;
-        let allow_all_routes = self.allow_all_routes;
+        let route_policy = self.inner.route_policy;
+        let allow_all_routes = self.inner.allow_all_routes;
         let request_ip_tunnel = self.inner.runtime.take_legacy_tunnel();
 
         drop(self);
@@ -681,7 +679,7 @@ impl EasyConnectSession {
         port: u16,
         protocol: RouteProtocol,
     ) -> Result<RoutePlan, Error> {
-        if self.allow_all_routes || self.matches_any_resource(host, ip, port, protocol) {
+        if self.inner.allow_all_routes || self.matches_any_resource(host, ip, port, protocol) {
             Ok(RoutePlan::VpnResolved(SocketAddr::new(ip, port)))
         } else {
             self.plan_direct_or_block(SocketAddr::new(ip, port))
@@ -695,7 +693,7 @@ impl EasyConnectSession {
         protocol: RouteProtocol,
     ) -> Result<RoutePlan, Error> {
         let addr = SocketAddr::new(IpAddr::V4(ip), port);
-        if self.allow_all_routes || self.matches_ip_resource(IpAddr::V4(ip), port, protocol) {
+        if self.inner.allow_all_routes || self.matches_ip_resource(IpAddr::V4(ip), port, protocol) {
             Ok(RoutePlan::VpnResolved(addr))
         } else {
             self.plan_direct_or_block(addr)
@@ -703,7 +701,7 @@ impl EasyConnectSession {
     }
 
     fn plan_direct_or_block(&self, addr: SocketAddr) -> Result<RoutePlan, Error> {
-        match self.route_policy {
+        match self.inner.route_policy {
             RoutePolicy::DirectNonResourceTargets => Ok(RoutePlan::Direct(addr)),
             RoutePolicy::RejectNonResourceTargets => {
                 Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed))
@@ -734,7 +732,7 @@ impl EasyConnectSession {
             .await
             .map_err(Error::Resolve)?;
 
-        if !self.allow_all_routes && !self.matches_any_resource(&host, ip, port, protocol) {
+        if !self.inner.allow_all_routes && !self.matches_any_resource(&host, ip, port, protocol) {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
 
@@ -747,7 +745,7 @@ impl EasyConnectSession {
         port: u16,
         protocol: RouteProtocol,
     ) -> Result<SocketAddr, Error> {
-        if !self.allow_all_routes && !self.matches_ip_resource(IpAddr::V4(ip), port, protocol) {
+        if !self.inner.allow_all_routes && !self.matches_ip_resource(IpAddr::V4(ip), port, protocol) {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
 
