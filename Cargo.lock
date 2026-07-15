@@ -1833,7 +1833,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smelly-connect"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "hex",
  "reqwest",
@@ -1850,7 +1850,7 @@ dependencies = [
 
 [[package]]
 name = "smelly-connect-cli"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "axum",
  "bytes",
@@ -1874,7 +1874,7 @@ dependencies = [
 
 [[package]]
 name = "smelly-tls"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "hex",
  "hmac",

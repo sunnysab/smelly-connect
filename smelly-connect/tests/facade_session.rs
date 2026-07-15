@@ -15,6 +15,6 @@ fn connect_target_accepts_host_port_and_socket_addr() {
 }
 
 #[test]
-fn crate_version_is_0_6_0() {
-    assert_eq!(env!("CARGO_PKG_VERSION"), "0.6.0");
+fn crate_version_is_0_6_1() {
+    assert_eq!(env!("CARGO_PKG_VERSION"), "0.6.1");
 }

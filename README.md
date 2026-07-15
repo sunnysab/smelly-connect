@@ -22,7 +22,7 @@ Rust 实现的 EasyConnect VPN 客户端。
 - **smelly-connect-cli** — CLI 工具，支持前台 `proxy` 服务、`test` 诊断、`inspect` / `status` / `routes` 查询，可选管理 API。
 - **smelly-tls** — 面向 EasyConnect 旧协议的 TLS 1.1 客户端，用于数据面隧道握手与加解密。
 
-主库版本：`smelly-connect v0.6.0`
+主库版本：`smelly-connect v0.6.1`
 
 ## 快速开始
 
