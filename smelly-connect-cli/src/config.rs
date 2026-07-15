@@ -43,10 +43,8 @@ pub struct PoolConfig {
     pub connect_timeout_secs: u64,
     pub session_connect_timeout_secs: Option<u64>,
     pub healthcheck_interval_secs: u64,
-    pub failure_threshold: u32,
     pub backoff_base_secs: u64,
     pub backoff_max_secs: u64,
-    pub allow_request_triggered_probe: bool,
 }
 
 impl Default for PoolConfig {
@@ -56,10 +54,8 @@ impl Default for PoolConfig {
             connect_timeout_secs: 20,
             session_connect_timeout_secs: None,
             healthcheck_interval_secs: 60,
-            failure_threshold: 3,
             backoff_base_secs: 30,
             backoff_max_secs: 600,
-            allow_request_triggered_probe: true,
         }
     }
 }
@@ -334,16 +330,9 @@ fn load_custom_root_certificates(path: &Path) -> Result<Vec<Vec<u8>>, CliError> 
 }
 
 fn looks_like_pem_certificate_bundle(contents: &[u8]) -> bool {
-    let trimmed = contents
-        .iter()
-        .copied()
-        .skip_while(|byte| byte.is_ascii_whitespace())
-        .collect::<Vec<_>>();
-    trimmed.starts_with(b"-----BEGIN CERTIFICATE-----")
-}
-
-pub fn load(path: impl AsRef<Path>) -> Result<AppConfig, String> {
-    load_typed(path).map_err(|err| err.to_string())
+    contents
+        .trim_ascii_start()
+        .starts_with(b"-----BEGIN CERTIFICATE-----")
 }
 
 pub fn load_typed(path: impl AsRef<Path>) -> Result<AppConfig, CliError> {
@@ -351,25 +340,7 @@ pub fn load_typed(path: impl AsRef<Path>) -> Result<AppConfig, CliError> {
     toml::from_str(&body).map_err(|err| CliError::Config(err.to_string()))
 }
 
-pub fn merge_proxy_command(
-    path: impl AsRef<Path>,
-    command: &ProxyCommand,
-) -> Result<AppConfig, String> {
-    let mut cfg = load_typed(path).map_err(|err| err.to_string())?;
-    apply_proxy_overrides(&mut cfg, command);
-    Ok(cfg)
-}
-
-pub fn merge_proxy_command_typed(
-    path: impl AsRef<Path>,
-    command: &ProxyCommand,
-) -> Result<AppConfig, CliError> {
-    let mut cfg = load_typed(path)?;
-    apply_proxy_overrides(&mut cfg, command);
-    Ok(cfg)
-}
-
-pub fn apply_proxy_overrides(cfg: &mut AppConfig, command: &ProxyCommand) {
+pub(crate) fn apply_proxy_overrides(cfg: &mut AppConfig, command: &ProxyCommand) {
     if let Some(min_pool_size) = command.min_pool_size {
         cfg.pool.min_pool_size = min_pool_size;
     }

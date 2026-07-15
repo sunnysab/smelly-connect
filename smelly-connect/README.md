@@ -12,7 +12,7 @@
 - 图形验证码回调
 - 资源规则解析
 - 获取分配 IP
-- `EasyConnectClient::builder(...).credentials(...).build()`
+- `EasyConnectConfig::new(...).connect()`
 - `connect_tcp()`
 - 本地 HTTP 代理
 - `reqwest_client()`

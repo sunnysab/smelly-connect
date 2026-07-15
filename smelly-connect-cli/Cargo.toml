@@ -7,14 +7,6 @@ edition = "2024"
 default = []
 management-api = ["dep:axum"]
 
-[lib]
-name = "smelly_connect_cli"
-path = "src/lib.rs"
-
-[[bin]]
-name = "smelly-connect-cli"
-path = "src/main.rs"
-
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -33,4 +25,4 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 rustls-pemfile = "2"
-x509-cert = "0.2"
+x509-cert = "0.3.0-rc.4"

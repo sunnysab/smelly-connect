@@ -5,11 +5,7 @@ use super::{AccountState, PoolState};
 
 pub(super) fn next_backoff(backoff: Duration, max: Duration) -> Duration {
     let doubled = backoff.saturating_mul(2);
-    if doubled > max {
-        max
-    } else {
-        doubled
-    }
+    if doubled > max { max } else { doubled }
 }
 
 pub(super) fn state_label(state: &AccountState) -> &'static str {
@@ -60,5 +56,3 @@ pub(super) fn build_pool_summary(state: &PoolState) -> PoolSummary {
         total_reconnections: state.total_reconnections,
     }
 }
-
-

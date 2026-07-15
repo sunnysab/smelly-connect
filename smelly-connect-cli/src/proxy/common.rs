@@ -187,19 +187,6 @@ pub async fn connect_planned_live_upstream_with_timeout(
     }
 }
 
-pub async fn connect_live_upstream_with_timeout(
-    timeout: Duration,
-    session: &smelly_connect::Session,
-    host: &str,
-    port: u16,
-) -> Result<
-    (smelly_connect::transport::VpnStream, LiveRouteBackend),
-    (UpstreamConnectError, LiveRouteBackend),
-> {
-    let route_plan = plan_live_upstream_connect(session, host, port).await?;
-    connect_planned_live_upstream_with_timeout(timeout, session, host, port, route_plan).await
-}
-
 pub async fn connect_session_with_timeout<Fut>(
     timeout: Duration,
     fut: Fut,

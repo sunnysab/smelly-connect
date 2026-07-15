@@ -108,7 +108,6 @@ impl ProtocolStats {
         self.total_connections.fetch_add(1, Ordering::Relaxed);
         ConnectionGuard {
             stats: self.clone(),
-            closed: false,
         }
     }
 
@@ -130,7 +129,6 @@ impl ProtocolStats {
 
 pub struct ConnectionGuard {
     stats: ProtocolStats,
-    closed: bool,
 }
 
 impl ConnectionGuard {
@@ -149,12 +147,9 @@ impl ConnectionGuard {
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
-        if !self.closed {
-            self.stats
-                .current_connections
-                .fetch_sub(1, Ordering::Relaxed);
-            self.closed = true;
-        }
+        self.stats
+            .current_connections
+            .fetch_sub(1, Ordering::Relaxed);
     }
 }
 

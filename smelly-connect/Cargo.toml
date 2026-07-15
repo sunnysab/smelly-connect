@@ -3,10 +3,6 @@ name = "smelly-connect"
 version = "0.6.0"
 edition = "2024"
 
-[lib]
-name = "smelly_connect"
-path = "src/lib.rs"
-
 [dependencies]
 rsa = "0.9"
 smelly-tls = { path = "../smelly-tls", features = ["tokio"] }

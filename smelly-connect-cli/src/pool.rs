@@ -8,7 +8,7 @@ use std::time::Duration;
 use smelly_connect::domain::route_policy::RoutePolicy;
 use smelly_connect::session::normalize_override_domain;
 use smelly_connect::{
-    CaptchaError, CaptchaHandler, EasyConnectClient, LocalRouteOverrides, Session,
+    CaptchaError, CaptchaHandler, EasyConnectConfig, LocalRouteOverrides, Session,
 };
 use tokio::sync::Mutex;
 use tokio::time::Instant;
@@ -126,7 +126,6 @@ const ACQUIRE_NOTIFY_TIMEOUT: Duration = Duration::from_millis(200);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoolError {
     Message(String),
-    ClientBuildFailed(smelly_connect::Error),
     SessionConnectFailed(smelly_connect::Error),
     /// No node is available to serve the request (all are Dead/Connecting/Disabled/Idle).
     NoReadyNode,
@@ -143,17 +142,13 @@ impl PoolError {
         Self::Message(message.into())
     }
 
-    fn client_build_failed(error: smelly_connect::Error) -> Self {
-        Self::ClientBuildFailed(error)
-    }
-
     fn session_connect_failed(error: smelly_connect::Error) -> Self {
         Self::SessionConnectFailed(error)
     }
 
     pub fn underlying_error(&self) -> Option<&smelly_connect::Error> {
         match self {
-            Self::ClientBuildFailed(error) | Self::SessionConnectFailed(error) => Some(error),
+            Self::SessionConnectFailed(error) => Some(error),
             Self::Message(_) | Self::NoReadyNode => None,
         }
     }
@@ -163,9 +158,6 @@ impl Display for PoolError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Message(message) => f.write_str(message),
-            Self::ClientBuildFailed(error) => {
-                write!(f, "pool client build failed: {error:?}")
-            }
             Self::SessionConnectFailed(error) => {
                 write!(f, "pool session connect failed: {error:?}")
             }
@@ -365,31 +357,26 @@ impl SessionPool {
     /// Unified failure reporter: mark an Active node as Dead with doubled backoff.
     pub async fn report_failure(&self, account_name: &str) {
         let mut state = self.inner.lock().await;
-        if let Some(node) = state
-            .nodes
-            .iter_mut()
-            .find(|node| node.account.name == account_name && matches!(node.state, AccountState::Active(_)))
-        {
-                        node.backoff = state::next_backoff(node.backoff, self.config.backoff_max);
-                node.backoff_until = Some(Instant::now() + node.backoff);
-                node.state = AccountState::Dead;
-                tracing::warn!(
-                    account = %account_name,
-                    backoff_secs = node.backoff.as_secs(),
-                    "active session marked dead after proxy failure"
-                );
+        if let Some(node) = state.nodes.iter_mut().find(|node| {
+            node.account.name == account_name && matches!(node.state, AccountState::Active(_))
+        }) {
+            node.backoff = state::next_backoff(node.backoff, self.config.backoff_max);
+            node.backoff_until = Some(Instant::now() + node.backoff);
+            node.state = AccountState::Dead;
+            tracing::warn!(
+                account = %account_name,
+                backoff_secs = node.backoff.as_secs(),
+                "active session marked dead after proxy failure"
+            );
         }
     }
 
     fn spawn_background_maintenance_task(&self) {
         let interval = self.config.healthcheck_interval;
         let pool = self.clone_with_refcount(false);
-        let maintenance = Arc::clone(&self.maintenance);
         let mut shutdown = self.maintenance.subscribe();
         self.maintenance.install(tokio::spawn(async move {
-            maintenance.running.store(true, Ordering::Release);
             if *shutdown.borrow() {
-                maintenance.running.store(false, Ordering::Release);
                 return;
             }
             loop {
@@ -404,7 +391,6 @@ impl SessionPool {
                     }
                 }
             }
-            maintenance.running.store(false, Ordering::Release);
         }));
     }
 
@@ -506,8 +492,7 @@ impl SessionPool {
                     AccountState::Connecting
                         if node.backoff_until.is_some_and(|until| now >= until) =>
                     {
-                        node.backoff =
-                            state::next_backoff(node.backoff, self.config.backoff_max);
+                        node.backoff = state::next_backoff(node.backoff, self.config.backoff_max);
                         node.backoff_until = Some(now + node.backoff);
                         node.state = AccountState::Dead;
                         tracing::warn!(
@@ -542,9 +527,11 @@ impl SessionPool {
         for _ in 0..deficit {
             let (name, account, server) = {
                 let mut state = self.inner.lock().await;
-                let idx = state.nodes.iter_mut().enumerate().find(|(_, n)| {
-                    matches!(n.state, AccountState::Idle)
-                });
+                let idx = state
+                    .nodes
+                    .iter_mut()
+                    .enumerate()
+                    .find(|(_, n)| matches!(n.state, AccountState::Idle));
                 match idx {
                     Some((_i, node)) => {
                         let name = node.account.name.clone();
@@ -563,8 +550,7 @@ impl SessionPool {
 
             let pool = Arc::new(self.clone_with_refcount(false));
             handles.push(tokio::spawn(async move {
-                pool.recover_account_session(&name, &account, &server)
-                    .await;
+                pool.recover_account_session(&name, &account, &server).await;
             }));
         }
 
@@ -602,10 +588,8 @@ impl SessionPool {
                             pool.report_failure(&name).await;
                         } else {
                             let mut state = pool.inner.lock().await;
-                            if let Some(node) = state
-                                .nodes
-                                .iter_mut()
-                                .find(|n| n.account.name == name)
+                            if let Some(node) =
+                                state.nodes.iter_mut().find(|n| n.account.name == name)
                             {
                                 node.probe_in_flight = false;
                             }
@@ -634,7 +618,6 @@ impl SessionPool {
                 local_route_overrides: &self.config.local_route_overrides,
                 route_policy: self.config.route_policy,
                 allow_all_routes: self.config.allow_all_routes,
-                _keepalive_target: self.config.keepalive_target.as_deref(),
                 server_cert_policy: self.config.server_cert_policy.clone(),
             },
         )
@@ -644,11 +627,7 @@ impl SessionPool {
         match result {
             Ok(session) => {
                 let pooled = self.wrap_live_session(name.to_string(), session);
-                if let Some(node) = state
-                    .nodes
-                    .iter_mut()
-                    .find(|n| n.account.name == name)
-                {
+                if let Some(node) = state.nodes.iter_mut().find(|n| n.account.name == name) {
                     node.state = AccountState::Active(Box::new(pooled));
                     node.backoff = self.config.backoff_base;
                     state.total_reconnections += 1;
@@ -657,21 +636,13 @@ impl SessionPool {
             }
             Err(err) => {
                 if is_permanent_auth_failure(&err) {
-                    if let Some(node) = state
-                        .nodes
-                        .iter_mut()
-                        .find(|n| n.account.name == name)
-                    {
+                    if let Some(node) = state.nodes.iter_mut().find(|n| n.account.name == name) {
                         node.state = AccountState::Disabled;
                         tracing::error!(account = %name, error = %err, "permanent auth failure, -> disabled");
                     }
                 } else {
-                    if let Some(node) = state
-                        .nodes
-                        .iter_mut()
-                        .find(|n| n.account.name == name)
-                    {
-                node.backoff = state::next_backoff(node.backoff, self.config.backoff_max);
+                    if let Some(node) = state.nodes.iter_mut().find(|n| n.account.name == name) {
+                        node.backoff = state::next_backoff(node.backoff, self.config.backoff_max);
                         node.backoff_until = Some(Instant::now() + node.backoff);
                         node.state = AccountState::Dead;
                         tracing::warn!(
@@ -722,7 +693,6 @@ struct ConnectAccountContext<'a> {
     local_route_overrides: &'a LocalRouteOverrides,
     route_policy: RoutePolicy,
     allow_all_routes: bool,
-    _keepalive_target: Option<&'a str>,
     server_cert_policy: smelly_connect::ServerCertPolicy,
 }
 
@@ -732,18 +702,15 @@ async fn connect_account(
     timeout: Duration,
     ctx: ConnectAccountContext<'_>,
 ) -> Result<Session, PoolError> {
-    let client = EasyConnectClient::builder(server.to_string())
-        .credentials(account.username.clone(), account.password.clone())
+    let config = EasyConnectConfig::new(server, account.username.clone(), account.password.clone())
         .with_server_cert_policy(ctx.server_cert_policy)
         .with_captcha_handler(CaptchaHandler::from_async(|_, _| async move {
             Err(CaptchaError::new(
                 "captcha callback not configured for smelly-connect-cli",
             ))
-        }))
-        .build()
-        .map_err(PoolError::client_build_failed)?;
+        }));
 
-    let session = tokio::time::timeout(timeout, client.connect())
+    let session = tokio::time::timeout(timeout, config.connect())
         .await
         .map_err(|_| PoolError::new("session connect timeout"))?
         .map_err(PoolError::session_connect_failed)?;

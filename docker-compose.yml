@@ -4,7 +4,6 @@ services:
       context: .
       dockerfile: Dockerfile
     image: smelly-connect-cli:latest
-    container_name: smelly-connect
     restart: unless-stopped
     volumes:
       - ./config.toml:/etc/smelly-connect/config.toml:ro

@@ -1,48 +1,20 @@
 use crate::cli::ProxyCommand;
+use crate::config::AppConfig;
 use crate::error::CliError;
-use std::future::{Future, pending};
-use std::path::Path;
+use std::future::Future;
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
 
-pub async fn run_proxy(
-    config_path: impl AsRef<Path>,
-    command: &ProxyCommand,
-) -> Result<(), String> {
-    run_proxy_with_shutdown(config_path, command, pending::<()>())
-        .await
-        .map_err(|err| err.to_string())
-}
-
-pub async fn run_proxy_typed(
-    config_path: impl AsRef<Path>,
-    command: &ProxyCommand,
-) -> Result<(), CliError> {
-    run_proxy_typed_with_shutdown(config_path, command, pending::<()>()).await
-}
-
-pub async fn run_proxy_with_shutdown<F>(
-    config_path: impl AsRef<Path>,
-    command: &ProxyCommand,
-    shutdown: F,
-) -> Result<(), String>
-where
-    F: Future<Output = ()> + Send,
-{
-    run_proxy_typed_with_shutdown(config_path, command, shutdown)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-pub async fn run_proxy_typed_with_shutdown<F>(
-    config_path: impl AsRef<Path>,
+pub async fn run_proxy<F>(
+    config: &AppConfig,
     command: &ProxyCommand,
     shutdown: F,
 ) -> Result<(), CliError>
 where
     F: Future<Output = ()> + Send,
 {
-    let config = crate::config::merge_proxy_command_typed(config_path, command)?;
+    let mut config = config.clone();
+    crate::config::apply_proxy_overrides(&mut config, command);
     let pool = crate::pool::SessionPool::from_config_allow_empty(&config)
         .await
         .map_err(|err| CliError::Command(err.to_string()))?;

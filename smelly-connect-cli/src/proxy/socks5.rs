@@ -26,25 +26,6 @@ fn reply_success_addr() -> std::net::SocketAddr {
     std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0))
 }
 
-pub async fn serve_socks5(
-    listen: String,
-    pool: SessionPool,
-    stats: RuntimeStats,
-    connect_timeout: Duration,
-    udp_associate_idle_timeout: Option<Duration>,
-) -> Result<(), String> {
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    serve_socks5_with_shutdown(
-        listen,
-        pool,
-        stats,
-        connect_timeout,
-        udp_associate_idle_timeout,
-        shutdown_rx,
-    )
-    .await
-}
-
 pub async fn serve_socks5_with_shutdown(
     listen: String,
     pool: SessionPool,

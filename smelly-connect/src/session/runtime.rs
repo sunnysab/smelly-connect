@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::error::{Error, IntegrationError};
@@ -10,18 +9,18 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 const DEFAULT_CONNECT_GATE_PERMITS: usize = 16;
 
 pub(crate) struct SessionRuntime {
-    legacy_tunnel: Mutex<Option<smelly_tls::TunnelConnection>>,
-    keepalive: Mutex<Option<KeepaliveHandle>>,
-    connect_gate: std::sync::Arc<Semaphore>,
+    _request_ip_tunnel: Option<smelly_tls::TunnelConnection>,
+    _keepalive: Option<KeepaliveHandle>,
+    connect_gate: Arc<Semaphore>,
     reqwest_proxy: AsyncMutex<Weak<SessionReqwestProxy>>,
 }
 
 impl Default for SessionRuntime {
     fn default() -> Self {
         Self {
-            legacy_tunnel: Mutex::new(None),
-            keepalive: Mutex::new(None),
-            connect_gate: std::sync::Arc::new(Semaphore::new(DEFAULT_CONNECT_GATE_PERMITS)),
+            _request_ip_tunnel: None,
+            _keepalive: None,
+            connect_gate: Arc::new(Semaphore::new(DEFAULT_CONNECT_GATE_PERMITS)),
             reqwest_proxy: AsyncMutex::new(Weak::new()),
         }
     }
@@ -29,22 +28,15 @@ impl Default for SessionRuntime {
 
 impl SessionRuntime {
     pub(crate) fn new(
-        legacy_tunnel: Option<smelly_tls::TunnelConnection>,
+        request_ip_tunnel: Option<smelly_tls::TunnelConnection>,
         keepalive: Option<KeepaliveHandle>,
     ) -> Self {
         Self {
-            legacy_tunnel: Mutex::new(legacy_tunnel),
-            keepalive: Mutex::new(keepalive),
-            connect_gate: std::sync::Arc::new(Semaphore::new(DEFAULT_CONNECT_GATE_PERMITS)),
+            _request_ip_tunnel: request_ip_tunnel,
+            _keepalive: keepalive,
+            connect_gate: Arc::new(Semaphore::new(DEFAULT_CONNECT_GATE_PERMITS)),
             reqwest_proxy: AsyncMutex::new(Weak::new()),
         }
-    }
-
-    pub(crate) fn take_legacy_tunnel(&self) -> Option<smelly_tls::TunnelConnection> {
-        self.legacy_tunnel
-            .lock()
-            .expect("legacy tunnel mutex poisoned")
-            .take()
     }
 
     pub(crate) async fn acquire_connect_permit(&self) -> OwnedSemaphorePermit {
@@ -74,19 +66,7 @@ impl SessionRuntime {
     }
 }
 
-impl Drop for SessionRuntime {
-    fn drop(&mut self) {
-        if let Ok(legacy_tunnel) = self.legacy_tunnel.get_mut() {
-            let _ = legacy_tunnel.take();
-        }
-        if let Ok(keepalive) = self.keepalive.get_mut() {
-            let _ = keepalive.take();
-        }
-    }
-}
-
 pub(crate) struct SessionReqwestProxy {
-    local_addr: SocketAddr,
     proxy_url: reqwest::Url,
     handle: Mutex<Option<ProxyHandle>>,
 }
@@ -99,36 +79,13 @@ impl SessionReqwestProxy {
         })?;
 
         Ok(Self {
-            local_addr,
             proxy_url,
             handle: Mutex::new(Some(handle)),
         })
     }
 
-    pub(crate) fn local_addr(&self) -> SocketAddr {
-        self.local_addr
-    }
-
     pub(crate) fn proxy_url(&self) -> &reqwest::Url {
         &self.proxy_url
-    }
-
-    /// Shut down the proxy handle in the current async context.
-    /// Idempotent — the second call is a no-op.
-    ///
-    /// This is the preferred shutdown path when called from an async context
-    /// (e.g. explicit session teardown).  It is intentionally separate from
-    /// `Drop`, which must handle the sync/non-async fallback.
-    #[allow(dead_code)]
-    pub(crate) async fn shutdown(&self) {
-        let handle = self
-            .handle
-            .lock()
-            .expect("reqwest proxy mutex poisoned")
-            .take();
-        if let Some(handle) = handle {
-            let _ = handle.shutdown().await;
-        }
     }
 }
 

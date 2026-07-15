@@ -3,17 +3,7 @@ name = "smelly-tls"
 version = "0.6.0"
 edition = "2024"
 
-[lib]
-name = "smelly_tls"
-path = "src/lib.rs"
-
-[[example]]
-name = "probe"
-path = "examples/probe.rs"
-required-features = ["tokio"]
-
 [dependencies]
-der = { version = "0.8", features = ["alloc"] }
 hmac = "0.13"
 hex = "0.4"
 md-5 = "0.11"

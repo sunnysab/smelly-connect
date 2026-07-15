@@ -111,6 +111,5 @@ pub async fn run_control_plane(config: &EasyConnectConfig) -> Result<ControlPlan
         authorized_twfid,
         legacy_cipher_hint: parsed.legacy_cipher_hint,
         resources,
-        token: None,
     })
 }

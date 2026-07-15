@@ -1,15 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::io;
+use std::net::SocketAddr;
 #[cfg(feature = "tokio")]
 use std::sync::{Mutex, OnceLock};
 
-#[cfg(feature = "tokio")]
-use der::Decode;
-#[cfg(feature = "tokio")]
-use der::Encode;
-#[cfg(feature = "tokio")]
-use der::asn1::Ia5String;
 use hmac::{Hmac, KeyInit, Mac};
 use md5::Md5;
 use rc4::{Rc4, StreamCipher};
@@ -25,6 +19,12 @@ use sha1::Sha1;
 #[cfg(feature = "tokio")]
 use x509_cert::Certificate;
 #[cfg(feature = "tokio")]
+use x509_cert::der::Decode;
+#[cfg(feature = "tokio")]
+use x509_cert::der::Encode;
+#[cfg(feature = "tokio")]
+use x509_cert::der::asn1::Ia5String;
+#[cfg(feature = "tokio")]
 use x509_cert::ext::pkix::AuthorityInfoAccessSyntax;
 #[cfg(feature = "tokio")]
 use x509_cert::ext::pkix::name::GeneralName;
@@ -37,7 +37,6 @@ pub const HEARTBEAT_EXTENSION: u16 = 0x000f;
 pub const EASYCONNECT_CLIENT_RANDOM: [u8; 32] = [0x41; 32];
 pub const EASYCONNECT_SESSION_ID: [u8; 32] =
     *b"L3IP\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
-pub type Tls10KeyBlockParts = ([u8; 20], [u8; 20], [u8; 16], [u8; 16]);
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ServerCertPolicy {
@@ -101,11 +100,6 @@ pub fn easyconnect_client_hello(cipher_suite: u16) -> ClientHelloConfig {
     ClientHelloConfig::new(EASYCONNECT_CLIENT_RANDOM, EASYCONNECT_SESSION_ID)
         .with_cipher_suite(cipher_suite)
         .with_compression_methods(vec![1, 0])
-}
-
-#[cfg(feature = "tokio")]
-fn default_server_name_for_addr(addr: SocketAddr) -> String {
-    addr.ip().to_string()
 }
 
 #[cfg(feature = "tokio")]
@@ -427,12 +421,6 @@ pub fn build_client_hello_record(config: &ClientHelloConfig) -> Vec<u8> {
     record
 }
 
-pub fn connect_probe(addr: SocketAddr, config: &ClientHelloConfig) -> io::Result<()> {
-    let mut stream = TcpStream::connect(addr)?;
-    let record = build_client_hello_record(config);
-    stream.write_all(&record)
-}
-
 #[cfg(feature = "tokio")]
 pub async fn connect_hello_probe(addr: SocketAddr, config: &ClientHelloConfig) -> io::Result<()> {
     let mut stream = tokio::net::TcpStream::connect(addr).await?;
@@ -473,34 +461,12 @@ pub struct ServerFlight {
 }
 
 #[cfg(feature = "tokio")]
-pub struct MinimalHandshakeResult {
-    pub server_hello: ParsedServerHello,
-    pub master_secret: [u8; 48],
-}
-
-#[cfg(feature = "tokio")]
 pub struct TunnelConnection {
     stream: tokio::net::TcpStream,
     encryptor: Rc4Sha1Encryptor,
     decryptor: Rc4Sha1Decryptor,
     pub server_hello: ParsedServerHello,
     pub master_secret: [u8; 48],
-}
-
-#[cfg(feature = "tokio")]
-pub async fn connect_and_read_server_hello(
-    addr: SocketAddr,
-    config: &ClientHelloConfig,
-    twfid: &str,
-) -> io::Result<ServerHelloResult> {
-    connect_and_read_server_hello_for_server(
-        addr,
-        config,
-        &default_server_name_for_addr(addr),
-        twfid,
-        &ServerCertPolicy::Verify,
-    )
-    .await
 }
 
 #[cfg(feature = "tokio")]
@@ -527,17 +493,6 @@ pub async fn connect_and_read_server_hello_for_server(
         server_session_id,
         derived_token,
     })
-}
-
-#[cfg(feature = "tokio")]
-pub async fn bootstrap_easyconnect_token(addr: SocketAddr, twfid: &str) -> io::Result<[u8; 48]> {
-    bootstrap_easyconnect_token_for_server(
-        addr,
-        &default_server_name_for_addr(addr),
-        twfid,
-        &ServerCertPolicy::Verify,
-    )
-    .await
 }
 
 #[cfg(feature = "tokio")]
@@ -578,32 +533,6 @@ pub async fn connect_and_read_server_flight(
 
     let (_, flight) = read_server_flight(&mut stream).await?;
     Ok(flight)
-}
-
-#[cfg(feature = "tokio")]
-pub async fn complete_minimal_handshake(
-    addr: SocketAddr,
-    config: &ClientHelloConfig,
-) -> io::Result<MinimalHandshakeResult> {
-    let conn = connect_tunnel(addr, config).await?;
-    Ok(MinimalHandshakeResult {
-        server_hello: conn.server_hello.clone(),
-        master_secret: conn.master_secret,
-    })
-}
-
-#[cfg(feature = "tokio")]
-pub async fn connect_tunnel(
-    addr: SocketAddr,
-    config: &ClientHelloConfig,
-) -> io::Result<TunnelConnection> {
-    connect_tunnel_for_server(
-        addr,
-        config,
-        &default_server_name_for_addr(addr),
-        &ServerCertPolicy::Verify,
-    )
-    .await
 }
 
 #[cfg(feature = "tokio")]
@@ -704,20 +633,6 @@ pub async fn connect_tunnel_for_server(
 }
 
 #[cfg(feature = "tokio")]
-pub async fn connect_easyconnect_tunnel(
-    addr: SocketAddr,
-    cipher_suite: u16,
-) -> io::Result<TunnelConnection> {
-    connect_easyconnect_tunnel_for_server(
-        addr,
-        &default_server_name_for_addr(addr),
-        cipher_suite,
-        &ServerCertPolicy::Verify,
-    )
-    .await
-}
-
-#[cfg(feature = "tokio")]
 pub async fn connect_easyconnect_tunnel_for_server(
     addr: SocketAddr,
     server_name: &str,
@@ -751,102 +666,6 @@ impl TunnelConnection {
         }
         self.decryptor.decrypt(23, record_payload(&record))
     }
-}
-
-#[cfg(feature = "tokio")]
-pub async fn probe_handshake_steps(addr: SocketAddr, config: &ClientHelloConfig) -> io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-    use tokio::time::{Duration, timeout};
-
-    let mut stream = tokio::net::TcpStream::connect(addr).await?;
-    let client_hello_record = build_client_hello_record(config);
-    stream.write_all(&client_hello_record).await?;
-    let (server_flight_record, server_flight) = read_server_flight(&mut stream).await?;
-    println!(
-        "step: server flight types={:?} cipher=0x{:04x} certs={}",
-        server_flight.handshake_types,
-        server_flight.server_hello.cipher_suite,
-        server_flight.certificate_chain.len()
-    );
-
-    let cert = server_flight
-        .certificate_chain
-        .first()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing server certificate"))?;
-    let public_key_der = server_public_key_der(cert)?;
-    let premaster = build_premaster_secret([0x33; 46]);
-    let client_key_exchange = build_client_key_exchange(&public_key_der, &premaster)?;
-    let client_key_exchange_record = record_with_payload(22, &client_key_exchange);
-    stream.write_all(&client_key_exchange_record).await?;
-    match timeout(Duration::from_millis(200), read_record(&mut stream)).await {
-        Ok(Ok(record)) => {
-            println!(
-                "step: reply after cke type=0x{:02x} hex={}",
-                record[0],
-                hex::encode(&record)
-            );
-            return Ok(());
-        }
-        Ok(Err(err)) => {
-            println!("step: read after cke errored: {err}");
-        }
-        Err(_) => {
-            println!("step: no immediate reply after cke");
-        }
-    }
-
-    let master_secret = derive_tls10_master_secret(
-        &premaster,
-        &config.random,
-        &server_flight.server_hello.random,
-    );
-    let key_block = derive_tls10_key_block(
-        &master_secret,
-        &config.random,
-        &server_flight.server_hello.random,
-        72,
-    );
-    let client_mac: [u8; 20] = key_block[0..20]
-        .try_into()
-        .expect("key_block too short for client_mac");
-    let client_key: [u8; 16] = key_block[40..56]
-        .try_into()
-        .expect("key_block too short for client_key");
-    let mut transcript = Vec::new();
-    transcript.extend_from_slice(handshake_payload(&client_hello_record));
-    transcript.extend_from_slice(handshake_payload(&server_flight_record));
-    transcript.extend_from_slice(&client_key_exchange);
-    let client_verify = derive_finished_verify_data(&master_secret, true, &transcript);
-    let client_finished = build_finished_handshake(client_verify);
-    let mut encryptor = Rc4Sha1Encryptor::new(client_mac, client_key);
-
-    stream.write_all(&build_change_cipher_spec_record()).await?;
-    match timeout(Duration::from_millis(200), read_record(&mut stream)).await {
-        Ok(Ok(record)) => {
-            println!(
-                "step: reply after ccs type=0x{:02x} hex={}",
-                record[0],
-                hex::encode(&record)
-            );
-            return Ok(());
-        }
-        Ok(Err(err)) => {
-            println!("step: read after ccs errored: {err}");
-        }
-        Err(_) => {
-            println!("step: no immediate reply after ccs");
-        }
-    }
-    let client_finished_record = record_with_payload(22, &encryptor.encrypt(22, &client_finished)?);
-    stream.write_all(&client_finished_record).await?;
-
-    let server_reply = read_record(&mut stream).await?;
-    println!(
-        "step: first post-finished record type=0x{:02x} hex={}",
-        server_reply[0],
-        hex::encode(&server_reply)
-    );
-    Ok(())
 }
 
 #[cfg(feature = "tokio")]
@@ -994,24 +813,6 @@ pub fn parse_client_hello(record: &[u8]) -> Option<ParsedClientHello> {
         compression_methods,
         extension_ids,
     })
-}
-
-pub fn parse_server_hello_session_id(record: &[u8]) -> Option<[u8; 32]> {
-    if record.len() < 9 || record[0] != 22 || record[5] != 2 {
-        return None;
-    }
-
-    let mut idx = 9;
-    idx += 2;
-    idx += 32;
-    let sid_len = *record.get(idx)? as usize;
-    idx += 1;
-    if sid_len != 32 {
-        return None;
-    }
-    let mut session_id = [0_u8; 32];
-    session_id.copy_from_slice(record.get(idx..idx + sid_len)?);
-    Some(session_id)
 }
 
 pub fn parse_single_handshake(record: &[u8]) -> Option<Vec<u8>> {
@@ -1244,29 +1045,6 @@ pub fn derive_tls10_key_block(
 ) -> Vec<u8> {
     let seed = [server_random.as_slice(), client_random.as_slice()].concat();
     tls10_prf(master_secret, b"key expansion", &seed, len)
-}
-
-pub fn split_key_block_for_test(key_block: &[u8]) -> io::Result<Tls10KeyBlockParts> {
-    if key_block.len() < 72 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "short tls10 key block",
-        ));
-    }
-
-    let client_mac = key_block[0..20]
-        .try_into()
-        .expect("key_block too short for client_mac");
-    let server_mac = key_block[20..40]
-        .try_into()
-        .expect("key_block too short for server_mac");
-    let client_key = key_block[40..56]
-        .try_into()
-        .expect("key_block too short for client_key");
-    let server_key = key_block[56..72]
-        .try_into()
-        .expect("key_block too short for server_key");
-    Ok((client_mac, server_mac, client_key, server_key))
 }
 
 pub fn encrypt_rc4_sha1_record(

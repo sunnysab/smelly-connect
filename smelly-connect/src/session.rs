@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +13,6 @@ use crate::resolver::SessionResolver;
 use crate::resource::{DomainRule, IpRule, ResourceSet};
 use crate::runtime::tasks::keepalive::KeepaliveHandle;
 use crate::target::TargetAddr;
-use crate::transport::device::PacketDevice;
 use crate::transport::{TransportStack, VpnStream, VpnUdpSocket};
 use crate::{RouteProtocol, domain::route_match};
 
@@ -25,7 +23,7 @@ fn elapsed_ms(started: std::time::Instant) -> u64 {
 mod inner;
 mod runtime;
 
-use inner::{LegacyDataPlaneConfig, SessionInner};
+use inner::SessionInner;
 pub(crate) use runtime::SessionReqwestProxy;
 use runtime::SessionRuntime;
 
@@ -116,33 +114,18 @@ impl EasyConnectSession {
                 local_route_overrides: LocalRouteOverrides::default(),
                 route_policy: RoutePolicy::default(),
                 allow_all_routes: false,
-                legacy_data_plane: None,
                 runtime: Arc::new(SessionRuntime::default()),
             }),
         }
     }
 
-    pub(crate) fn with_legacy_data_plane(
-        mut self,
-        server_addr: SocketAddr,
-        token: crate::protocol::DerivedToken,
-        legacy_cipher_hint: Option<String>,
-    ) -> Self {
-        Arc::make_mut(&mut self.inner).legacy_data_plane = Some(LegacyDataPlaneConfig {
-            server_addr,
-            token,
-            legacy_cipher_hint,
-        });
-        self
-    }
-
     pub(crate) fn with_runtime_resources(
         mut self,
-        legacy_tunnel: Option<smelly_tls::TunnelConnection>,
+        request_ip_tunnel: Option<smelly_tls::TunnelConnection>,
         keepalive: Option<KeepaliveHandle>,
     ) -> Self {
         Arc::make_mut(&mut self.inner).runtime =
-            Arc::new(SessionRuntime::new(legacy_tunnel, keepalive));
+            Arc::new(SessionRuntime::new(request_ip_tunnel, keepalive));
         self
     }
 
@@ -171,48 +154,6 @@ impl EasyConnectSession {
     pub fn with_allow_all_routes(mut self, allow_all_routes: bool) -> Self {
         Arc::make_mut(&mut self.inner).allow_all_routes = allow_all_routes;
         self
-    }
-
-    pub fn is_allow_all_bypass_target<T>(&self, target: T) -> bool
-    where
-        T: Into<TargetAddr>,
-    {
-        if !self.inner.allow_all_routes {
-            return false;
-        }
-
-        let target = target.into();
-        let host = target.host();
-        let port = target.port();
-        if let Ok(ip) = host.parse::<Ipv4Addr>() {
-            !self.matches_ip_resource(IpAddr::V4(ip), port, RouteProtocol::Tcp)
-        } else {
-            !(self
-                .inner
-                .resources
-                .matches_domain(host, port, RouteProtocol::Tcp)
-                || self
-                    .inner
-                    .local_route_overrides
-                    .matches_domain(host, port, RouteProtocol::Tcp))
-        }
-    }
-
-    pub fn spawn_icmp_keepalive_task(
-        &self,
-        target: IcmpKeepAliveTarget,
-        interval: Duration,
-    ) -> tokio::task::JoinHandle<()> {
-        let transport = self.inner.transport.clone();
-        let resolver = self.inner.resolver.clone();
-        tokio::spawn(async move {
-            loop {
-                if let Ok(ip) = resolve_keepalive_target(&resolver, &target).await {
-                    let _ = transport.icmp_ping(ip).await;
-                }
-                tokio::time::sleep(interval).await;
-            }
-        })
     }
 
     pub async fn resolve_icmp_target(
@@ -373,118 +314,6 @@ impl EasyConnectSession {
             .await
     }
 
-    pub async fn rebuild_transport(&self) -> Result<Self, Error> {
-        let cfg = self.inner.legacy_data_plane.as_ref().ok_or_else(|| {
-            Error::Transport(TransportError::ConnectFailed(
-                "legacy data plane unavailable".to_string(),
-            ))
-        })?;
-        let (client_ip, transport, request_ip_tunnel) = {
-            let (client_ip, request_ip_tunnel) =
-                crate::auth::control::request_ip_via_tunnel_with_conn(
-                    cfg.server_addr,
-                    &cfg.token,
-                    cfg.legacy_cipher_hint.as_deref(),
-                )
-                .await?;
-            let (device, inbound_rx) = crate::auth::control::spawn_legacy_packet_device(
-                cfg.server_addr,
-                &cfg.token,
-                client_ip,
-                cfg.legacy_cipher_hint.as_deref(),
-            )
-            .await?;
-            let transport =
-                crate::transport::netstack::build_transport_from_packet_device(device, inbound_rx, client_ip)
-                    .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
-            (client_ip, transport, Some(request_ip_tunnel))
-        };
-
-        Ok(EasyConnectSession::new(
-            client_ip,
-            self.inner.resources.clone(),
-            self.inner.resolver.clone(),
-            transport,
-        )
-        .with_local_route_overrides(self.inner.local_route_overrides.clone())
-        .with_route_policy(self.inner.route_policy)
-        .with_allow_all_routes(self.inner.allow_all_routes)
-        .with_legacy_data_plane(
-            cfg.server_addr,
-            cfg.token.clone(),
-            cfg.legacy_cipher_hint.clone(),
-        )
-        .with_runtime_resources(request_ip_tunnel, None))
-    }
-
-    pub async fn rebuild_transport_from_existing_lease(self) -> Result<Self, Error> {
-        let cfg = self.inner.legacy_data_plane.as_ref().ok_or_else(|| {
-            Error::Transport(TransportError::ConnectFailed(
-                "legacy data plane unavailable".to_string(),
-            ))
-        })?;
-        let server_addr = cfg.server_addr;
-        let token = cfg.token.clone();
-        let legacy_cipher_hint = cfg.legacy_cipher_hint.clone();
-        let client_ip = self.inner.client_ip;
-        let resources = self.inner.resources.clone();
-        let resolver = self.inner.resolver.clone();
-        let local_route_overrides = self.inner.local_route_overrides.clone();
-        let route_policy = self.inner.route_policy;
-        let allow_all_routes = self.inner.allow_all_routes;
-        let request_ip_tunnel = self.inner.runtime.take_legacy_tunnel();
-
-        drop(self);
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        let (transport, request_ip_tunnel) = if let Some(request_ip_tunnel) = request_ip_tunnel {
-            let recv = crate::auth::control::open_recv_tunnel(
-                server_addr,
-                &token,
-                client_ip,
-                legacy_cipher_hint.as_deref(),
-            )
-            .await?;
-            let send = crate::auth::control::open_send_tunnel(
-                server_addr,
-                &token,
-                client_ip,
-                legacy_cipher_hint.as_deref(),
-            )
-            .await?;
-            let (device, inbound_rx) = crate::auth::control::packet_device_from_tunnels(recv, send)?;
-            let transport =
-                crate::transport::netstack::build_transport_from_packet_device(device, inbound_rx, client_ip)
-                    .map_err(|err| Error::Transport(TransportError::from_io(err)))?;
-            (transport, Some(request_ip_tunnel))
-        } else {
-            let rebuilt = EasyConnectSession::new(
-                client_ip,
-                resources.clone(),
-                resolver.clone(),
-                crate::transport::TransportStack::new(|_| async {
-                    Err(std::io::Error::other("placeholder transport"))
-                }),
-            )
-            .with_local_route_overrides(local_route_overrides.clone())
-            .with_route_policy(route_policy)
-            .with_allow_all_routes(allow_all_routes)
-            .with_legacy_data_plane(server_addr, token.clone(), legacy_cipher_hint.clone())
-            .rebuild_transport()
-            .await?;
-            return Ok(rebuilt);
-        };
-
-        Ok(
-            EasyConnectSession::new(client_ip, resources, resolver, transport)
-                .with_local_route_overrides(local_route_overrides)
-                .with_route_policy(route_policy)
-                .with_allow_all_routes(allow_all_routes)
-                .with_legacy_data_plane(server_addr, token, legacy_cipher_hint)
-                .with_runtime_resources(request_ip_tunnel, None),
-        )
-    }
-
     pub fn start_icmp_keepalive<T>(&self, target: T, interval: Duration) -> KeepaliveHandle
     where
         T: Into<IcmpKeepAliveTarget>,
@@ -532,23 +361,6 @@ impl EasyConnectSession {
 
     pub async fn reqwest_client(&self) -> Result<reqwest::Client, Error> {
         crate::integration::reqwest::build_client(self).await
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn spawn_packet_device(&self) -> Result<PacketDevice, Error> {
-        let cfg = self.inner.legacy_data_plane.as_ref().ok_or_else(|| {
-            Error::Transport(TransportError::ConnectFailed(
-                "legacy data plane unavailable".to_string(),
-            ))
-        })?;
-        let (device, _inbound_rx) = crate::auth::control::spawn_legacy_packet_device(
-            cfg.server_addr,
-            &cfg.token,
-            self.inner.client_ip,
-            cfg.legacy_cipher_hint.as_deref(),
-        )
-        .await?;
-        Ok(device)
     }
 
     pub async fn plan_tcp_connect<T>(&self, target: T) -> Result<RoutePlan, Error>
@@ -659,7 +471,8 @@ impl EasyConnectSession {
         port: u16,
         protocol: RouteProtocol,
     ) -> Result<SocketAddr, Error> {
-        if !self.inner.allow_all_routes && !self.matches_ip_resource(IpAddr::V4(ip), port, protocol) {
+        if !self.inner.allow_all_routes && !self.matches_ip_resource(IpAddr::V4(ip), port, protocol)
+        {
             return Err(Error::RouteDecision(RouteDecisionError::TargetNotAllowed));
         }
 
@@ -686,11 +499,10 @@ impl EasyConnectSession {
     /// Returns true if the given IP matches any known IP-based resource rule.
     fn matches_ip_resource(&self, ip: IpAddr, port: u16, protocol: RouteProtocol) -> bool {
         self.inner.resources.matches_ip(ip, port, protocol)
-            || self.inner.local_route_overrides.matches_ip(ip, port, protocol)
-    }
-
-    pub fn failing_transport(message: &'static str) -> TransportStack {
-        TransportStack::new(move |_| async move { Err(io::Error::other(message)) })
+            || self
+                .inner
+                .local_route_overrides
+                .matches_ip(ip, port, protocol)
     }
 }
 

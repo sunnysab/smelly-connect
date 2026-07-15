@@ -195,16 +195,6 @@ impl ChunkedResponseDecoder {
     }
 }
 
-pub async fn serve_http(
-    listen: String,
-    pool: SessionPool,
-    stats: RuntimeStats,
-    connect_timeout: Duration,
-) -> Result<(), String> {
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    serve_http_with_shutdown(listen, pool, stats, connect_timeout, shutdown_rx).await
-}
-
 pub async fn serve_http_with_shutdown(
     listen: String,
     pool: SessionPool,
@@ -399,12 +389,9 @@ async fn handle_live_request(
         };
         let route_plan = match plan_live_upstream_connect(&session, &host, port).await {
             Ok(route_plan) => route_plan,
-            Err((err, route_backend)) => {
+            Err((err, _route_backend)) => {
                 if !matches!(err, UpstreamConnectError::RouteRejected) {
                     stats.record_connect_failure();
-                }
-                if matches!(route_backend, LiveRouteBackend::Vpn) {
-                    handle_live_session_failure(&pool, &account_name, &session, &err).await;
                 }
                 return gateway_error_response(&err);
             }
@@ -440,13 +427,10 @@ async fn handle_live_request(
                 log_upstream_connect_success(request_id, "connect", &target, connect_started);
                 (upstream, route_backend)
             }
-            Err((err, route_backend)) => {
+            Err((err, _route_backend)) => {
                 log_upstream_connect_failure(request_id, "connect", &target, connect_started, &err);
                 if !matches!(err, UpstreamConnectError::RouteRejected) {
                     stats.record_connect_failure();
-                }
-                if matches!(route_backend, LiveRouteBackend::Vpn) {
-                    handle_live_session_failure(&pool, &account_name, &session, &err).await;
                 }
                 return gateway_error_response(&err);
             }
@@ -514,12 +498,9 @@ async fn handle_live_request(
         None => {
             let route_plan = match plan_live_upstream_connect(&session, &host, port).await {
                 Ok(route_plan) => route_plan,
-                Err((err, route_backend)) => {
+                Err((err, _route_backend)) => {
                     if !matches!(err, UpstreamConnectError::RouteRejected) {
                         stats.record_connect_failure();
-                    }
-                    if matches!(route_backend, LiveRouteBackend::Vpn) {
-                        handle_live_session_failure(&pool, &account_name, &session, &err).await;
                     }
                     return gateway_error_response(&err);
                 }
@@ -576,12 +557,9 @@ async fn handle_live_request(
     };
     let (upstream, cache_metadata, reused_cached_upstream) = match upstream {
         Ok(upstream) => upstream,
-        Err((err, route_backend)) => {
+        Err((err, _route_backend)) => {
             if !matches!(err, UpstreamConnectError::RouteRejected) {
                 stats.record_connect_failure();
-            }
-            if matches!(route_backend, LiveRouteBackend::Vpn) {
-                handle_live_session_failure(&pool, &account_name, &session, &err).await;
             }
             return gateway_error_response(&err);
         }
@@ -648,14 +626,6 @@ fn connect_established_response() -> Response<ProxyBody> {
 
 fn gateway_error_response(err: &UpstreamConnectError) -> Response<ProxyBody> {
     empty_response(gateway_error_status(err))
-}
-
-async fn handle_live_session_failure(
-    _pool: &SessionPool,
-    _account_name: &str,
-    _session: &smelly_connect::Session,
-    _err: &UpstreamConnectError,
-) {
 }
 
 async fn handle_cached_live_upstream_failure(
@@ -1526,4 +1496,3 @@ fn split_host_port(target: &str, default_port: u16) -> Result<(&str, u16), Strin
         Ok((target, default_port))
     }
 }
-

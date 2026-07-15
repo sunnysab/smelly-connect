@@ -2,11 +2,7 @@
 #[allow(dead_code)]
 mod legacy_tls;
 
-use std::io::Read;
-use std::net::TcpListener;
-use std::thread;
-
-use smelly_tls::{ClientHelloConfig, build_client_hello_record, connect_probe};
+use smelly_tls::{ClientHelloConfig, build_client_hello_record};
 
 const EXPECTED_SESSION_ID: [u8; 32] = smelly_tls::EASYCONNECT_SESSION_ID;
 
@@ -57,30 +53,6 @@ fn client_hello_record_allows_custom_compression_advertisement() {
     let parsed = parse_client_hello(&record).unwrap();
 
     assert_eq!(parsed.compression_methods, vec![1, 0]);
-}
-
-#[test]
-fn connect_probe_writes_hello_bytes_to_tcp_stream() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut header = [0_u8; 5];
-        stream.read_exact(&mut header).unwrap();
-        let len = u16::from_be_bytes([header[3], header[4]]) as usize;
-        let mut body = vec![0_u8; len];
-        stream.read_exact(&mut body).unwrap();
-        [header.to_vec(), body].concat()
-    });
-
-    let config = ClientHelloConfig::new([0x22; 32], EXPECTED_SESSION_ID);
-    connect_probe(addr, &config).unwrap();
-
-    let raw = server.join().unwrap();
-    let parsed = parse_client_hello(&raw).unwrap();
-    assert_eq!(parsed.session_id, EXPECTED_SESSION_ID);
-    assert_eq!(parsed.cipher_suites, vec![0x0005, 0x00ff]);
 }
 
 #[cfg(feature = "tokio")]

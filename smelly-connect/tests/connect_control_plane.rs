@@ -725,7 +725,11 @@ async fn spawn_legacy_packet_device_bridges_packets_between_stack_and_tunnels() 
 
     let inbound = inbound_rx.recv().await.unwrap();
     assert_eq!(inbound, vec![0xde, 0xad, 0xbe, 0xef]);
-    device.outbound_sender().send(vec![0xca, 0xfe]).await.unwrap();
+    device
+        .outbound_sender()
+        .send(vec![0xca, 0xfe])
+        .await
+        .unwrap();
     server.await.unwrap();
 
     async fn read_record(stream: &mut tokio::net::TcpStream) -> Vec<u8> {

@@ -90,10 +90,8 @@ curl -x http://127.0.0.1:8080 https://jwxt.sit.edu.cn -I
 | `connect_timeout_secs` | u64 | `20` | 回退超时（被下面两个细粒度超时覆盖） |
 | `session_connect_timeout_secs` | u64 | `connect_timeout_secs` | 单会话建联超时 |
 | `healthcheck_interval_secs` | u64 | `60` | 健康检查间隔 |
-| `failure_threshold` | u32 | `3` | 连续失败阈值，到达后节点摘除 |
 | `backoff_base_secs` | u64 | `30` | 摘除后首次恢复等待 |
 | `backoff_max_secs` | u64 | `600` | 摘除后最大恢复等待 |
-| `allow_request_triggered_probe` | bool | `true` | 无可用节点时，允许首个请求提前触发一次恢复探测 |
 
 ### `[[accounts]]` （数组）
 
@@ -243,7 +241,6 @@ Configured → Connecting → Ready ⇄ Suspect
 - **Open** — 摘除状态，等待指数退避结束
 - **HalfOpen** — 退避结束，允许一次探测恢复
 - **Disabled** — 永久认证失败（如密码错误），永不自动恢复
-- 当所有节点不可用时，`allow_request_triggered_probe = true` 允许首个到达的请求触发一次提前恢复探测（具备竞态保护，不会并发触发多个）
 - HTTP 空 upstream 返回 `503 Service Unavailable`；SOCKS5 返回 `0x03 Network Unreachable`
 - 听众 fd 耗尽（`EMFILE`/`ENFILE`）时，代理自动退避重试 `accept()`，不会崩溃
 
@@ -296,7 +293,7 @@ ICMP keepalive 走 smoltcp 用户态栈 + EasyConnect 隧道，不依赖宿主�
 
 ## 代码导航
 
-- `smelly-connect/src/facade/` — 公开 API：`EasyConnectClient`、`EasyConnectClientBuilder`
+- `smelly-connect/src/config.rs` — 连接配置与会话启动
 - `smelly-connect/src/session.rs` — `Session`：`connect_tcp()`、`bind_udp()`、`icmp_ping()`、`reqwest_client()`
 - `smelly-connect/src/kernel/` — EasyConnect 协议内核：控制面解析、隧道报文构造
 - `smelly-connect/src/transport/netstack.rs` — 基于 smoltcp 的用户态 TCP/IP 栈（actor 模型）
@@ -332,14 +329,14 @@ cargo run -p smelly-connect --example fetch_jwxt
 ## 库用法
 
 ```rust
-use smelly_connect::{EasyConnectClientBuilder, TargetAddr};
+use smelly_connect::{CaptchaHandler, EasyConnectConfig, TargetAddr};
 
-let client = EasyConnectClientBuilder::new("vpn1.sit.edu.cn")
-    .credentials("user", "pass")
-    .with_captcha_handler(|_captcha| async { Ok("code".into()) })
-    .build()?;
+let config = EasyConnectConfig::new("vpn1.sit.edu.cn", "user", "pass")
+    .with_captcha_handler(CaptchaHandler::from_async(|_image, _mime| async {
+        Ok("code".into())
+    }));
 
-let session = client.connect().await?;
+let session = config.connect().await?;
 
 // TCP 连接
 let stream = session.connect_tcp(("jwxt.sit.edu.cn", 443)).await?;

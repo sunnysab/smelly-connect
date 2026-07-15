@@ -40,8 +40,6 @@ pub struct ProxyHandle {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
-pub type HttpProxyHandle = ProxyHandle;
-
 impl ProxyHandle {
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr

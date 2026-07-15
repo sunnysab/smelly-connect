@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use smelly_tls::ServerCertPolicy;
@@ -8,10 +7,6 @@ use crate::error::Error;
 use crate::resolver::SessionResolver;
 use crate::runtime::control_plane::{ControlPlaneState, run_control_plane};
 use crate::session::{EasyConnectSession, IcmpKeepAliveTarget};
-
-type SessionFactory = dyn Fn() -> Result<EasyConnectSession, Error> + Send + Sync + 'static;
-type SessionBootstrap =
-    dyn Fn(ControlPlaneState) -> Result<EasyConnectSession, Error> + Send + Sync + 'static;
 
 #[derive(Clone)]
 struct IcmpKeepAliveConfig {
@@ -26,8 +21,6 @@ pub struct EasyConnectConfig {
     pub password: String,
     pub(crate) base_url: Option<String>,
     pub(crate) captcha_handler: Option<CaptchaHandler>,
-    pub(crate) session_factory: Option<Arc<SessionFactory>>,
-    pub(crate) session_bootstrap: Option<Arc<SessionBootstrap>>,
     pub(crate) server_cert_policy: ServerCertPolicy,
     icmp_keepalive: Option<IcmpKeepAliveConfig>,
 }
@@ -44,8 +37,6 @@ impl EasyConnectConfig {
             password: password.into(),
             base_url: None,
             captcha_handler: None,
-            session_factory: None,
-            session_bootstrap: None,
             server_cert_policy: ServerCertPolicy::Verify,
             icmp_keepalive: None,
         }
@@ -75,14 +66,6 @@ impl EasyConnectConfig {
         self
     }
 
-    pub fn with_session_bootstrap<F>(mut self, bootstrap: F) -> Self
-    where
-        F: Fn(ControlPlaneState) -> Result<EasyConnectSession, Error> + Send + Sync + 'static,
-    {
-        self.session_bootstrap = Some(Arc::new(bootstrap));
-        self
-    }
-
     pub fn with_icmp_keepalive(mut self, target: impl Into<String>) -> Self {
         let target = target.into();
         let target = match target.parse() {
@@ -104,15 +87,8 @@ impl EasyConnectConfig {
     }
 
     pub async fn connect(self) -> Result<EasyConnectSession, Error> {
-        if let Some(factory) = self.session_factory {
-            return factory();
-        }
-
         let state = run_control_plane(&self).await?;
-        match self.session_bootstrap {
-            Some(bootstrap) => bootstrap(state),
-            None => self.default_bootstrap(state).await,
-        }
+        self.default_bootstrap(state).await
     }
 
     pub(crate) fn control_base_url(&self) -> String {
@@ -152,24 +128,26 @@ impl EasyConnectConfig {
         // this connection to remain open for the data tunnels to work.
         // (zju-connect: "Request IP conn CAN NOT be closed, otherwise tx/rx
         // handshake will fail")
-        let (device, inbound_rx) = crate::auth::control::spawn_legacy_packet_device_for_server_with_policy(
-            &self.server,
-            server_addr,
-            &token,
-            client_ip,
-            state.legacy_cipher_hint.as_deref(),
-            self.server_cert_policy.clone(),
-        )
-        .await?;
+        let (device, inbound_rx) =
+            crate::auth::control::spawn_legacy_packet_device_for_server_with_policy(
+                &self.server,
+                server_addr,
+                &token,
+                client_ip,
+                state.legacy_cipher_hint.as_deref(),
+                self.server_cert_policy.clone(),
+            )
+            .await?;
 
         let mut system_dns = std::collections::HashMap::new();
         for (host, resolved) in &state.resources.static_dns {
             system_dns.insert(host.clone(), *resolved);
         }
 
-        let transport =
-            crate::transport::netstack::build_transport_from_packet_device(device, inbound_rx, client_ip)
-                .map_err(|err| Error::Transport(crate::error::TransportError::from_io(err)))?;
+        let transport = crate::transport::netstack::build_transport_from_packet_device(
+            device, inbound_rx, client_ip,
+        )
+        .map_err(|err| Error::Transport(crate::error::TransportError::from_io(err)))?;
         let session = EasyConnectSession::new(
             client_ip,
             state.resources,

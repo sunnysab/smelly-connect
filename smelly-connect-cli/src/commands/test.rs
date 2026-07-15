@@ -1,47 +1,10 @@
-use std::path::Path;
 use std::time::Duration;
 
+use crate::config::AppConfig;
 use crate::error::CliError;
 
-pub async fn run_tcp(target: &str) -> Result<(), String> {
-    let output = run_tcp_with_config("config.toml", target).await?;
-    println!("{output}");
-    Ok(())
-}
-
-pub async fn run_icmp(target: &str) -> Result<(), String> {
-    let output = run_icmp_with_config("config.toml", target).await?;
-    println!("{output}");
-    Ok(())
-}
-
-pub async fn run_http(url: &str) -> Result<(), String> {
-    let output = run_http_with_config("config.toml", url).await?;
-    println!("{output}");
-    Ok(())
-}
-
-pub async fn run_legacy_probe() -> Result<(), String> {
-    let output = run_legacy_probe_with_config("config.toml").await?;
-    println!("{output}");
-    Ok(())
-}
-
-pub async fn run_tcp_with_config(
-    config_path: impl AsRef<Path>,
-    target: &str,
-) -> Result<String, String> {
-    run_tcp_with_config_typed(config_path, target)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-pub async fn run_tcp_with_config_typed(
-    config_path: impl AsRef<Path>,
-    target: &str,
-) -> Result<String, CliError> {
-    let config = crate::config::load_typed(config_path)?;
-    let pool = crate::pool::SessionPool::from_config(&config)
+pub async fn run_tcp(config: &AppConfig, target: &str) -> Result<String, CliError> {
+    let pool = crate::pool::SessionPool::from_config(config)
         .await
         .map_err(|err| CliError::Command(err.to_string()))?;
     let pooled = pool
@@ -60,21 +23,8 @@ pub async fn run_tcp_with_config_typed(
     Ok(format!("tcp ok: {host}:{port}"))
 }
 
-pub async fn run_icmp_with_config(
-    config_path: impl AsRef<Path>,
-    target: &str,
-) -> Result<String, String> {
-    run_icmp_with_config_typed(config_path, target)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-pub async fn run_icmp_with_config_typed(
-    config_path: impl AsRef<Path>,
-    target: &str,
-) -> Result<String, CliError> {
-    let config = crate::config::load_typed(config_path)?;
-    let pool = crate::pool::SessionPool::from_config(&config)
+pub async fn run_icmp(config: &AppConfig, target: &str) -> Result<String, CliError> {
+    let pool = crate::pool::SessionPool::from_config(config)
         .await
         .map_err(|err| CliError::Command(err.to_string()))?;
     let pooled = pool
@@ -92,27 +42,8 @@ pub async fn run_icmp_with_config_typed(
     Ok(format!("icmp ok: {target}"))
 }
 
-pub async fn run_http_with_config(
-    config_path: impl AsRef<Path>,
-    url: &str,
-) -> Result<String, String> {
-    run_http_with_config_typed(config_path, url)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-pub async fn run_legacy_probe_with_config(config_path: impl AsRef<Path>) -> Result<String, String> {
-    run_legacy_probe_with_config_typed(config_path)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-pub async fn run_http_with_config_typed(
-    config_path: impl AsRef<Path>,
-    url: &str,
-) -> Result<String, CliError> {
-    let config = crate::config::load_typed(config_path)?;
-    let pool = crate::pool::SessionPool::from_config(&config)
+pub async fn run_http(config: &AppConfig, url: &str) -> Result<String, CliError> {
+    let pool = crate::pool::SessionPool::from_config(config)
         .await
         .map_err(|err| CliError::Command(err.to_string()))?;
     let pooled = pool
@@ -144,10 +75,7 @@ pub async fn run_http_with_config_typed(
     ))
 }
 
-pub async fn run_legacy_probe_with_config_typed(
-    config_path: impl AsRef<Path>,
-) -> Result<String, CliError> {
-    let config = crate::config::load_typed(config_path)?;
+pub async fn run_legacy_probe(config: &AppConfig) -> Result<String, CliError> {
     let server_cert_policy = config.server_cert_policy()?;
     let account = config
         .accounts

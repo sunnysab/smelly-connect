@@ -88,21 +88,6 @@ pub async fn request_ip_via_tunnel_with_conn_debug(
     .await
 }
 
-pub(crate) async fn request_ip_via_tunnel_with_conn(
-    addr: SocketAddr,
-    token: &crate::protocol::DerivedToken,
-    legacy_cipher_hint: Option<&str>,
-) -> Result<(Ipv4Addr, TunnelConnection), Error> {
-    request_ip_via_tunnel_with_conn_for_identity(
-        addr,
-        &addr.ip().to_string(),
-        token,
-        legacy_cipher_hint,
-        &ServerCertPolicy::Verify,
-    )
-    .await
-}
-
 pub(crate) async fn request_ip_via_tunnel_with_conn_for_server(
     server: &str,
     addr: SocketAddr,

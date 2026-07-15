@@ -77,5 +77,3 @@ fn level_filter(level: &LoggingLevel) -> LevelFilter {
         LoggingLevel::Debug => LevelFilter::DEBUG,
     }
 }
-
-

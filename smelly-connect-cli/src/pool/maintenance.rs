@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::watch;
@@ -7,7 +6,6 @@ use tokio::task::JoinHandle;
 pub(super) struct PoolMaintenance {
     shutdown_tx: watch::Sender<bool>,
     task: StdMutex<Option<JoinHandle<()>>>,
-    pub(super) running: Arc<AtomicBool>,
 }
 
 impl PoolMaintenance {
@@ -16,7 +14,6 @@ impl PoolMaintenance {
         Arc::new(Self {
             shutdown_tx,
             task: StdMutex::new(None),
-            running: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -52,7 +49,6 @@ impl PoolMaintenance {
         if let Some(task) = task {
             let _ = task.await;
         }
-        self.running.store(false, Ordering::Release);
     }
 
     pub(super) fn abort(&self) {
@@ -67,6 +63,5 @@ impl PoolMaintenance {
         if let Some(task) = task {
             task.abort();
         }
-        self.running.store(false, Ordering::Release);
     }
 }

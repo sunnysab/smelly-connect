@@ -127,7 +127,6 @@ pub enum ControlPlaneError {
     AuthFlowFailed(String),
     PermanentAuthFailure(AuthError),
     CaptchaRequired,
-    NotImplemented,
     ResourceParseFailed(String),
 }
 
@@ -137,7 +136,6 @@ impl Display for ControlPlaneError {
             Self::AuthFlowFailed(msg) => write!(f, "auth flow failed: {msg}"),
             Self::PermanentAuthFailure(e) => write!(f, "permanent auth failure: {e}"),
             Self::CaptchaRequired => f.write_str("captcha required"),
-            Self::NotImplemented => f.write_str("not implemented"),
             Self::ResourceParseFailed(msg) => write!(f, "resource parse failed: {msg}"),
         }
     }

@@ -1,9 +1,7 @@
-pub type LoginAuthResponse = crate::kernel::control::LoginAuthChallenge;
-pub type ParseLoginAuthError = crate::kernel::control::ControlParseError;
-
-pub fn parse_login_auth(body: &str) -> Result<LoginAuthResponse, ParseLoginAuthError> {
-    crate::kernel::control::parse_login_auth_challenge(body)
-}
+pub use crate::kernel::control::{
+    ControlParseError as ParseLoginAuthError, LoginAuthChallenge as LoginAuthResponse,
+    parse_login_auth_challenge as parse_login_auth,
+};
 
 pub fn encrypt_password(
     password: &str,
