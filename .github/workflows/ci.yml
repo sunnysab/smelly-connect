@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: cargo test
-        run: cargo test --workspace --features test-utils
+        run: cargo test --workspace
 
   fmt:
     runs-on: ubuntu-latest
