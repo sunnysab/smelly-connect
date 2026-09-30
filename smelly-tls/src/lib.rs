@@ -785,8 +785,10 @@ pub fn parse_client_hello(record: &[u8]) -> Option<ParsedClientHello> {
     idx += 2;
     let cipher_suites = record
         .get(idx..idx + cipher_len)?
-        .chunks_exact(2)
-        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| u16::from_be_bytes(*chunk))
         .collect::<Vec<_>>();
     idx += cipher_len;
 
