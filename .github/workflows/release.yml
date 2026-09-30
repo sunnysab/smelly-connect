@@ -1,0 +1,88 @@
+name: Release
+
+# Build the CLI for every supported platform and attach the archives to the
+# GitHub Release that triggered the run.
+on:
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: smelly-connect-cli
+  RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build CLI
+        run: >-
+          cargo build --release --locked
+          --target ${{ matrix.target }}
+          -p smelly-connect-cli
+          --features management-api
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg="${BIN_NAME}-${RELEASE_TAG}-${{ matrix.target }}"
+          mkdir -p dist "$pkg"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" README.md config.toml.example "$pkg/"
+          tar -czf "dist/${pkg}.tar.gz" "$pkg"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $pkg = "${env:BIN_NAME}-${env:RELEASE_TAG}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path dist, $pkg -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${env:BIN_NAME}.exe" README.md config.toml.example $pkg
+          Compress-Archive -Path $pkg -DestinationPath "dist/$pkg.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN_NAME }}-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  upload:
+    name: Attach assets to release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber
