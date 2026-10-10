@@ -34,14 +34,12 @@ fn main() {
     let result = rt.block_on(async move {
         match cli.command {
             smelly_connect_cli::cli::Command::Proxy(command) => {
-                let result =
-                    smelly_connect_cli::commands::proxy::run_proxy(&config, &command, async {
-                        tokio::signal::ctrl_c()
-                            .await
-                            .expect("install ctrl-c handler");
-                        tracing::info!("received SIGINT, shutting down gracefully...");
-                    })
-                    .await;
+                let result = smelly_connect_cli::commands::proxy::run_proxy(
+                    &config,
+                    &command,
+                    shutdown_signal(),
+                )
+                .await;
                 tracing::info!("shutdown complete");
                 result
             }
@@ -107,5 +105,33 @@ fn main() {
         tracing::error!(error = %err, "command failed");
         eprintln!("{err}");
         std::process::exit(1);
+    }
+}
+
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
+    #[cfg(unix)]
+    let signal = {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut interrupt = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+        let mut terminate = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        async move {
+            tokio::select! {
+                _ = interrupt.recv() => "SIGINT",
+                _ = terminate.recv() => "SIGTERM",
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let signal = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install ctrl-c handler");
+        "SIGINT"
+    };
+
+    async move {
+        let signal = signal.await;
+        tracing::info!("received {signal}, shutting down gracefully...");
     }
 }
